@@ -1,0 +1,6 @@
+forma meat-proxy
+
+icons
+  // Phosphor's (phosphor-icons.com, MIT), regular weight; the Mac draws the SF Symbol.
+  icon.pull-request = icon(sf "arrow.triangle.pull", svg "icons/git-pull-request.svg")
+  icon.stacked = icon(sf "arrow.turn.down.right", svg "icons/arrow-elbow-down-right.svg")

@@ -1,0 +1,13 @@
+test "a signed-out launch starts on Connect GitHub and previews the sample inbox"
+  clock data
+  clock settle
+  expect text "setup-title" == "Connect GitHub"
+  tap "preview-sample"
+  clock data
+  clock settle
+  expect text "status-412" == "Needs reviewer"
+  expect text "status-14" == "Changes requested"
+  tap "filter-drafts"
+  clock data
+  expect tree has "pr-397"
+  expect tree missing "pr-418"
