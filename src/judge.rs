@@ -242,12 +242,12 @@ pub fn rule_judgment(pr: &PullRequest) -> Option<Judgment> {
         !pr.files.is_empty() && pr.files.len() < 40 && pr.files.iter().all(|f| inert_path(f));
     (bot || routine || tiny || inert).then(|| Judgment {
         answers: HashMap::from([
+            // Where on the reading scale: 0 is approve on sight.
             (
-                "trivial".to_owned(),
-                if bot || routine { 0.95 } else { 0.85 },
+                "reading".to_owned(),
+                if bot || routine || inert { 0.03 } else { 0.1 },
             ),
             ("urgent".to_owned(), 0.03),
-            ("risky".to_owned(), 0.05),
         ]),
         by: "rules".into(),
         fingerprint: String::new(),
@@ -276,7 +276,7 @@ fn inert_path(path: &str) -> bool {
 pub fn questions_key(questions: &[Question]) -> String {
     let mut text = String::from(PROMPT_VERSION);
     for q in questions {
-        text.push_str(&format!("|{}:{}", q.id, q.ask));
+        text.push_str(&format!("|{}:{}:{}", q.id, q.ask, q.scale.join("/")));
     }
     format!("{:016x}", crate::sections::fnv(&text))
 }
@@ -393,10 +393,12 @@ fn systemone_request(
     let asked: serde_json::Map<String, serde_json::Value> = questions
         .iter()
         .map(|q| {
-            (
-                q.id.clone(),
-                serde_json::json!({ "type": "noul", "instructions": q.ask }),
-            )
+            let question = if q.scale.is_empty() {
+                serde_json::json!({ "type": "noul", "instructions": q.ask })
+            } else {
+                serde_json::json!({ "type": "score", "instructions": q.ask, "criteria": q.scale })
+            };
+            (q.id.clone(), question)
         })
         .collect();
     serde_json::json!({ "model": cfg.model, "state": facts(pr), "questions": asked })
@@ -410,9 +412,16 @@ pub fn parse_systemone(
 ) -> Result<(Vec<f32>, Usage), String> {
     let mut odds = Vec::new();
     for q in questions {
-        let p = response["answers"][q.id.as_str()]["noul"]
-            .as_f64()
-            .ok_or_else(|| format!("the decision model gave no answer for \"{}\"", q.id))?;
+        let answer = &response["answers"][q.id.as_str()];
+        let p = if q.scale.len() > 1 {
+            // A score is a position on the scale; 0 is the first level and 1 the last.
+            answer["score"]
+                .as_f64()
+                .map(|score| score / (q.scale.len() - 1) as f64)
+        } else {
+            answer["noul"].as_f64()
+        }
+        .ok_or_else(|| format!("the decision model gave no answer for \"{}\"", q.id))?;
         odds.push(p.clamp(0.0, 1.0) as f32);
     }
     let input = response["usage"]["input_tokens"].as_u64().unwrap_or(0);
@@ -575,6 +584,17 @@ pub fn ask(
     questions: &[Question],
     pr: &PullRequest,
 ) -> Result<(Judgment, Usage), String> {
+    // A chat model can only answer yes or no; scale questions need a decision model.
+    let answered: Vec<Question> = if cfg.provider == "systemone" {
+        questions.to_vec()
+    } else {
+        questions
+            .iter()
+            .filter(|q| q.scale.is_empty())
+            .cloned()
+            .collect()
+    };
+    let (questions, all) = (&answered[..], questions);
     let (odds, usage) = if cfg.provider == "systemone" {
         let endpoint = cfg.decisions_url.as_deref().unwrap_or("/systemone");
         let response = post_json(cfg, endpoint, &systemone_request(cfg, pr, questions))?;
@@ -602,7 +622,7 @@ pub fn ask(
         Judgment {
             answers: questions.iter().map(|q| q.id.clone()).zip(odds).collect(),
             by: cfg.model.clone(),
-            fingerprint: fingerprint(pr, &questions_key(questions)),
+            fingerprint: fingerprint(pr, &questions_key(all)),
         },
         usage,
     ))
@@ -785,6 +805,7 @@ mod tests {
             id: "payments".into(),
             ask: "Does it change how money moves?".into(),
             at: 0.6,
+            scale: Vec::new(),
         }];
         let text = prompt(&pr("Refund flow"), &questions);
         assert!(text.contains("1. payments: Does it change how money moves?"));
@@ -810,11 +831,13 @@ mod tests {
                 .contains("Title: Add webhook retries")
         );
         assert_eq!(request["questions"]["urgent"]["type"], "noul");
-        assert!(
-            request["questions"]["risky"]["instructions"]
-                .as_str()
+        assert_eq!(request["questions"]["reading"]["type"], "score");
+        assert_eq!(
+            request["questions"]["reading"]["criteria"]
+                .as_array()
                 .unwrap()
-                .contains("authentication")
+                .len(),
+            4
         );
         assert_eq!(
             request["questions"].as_object().unwrap().len(),
@@ -824,25 +847,24 @@ mod tests {
         let response = json!({
             "model": "jev-1.13.0",
             "answers": {
-                "trivial": { "type": "noul", "noul": 0.04 },
                 "urgent": { "type": "noul", "noul": 0.91 },
-                "risky": { "type": "noul", "noul": 0.5 },
+                "reading": { "type": "score", "score": 1.5, "confidence": 0.7 },
             },
             "usage": { "input_tokens": 1000, "output_tokens": 0 },
         });
         let (odds, usage) = parse_systemone(&response, &questions, 0.042).unwrap();
-        assert_eq!(odds, [0.04, 0.91, 0.5]);
+        assert_eq!(odds, [0.91, 0.5]);
         assert_eq!(usage.prompt_tokens, 1000);
         assert!((usage.cost_usd - 0.000042).abs() < 1e-9);
         // OpenRouter reports the cost itself, and that wins over the configured price.
         let routed = json!({
             "model": "typesafe/jev-1.13-20260917",
-            "answers": { "trivial": { "noul": 0.93 }, "urgent": { "noul": 0.02 }, "risky": { "noul": 0.1 } },
+            "answers": { "urgent": { "noul": 0.02 }, "reading": { "score": 0.3 } },
             "usage": { "input_tokens": 346, "output_tokens": 37, "cost": 0.000014532 },
         });
         let (_, usage) = parse_systemone(&routed, &questions, 0.042).unwrap();
         assert_eq!(usage.cost_usd, 0.000014532);
-        let missing = json!({ "answers": { "trivial": { "noul": 0.1 } } });
+        let missing = json!({ "answers": { "urgent": { "noul": 0.1 } } });
         assert!(parse_systemone(&missing, &questions, 0.0).is_err());
     }
 
@@ -851,7 +873,7 @@ mod tests {
         let mut bot = pr("Update lockfile");
         bot.author = "dependabot".into();
         let j = shortcut(&bot, "k").unwrap();
-        assert!(j.answers["trivial"] > 0.9 && j.by == "rules");
+        assert!(j.answers["reading"] < 0.1 && j.by == "rules");
         let mut tiny = pr("Fix label");
         tiny.additions = 1;
         tiny.deletions = 1;
@@ -930,6 +952,7 @@ mod tests {
             id: "payments".into(),
             ask: "Money?".into(),
             at: 0.6,
+            scale: Vec::new(),
         });
         assert_eq!(super::plan(&prs, attention, &cache, &cfg, &more).cached, 0);
         // Pull requests that are only watched, and layouts that ask nothing, send nothing.

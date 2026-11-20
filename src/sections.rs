@@ -16,17 +16,22 @@ use std::collections::HashMap;
 
 const DEFAULT_JSON: &str = r#"{
   "questions": [
-    { "id": "trivial", "at": 0.75, "ask": "Judging by the files and description, is it a typo, docs, tests only, formatting, a rename, a dependency bump, a translation or generated code, safe to skim without reading the diff?" },
     { "id": "urgent", "at": 0.6, "ask": "Does the title or description itself state time pressure: a deadline, a customer or release waiting on it, an outage or production incident, or the words urgent, asap, hotfix or blocker? An ordinary bug fix, feature or improvement is NOT urgent." },
-    { "id": "risky", "at": 0.6, "ask": "Do the changed file paths or the description show the main change is in authentication, authorization, payments or money, data migrations, security, or deploy and infrastructure config (CI, Dockerfiles, terraform)? Judge the change, not words mentioned in passing." }
+    { "id": "reading", "at": 0.67, "ask": "How much reading does a reviewer need before approving this pull request? Judge from the changed file paths and the description.",
+      "scale": [
+        "Approve on sight: mechanical or trivial (typos, docs, renames, generated code, dependency or version bumps, snapshots)",
+        "Quick read: small, self-contained, low-risk change",
+        "Careful read: changes logic or behaviour, touches several areas, or needs context to judge",
+        "Deep review: security, auth, payments, data migrations, infrastructure, or a large or cross-cutting change"
+      ] }
   ],
   "sections": [
     { "name": "Merge these", "when": ["is:approved"] },
     { "name": "Hotfixes", "when": ["asked:me", "title:hotfix"] },
     { "name": "Security", "when": ["asked:me", "title:security"] },
     { "name": "Do first", "when": ["asked:me", "urgent"] },
-    { "name": "Read carefully", "when": ["asked:me", "risky"] },
-    { "name": "Approve at will", "when": ["asked:me", "trivial"] },
+    { "name": "Read carefully", "when": ["asked:me", "reading>=0.67"] },
+    { "name": "Approve at will", "when": ["asked:me", "reading<0.2", "lines<400"] },
     { "name": "Big reviews", "when": ["asked:me", "lines>=600"] },
     { "name": "Review these", "when": ["asked:me"] },
     { "name": "Address feedback", "when": ["is:changes-requested"] },
@@ -44,6 +49,10 @@ pub struct Question {
     /// The probability of yes from which the answer counts as yes.
     #[serde(default = "default_at")]
     pub at: f32,
+    /// Ordered levels, lowest first. With levels it is a score question: the answer is the
+    /// position between 0 (first level) and 1 (last), and `at` is where it counts as high.
+    #[serde(default)]
+    pub scale: Vec<String>,
 }
 
 fn default_at() -> f32 {
@@ -84,6 +93,8 @@ enum Term {
     Label(String),
     Title(String),
     Question(String),
+    /// A score question's position compared with a number: `reading>=0.67`.
+    Level(String, Cmp, f32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,7 +114,7 @@ impl Section {
     pub fn uses_model(&self) -> bool {
         self.when
             .iter()
-            .any(|c| matches!(c.term, Term::Question(_)))
+            .any(|c| matches!(c.term, Term::Question(_) | Term::Level(..)))
     }
 }
 
@@ -206,7 +217,7 @@ impl Layout {
     pub fn needed_questions(&self) -> Vec<Question> {
         let mut used: Vec<&str> = Vec::new();
         for cond in self.sections.iter().flat_map(|s| &s.when) {
-            if let Term::Question(id) = &cond.term
+            if let Term::Question(id) | Term::Level(id, ..) = &cond.term
                 && !used.contains(&id.as_str())
             {
                 used.push(id);
@@ -262,6 +273,12 @@ impl Layout {
             Term::Author(glob) => wildcard(glob, &pr.author),
             Term::Label(label) => pr.labels.iter().any(|l| l.eq_ignore_ascii_case(label)),
             Term::Title(text) => pr.title.to_lowercase().contains(&text.to_lowercase()),
+            Term::Level(id, cmp, n) => subject.answers.get(id).is_some_and(|p| match cmp {
+                Cmp::Ge => p >= n,
+                Cmp::Gt => p > n,
+                Cmp::Le => p <= n,
+                Cmp::Lt => p < n,
+            }),
             Term::Question(id) => {
                 let at = self
                     .questions
@@ -338,6 +355,26 @@ fn parse_cond(word: &str, question_ids: &[&str]) -> Result<Cond, String> {
                     "title" => Term::Title(value),
                     _ => return Err(format!("\"{word}\" is not a condition")),
                 }
+            } else if let Some((id, cmp, number)) = [">=", "<=", ">", "<"].iter().find_map(|op| {
+                let (left, right) = rest.split_once(op)?;
+                let cmp = match *op {
+                    ">=" => Cmp::Ge,
+                    "<=" => Cmp::Le,
+                    ">" => Cmp::Gt,
+                    _ => Cmp::Lt,
+                };
+                question_ids
+                    .contains(&left.trim())
+                    .then(|| {
+                        (
+                            left.trim().to_owned(),
+                            cmp,
+                            right.trim().parse::<f32>().ok(),
+                        )
+                    })
+                    .and_then(|(id, cmp, n)| n.map(|n| (id, cmp, n)))
+            }) {
+                Term::Level(id, cmp, number)
             } else if question_ids.contains(&rest) {
                 Term::Question(rest.to_owned())
             } else {
@@ -411,11 +448,11 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_parse_and_ask_three_questions() {
+    fn the_defaults_parse_and_ask_two_questions() {
         let layout = Layout::default();
         assert_eq!(layout.sections.len(), 12);
         assert_eq!(layout.sections[0].name, "Merge these");
-        assert_eq!(layout.needed_questions().len(), 3);
+        assert_eq!(layout.needed_questions().len(), 2);
         assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());
     }
 
@@ -434,19 +471,29 @@ mod tests {
             name(&layout, &subject(&pr, assigned, &none)).as_deref(),
             Some("Review these")
         );
-        // Big and trivial: trivial is listed first, so it wins.
         pr.additions = 900;
         assert_eq!(
             name(&layout, &subject(&pr, assigned, &none)).as_deref(),
             Some("Big reviews")
         );
-        let trivial = HashMap::from([("trivial".to_owned(), 0.9)]);
+        // Big is never approved on sight, whatever the model says.
+        let skim = HashMap::from([("reading".to_owned(), 0.05)]);
         assert_eq!(
-            name(&layout, &subject(&pr, assigned, &trivial)).as_deref(),
+            name(&layout, &subject(&pr, assigned, &skim)).as_deref(),
+            Some("Big reviews")
+        );
+        pr.additions = 40;
+        assert_eq!(
+            name(&layout, &subject(&pr, assigned, &skim)).as_deref(),
             Some("Approve at will")
         );
-        // Urgent beats trivial.
-        let both = HashMap::from([("trivial".to_owned(), 0.9), ("urgent".to_owned(), 0.8)]);
+        let deep = HashMap::from([("reading".to_owned(), 0.9)]);
+        assert_eq!(
+            name(&layout, &subject(&pr, assigned, &deep)).as_deref(),
+            Some("Read carefully")
+        );
+        // Urgent beats both.
+        let both = HashMap::from([("reading".to_owned(), 0.05), ("urgent".to_owned(), 0.8)]);
         assert_eq!(
             name(&layout, &subject(&pr, assigned, &both)).as_deref(),
             Some("Do first")

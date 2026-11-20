@@ -3662,17 +3662,17 @@ fn seed_preview(s: &mut App) {
     s.last_synced = Some(std::time::Instant::now());
     // What a model would have said about some of the demo review requests, and a rule about one.
     let model = "gpt-4o-mini";
-    for (id, trivial, urgent, risky, by) in [
-        ("acme/engine#418", 0.04, 0.83, 0.12, model),
-        ("acme/cli#904", 0.03, 0.04, 0.81, model),
-        ("acme/cli#910", 0.95, 0.03, 0.05, "rules"),
-        ("acme/engine#920", 0.1, 0.05, 0.12, model),
-        ("acme/cli#931", 0.96, 0.02, 0.03, model),
+    for (id, reading, urgent, by) in [
+        ("acme/engine#418", 0.5, 0.83, model),
+        ("acme/cli#904", 0.9, 0.04, model),
+        ("acme/cli#910", 0.03, 0.03, "rules"),
+        ("acme/engine#920", 0.45, 0.05, model),
+        ("acme/cli#931", 0.05, 0.02, model),
     ] {
         s.judgments.insert(
             id.to_owned(),
             judge::Judgment {
-                answers: [("trivial", trivial), ("urgent", urgent), ("risky", risky)]
+                answers: [("reading", reading), ("urgent", urgent)]
                     .into_iter()
                     .map(|(q, p)| (q.to_owned(), p))
                     .collect(),
@@ -4187,7 +4187,7 @@ mod tests {
         state.ai_enabled = true;
         state.judgments.insert(
             pr.id.clone(),
-            said(&[("trivial", 0.9), ("urgent", 0.02), ("risky", 0.02)], "m"),
+            said(&[("reading", 0.05), ("urgent", 0.02)], "m"),
         );
         assert_eq!(
             section_name(&state, &pr).as_deref(),
@@ -4195,21 +4195,20 @@ mod tests {
         );
         state
             .judgments
-            .insert(huge.id.clone(), said(&[("trivial", 0.95)], "m"));
+            .insert(huge.id.clone(), said(&[("reading", 0.02)], "m"));
         assert_eq!(
             section_name(&state, &huge).as_deref(),
-            Some("Approve at will"),
-            "trivial beats big"
+            Some("Big reviews"),
+            "big is never approved on sight"
         );
         state.judgments.insert(
             pr.id.clone(),
-            said(&[("trivial", 0.9), ("urgent", 0.7)], "m"),
+            said(&[("reading", 0.05), ("urgent", 0.7)], "m"),
         );
         assert_eq!(section_name(&state, &pr).as_deref(), Some("Do first"));
-        state.judgments.insert(
-            pr.id.clone(),
-            said(&[("trivial", 0.9), ("risky", 0.8)], "m"),
-        );
+        state
+            .judgments
+            .insert(pr.id.clone(), said(&[("reading", 0.9)], "m"));
         assert_eq!(section_name(&state, &pr).as_deref(), Some("Read carefully"));
         // Mine are never moved by a question: they keep their own sections.
         let mine = state
@@ -4220,7 +4219,7 @@ mod tests {
             .clone();
         state
             .judgments
-            .insert(mine.id.clone(), said(&[("trivial", 0.99)], "m"));
+            .insert(mine.id.clone(), said(&[("reading", 0.01)], "m"));
         assert_eq!(section_name(&state, &mine).as_deref(), Some("Merge these"));
     }
 
