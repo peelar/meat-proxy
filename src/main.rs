@@ -26,9 +26,21 @@ const ARMED_SECS: f32 = 4.0;
 /// How long a merged PR's row celebrates before it leaves the list.
 const CELEBRATION_SECS: f32 = 1.9;
 
-const DEFAULT_GROUP_ORDER: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
-/// Review requests the model judged trivial, split off from the ones worth reading.
-const SKIM_GROUP: (u8, &str) = (7, "Skim these");
+/// What to do first, then what to read, then the rest, until the user drags groups elsewhere.
+const DEFAULT_GROUP_ORDER: [u8; 11] = [8, 9, 0, 10, 1, 2, 3, 7, 4, 5, 6];
+/// Review requests are split by how to review them. The model decides these three (the brain
+/// marks them); size is a plain rule.
+const DO_FIRST: (u8, &str) = (8, "Do first");
+const READ_CAREFULLY: (u8, &str) = (9, "Read carefully");
+const APPROVE_AT_WILL: (u8, &str) = (7, "Approve at will");
+const BIG_REVIEWS: (u8, &str) = (10, "Big reviews");
+/// A review this large wants time set aside, whatever it says.
+const BIG_PR_LINES: u32 = 600;
+
+/// Whether a model, not a rule, decides what belongs in this group.
+fn model_group(group: u8) -> bool {
+    matches!(group, 7..=9)
+}
 
 fn current_epoch_hour() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64 / 3600
@@ -264,12 +276,23 @@ impl App {
         self.judgments.get(&pr.id)
     }
 
-    /// The Inbox group of a pull request: what it asks of you, except that a review request the
-    /// model found trivial moves to its own group.
+    /// The Inbox group of a pull request: what it asks of you. A review request is split by how
+    /// to review it: urgent ones first, risky ones to read carefully, huge ones to schedule, and
+    /// trivial ones (however long) to approve at will. Without a judgment it stays where its request put it.
     fn action_group_of(&self, pr: &PullRequest, attention: PrAttention) -> (u8, &'static str) {
         let group = attention.action_group();
-        if matches!(group.0, 0 | 3) && self.judgment(pr).is_some_and(judge::Judgment::is_skim) {
-            SKIM_GROUP
+        if !matches!(group.0, 0 | 3) {
+            return group;
+        }
+        let judgment = self.judgment(pr);
+        if judgment.is_some_and(judge::Judgment::is_urgent) {
+            DO_FIRST
+        } else if judgment.is_some_and(judge::Judgment::is_risky) {
+            READ_CAREFULLY
+        } else if judgment.is_some_and(judge::Judgment::is_skim) {
+            APPROVE_AT_WILL
+        } else if pr.additions + pr.deletions >= BIG_PR_LINES {
+            BIG_REVIEWS
         } else {
             group
         }
@@ -1622,6 +1645,18 @@ const CLOSE: rune::Icon = rune::Icon {
     body: r#"<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/>"#,
 };
 
+/// Marks what a model decided, as opposed to a rule: a brain, two lobes with a fold in each.
+const BRAIN: rune::Icon = rune::Icon {
+    name: "model-brain",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 3.4C8 2.3 7.1 1.7 6.2 2c-1-.4-2.2.3-2.1 1.4-1.1.2-1.8 1.4-1.2 2.4C2 6.5 2 7.8 2.9 8.4c-.2 1.1.5 2.1 1.6 2.2.2 1.1 1.3 1.8 2.3 1.5.4.5.8.6 1.2.6"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 3.4C8 2.3 8.9 1.7 9.8 2c1-.4 2.2.3 2.1 1.4 1.1.2 1.8 1.4 1.2 2.4.9.7.9 2 0 2.6.2 1.1-.5 2.1-1.6 2.2-.2 1.1-1.3 1.8-2.3 1.5-.4.5-.8.6-1.2.6"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 3.4v9.1"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M4.2 5.2c1 .2 1.7.9 1.8 1.8M11.8 5.2c-1 .2-1.7.9-1.8 1.8M4.5 10.6c.9-.2 1.5-.8 1.6-1.6M11.5 10.6c-.9-.2-1.5-.8-1.6-1.6"/>"#,
+};
+
+/// The color of anything a model decided, so it reads as one thing apart from the rules.
+fn model_ink(k: &Kit) -> Color {
+    oklch(if k.dark { 0.8 } else { 0.5 }, 0.12, 295.0)
+}
+
 const GRIP: rune::Icon = rune::Icon {
     name: "drag-handle",
     view: 16.0,
@@ -1739,23 +1774,32 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .child(text(pr.age_label()).font(k.ty.small).color(c.text_muted))
         .child(el().size(1.0, 10.0).fill(c.border_base))
         .child(text(status).font(k.ty.small_medium).color(tone));
-    if let Some(judgment) = s.judgment(pr) {
-        // One quiet word at most: what the model thinks should change how you review it.
-        let tag = if judgment.is_urgent() {
-            Some(("urgent", c.danger.fg))
+    // A brain marks what the model judged; a rule's verdict needs none. The group already says
+    // what it means in the Inbox, so the word only appears where there are no such groups.
+    if let Some(judgment) = s
+        .judgment(pr)
+        .filter(|j| j.by != "rules" && (j.is_urgent() || j.is_risky() || j.is_skim()))
+    {
+        let word = if s.filter == InboxFilter::Inbox {
+            None
+        } else if judgment.is_urgent() {
+            Some("urgent")
         } else if judgment.is_risky() {
-            Some(("read carefully", c.warning.fg))
+            Some("read carefully")
+        } else if judgment.is_skim() {
+            Some("trivial")
         } else {
             None
         };
-        if let Some((word, color)) = tag {
-            metadata = metadata.child(
-                text(word)
-                    .font(k.ty.small)
-                    .color(color)
-                    .help(judgment.summary()),
-            );
+        let mut mark = row()
+            .center_y()
+            .gap(4.0)
+            .help(judgment.summary())
+            .child(rune::icon(&BRAIN, 12.0).color(model_ink(k)));
+        if let Some(word) = word {
+            mark = mark.child(text(word).font(k.ty.small).color(model_ink(k)));
         }
+        metadata = metadata.child(mark);
     }
     if let Some(parent) = item.parent {
         metadata = metadata.child(
@@ -2427,7 +2471,14 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                                 text(in_group.to_string())
                                     .font(k.ty.small)
                                     .color(c.text_faint),
-                            ),
+                            )
+                            .child(if model_group(position) {
+                                rune::icon(&BRAIN, 13.0)
+                                    .color(model_ink(k))
+                                    .help("Sorted by a model that read each title and description. Rules alone can't tell these apart.")
+                            } else {
+                                el()
+                            }),
                     ),
             )
             .child(el().w_full().h(1.0).fill(c.border_weak));
@@ -2941,10 +2992,14 @@ fn seed_preview(s: &mut App) {
     s.prs = github::demo_prs();
     s.repos = github::infer_repos_from_prs(&s.prs, &[]);
     s.last_synced = Some(std::time::Instant::now());
-    // What the model would have said about the two review requests in the demo data.
-    for (id, trivial, urgent, risky) in [
-        ("acme/engine#418", 0.04, 0.83, 0.12),
-        ("acme/cli#904", 0.93, 0.02, 0.03),
+    // What a model would have said about some of the demo review requests, and a rule about one.
+    let model = "gpt-4o-mini";
+    for (id, trivial, urgent, risky, by) in [
+        ("acme/engine#418", 0.04, 0.83, 0.12, model),
+        ("acme/cli#904", 0.03, 0.04, 0.81, model),
+        ("acme/cli#910", 0.95, 0.03, 0.05, "rules"),
+        ("acme/engine#920", 0.1, 0.05, 0.12, model),
+        ("acme/cli#931", 0.96, 0.02, 0.03, model),
     ] {
         s.judgments.insert(
             id.to_owned(),
@@ -2952,7 +3007,7 @@ fn seed_preview(s: &mut App) {
                 trivial,
                 urgent,
                 risky,
-                by: "gpt-4o-mini".into(),
+                by: by.into(),
                 fingerprint: String::new(),
             },
         );
@@ -3186,7 +3241,7 @@ mod tests {
             .unwrap();
 
         let snap = db.load_snapshot().unwrap();
-        assert_eq!(snap.prs.len(), 9);
+        assert_eq!(snap.prs.len(), 14);
         assert_eq!(snap.repos.len(), 3);
 
         let pr_418 = snap.prs.iter().find(|p| p.number == 418).unwrap();
@@ -3301,13 +3356,14 @@ mod tests {
     fn inbox_groups_can_be_dragged_and_folded() {
         let mut state = init();
         state.preview = true;
-        assert_eq!(state.group_rank(0), 0);
+        assert_eq!(state.group_rank(8), 0, "do first leads");
+        assert_eq!(state.group_rank(0), 2);
         // Groups 0, 2 and 4 are on screen; drag the last to the top.
         state.drop_group(&[0, 2, 4], 2, 0);
-        assert_eq!(state.group_order, [4, 0, 1, 2, 3, 5, 6, 7]);
+        assert_eq!(state.group_order, [8, 9, 4, 0, 10, 1, 2, 3, 7, 5, 6]);
         // Drag the first to the bottom of what is shown: it lands after group 2.
         state.drop_group(&[4, 0, 2], 0, 2);
-        assert_eq!(state.group_order, [0, 1, 2, 4, 3, 5, 6, 7]);
+        assert_eq!(state.group_order, [8, 9, 0, 10, 1, 2, 4, 3, 7, 5, 6]);
 
         state.toggle_collapse_group(2);
         assert_eq!(state.collapsed_groups, [2]);
@@ -3326,7 +3382,7 @@ mod tests {
     }
 
     #[test]
-    fn trivial_review_requests_get_their_own_group_and_urgent_ones_lead() {
+    fn review_requests_are_split_by_how_to_review_them() {
         let mut state = init();
         state.preview = true;
         state.prs = github::demo_prs();
@@ -3349,16 +3405,31 @@ mod tests {
         state
             .judgments
             .insert(pr_904.id.clone(), judged(0.9, 0.02, 0.02));
-        assert_eq!(state.action_group_of(&pr_904, att), SKIM_GROUP);
-        // A trivial change that is also urgent, or risky, is not for skimming.
+        assert_eq!(state.action_group_of(&pr_904, att), APPROVE_AT_WILL);
+        // A trivial change that is also urgent, or risky, is not for approving at will.
         state
             .judgments
             .insert(pr_904.id.clone(), judged(0.9, 0.7, 0.02));
-        assert_eq!(state.action_group_of(&pr_904, att).0, 0);
+        assert_eq!(state.action_group_of(&pr_904, att), DO_FIRST);
         state
             .judgments
             .insert(pr_904.id.clone(), judged(0.9, 0.02, 0.8));
-        assert_eq!(state.action_group_of(&pr_904, att).0, 0);
+        assert_eq!(state.action_group_of(&pr_904, att), READ_CAREFULLY);
+        // Size is a plain rule and needs no judgment. A trivial change is approved at will however long it
+        // is, and an urgent one still comes first.
+        let mut huge = pr_904.clone();
+        huge.additions = BIG_PR_LINES;
+        state.judgments.remove(&huge.id);
+        assert_eq!(state.action_group_of(&huge, att), BIG_REVIEWS);
+        state
+            .judgments
+            .insert(huge.id.clone(), judged(0.95, 0.02, 0.02));
+        assert_eq!(state.action_group_of(&huge, att), APPROVE_AT_WILL);
+        state
+            .judgments
+            .insert(huge.id.clone(), judged(0.1, 0.9, 0.02));
+        assert_eq!(state.action_group_of(&huge, att), DO_FIRST);
+        state.judgments.remove(&pr_904.id);
         // Pull requests of mine are never moved.
         let mine = state
             .prs

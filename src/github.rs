@@ -853,7 +853,7 @@ pub fn infer_repos_from_prs(prs: &[PullRequest], existing: &[RepoConfig]) -> Vec
 }
 
 pub fn demo_prs() -> Vec<PullRequest> {
-    vec![
+    let mut prs = vec![
         // --- acme/engine (High priority repo: assigned PRs + stale draft + unreviewed open PR) ---
         PullRequest {
             id: "acme/engine#418".to_string(),
@@ -1121,7 +1121,94 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
         },
-    ]
+    ];
+    let base = prs[0].clone();
+    let review = |repo: &str,
+                  number: u64,
+                  title: &str,
+                  author: &str,
+                  external: bool,
+                  team: bool,
+                  size: (u32, u32),
+                  idle: u64| {
+        let mut pr = base.clone();
+        pr.id = format!("{repo}#{number}");
+        pr.repo = repo.into();
+        pr.number = number;
+        pr.title = title.into();
+        pr.url = format!("https://github.com/{repo}/pull/{number}");
+        pr.author = author.into();
+        pr.external = external;
+        pr.incoming_reason = if team {
+            IncomingReason::TeamReviewRequested
+        } else {
+            IncomingReason::AssignedOrReviewRequested
+        };
+        pr.matched_rule = None;
+        pr.reviewers = if team {
+            Vec::new()
+        } else {
+            vec!["mira".into()]
+        };
+        pr.head_ref = format!("demo-{number}");
+        pr.head_repo = Some(repo.into());
+        pr.stack_base = None;
+        (pr.additions, pr.deletions) = size;
+        pr.idle_hours = idle;
+        pr.unreviewed_hours = idle;
+        pr
+    };
+    prs.push(review(
+        "acme/cli",
+        910,
+        "docs: fix typos in the contributing guide",
+        "juno",
+        true,
+        false,
+        (4, 4),
+        7,
+    ));
+    prs.push(review(
+        "acme/cli",
+        912,
+        "parser: migrate the command parser to the new tokenizer",
+        "kai",
+        false,
+        false,
+        (1240, 860),
+        9,
+    ));
+    prs.push(review(
+        "acme/engine",
+        920,
+        "webhooks: retry deliveries with exponential backoff",
+        "sam",
+        false,
+        false,
+        (96, 31),
+        11,
+    ));
+    prs.push(review(
+        "acme/engine",
+        925,
+        "metrics: export the queue depth gauge",
+        "kai",
+        false,
+        true,
+        (58, 6),
+        13,
+    ));
+    prs.push(review(
+        "acme/cli",
+        931,
+        "i18n: update the Polish translations",
+        "juno",
+        true,
+        true,
+        (310, 290),
+        15,
+    ));
+    prs
 }
 
 #[cfg(test)]

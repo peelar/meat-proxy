@@ -28,7 +28,7 @@ higher version.
 
 ## Judgments (experimental)
 
-meat proxy can ask a language model three yes/no questions about the review requests sent to you: is it trivial, is it urgent, is it risky. The answers are probabilities read from the model's token log-probabilities. Trivial ones move to a "Skim these" group, urgent ones lead their group, and risky ones say "read carefully".
+meat proxy can ask a language model three yes/no questions about the review requests sent to you: is it trivial, is it urgent, is it risky. The answers are probabilities read from the model's token log-probabilities, and they split review requests into groups: **Do first** (urgent), **Read carefully** (risky), **Approve at will** (trivial). A brain marks every group and row a model decided; rules need none. **Big reviews** (600 lines or more) is a plain rule and works without a model.
 
 Cheap rules answer first (bots, dependency bumps, one-line changes). A pull request is sent to the model only when it asks something of you, is in a public repository, and its text changed since it was last judged. Each sync sends at most 30, and the app stops asking after $0.25 in one run.
 

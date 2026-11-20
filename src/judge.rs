@@ -26,6 +26,8 @@ const DEFAULT_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 const BODY_CHARS: usize = 1400;
 const PARALLEL_CALLS: usize = 4;
+/// Raise it when the questions or the rules change, so verdicts made under the old ones are redone.
+const PROMPT_VERSION: &str = "2";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Judgment {
@@ -166,6 +168,7 @@ pub fn fingerprint(pr: &PullRequest) -> String {
             hash = hash.wrapping_mul(0x100000001b3);
         }
     };
+    feed(PROMPT_VERSION.as_bytes());
     feed(pr.repo.as_bytes());
     feed(pr.title.as_bytes());
     feed(pr.author.as_bytes());
@@ -447,7 +450,11 @@ pub fn plan(
             continue;
         }
         let fp = fingerprint(pr);
-        if cache.get(&pr.id).is_some_and(|j| j.fingerprint == fp) {
+        // A verdict stands while the text is the same and it came from the model in use (or a rule).
+        if cache
+            .get(&pr.id)
+            .is_some_and(|j| j.fingerprint == fp && (j.by == "rules" || j.by == cfg.model))
+        {
             plan.cached += 1;
         } else if let Some(judgment) = shortcut(pr) {
             plan.settled.push((pr.id.clone(), judgment));
@@ -574,6 +581,15 @@ mod tests {
         );
         let plan = plan(&prs, |_| PrAttention::IncomingAssigned, &cache, &cfg);
         assert_eq!(plan.cached, 1);
+        let other = JudgeConfig {
+            model: "another/model".into(),
+            ..cfg.clone()
+        };
+        assert_eq!(
+            super::plan(&prs, |_| PrAttention::IncomingAssigned, &cache, &other).cached,
+            0,
+            "a new model redoes the verdicts"
+        );
         assert_eq!(plan.settled.len(), 1);
         let asked: Vec<_> = plan.to_ask.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(asked, ["o/r#1", "o/r#2"], "newest first, capped");

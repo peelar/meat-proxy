@@ -176,6 +176,12 @@ impl Database {
             }
             tx.commit()?;
         }
+        // The Inbox groups changed: an order saved for the old set would bury the new ones.
+        if self.get_setting("inbox_group_version")?.as_deref() != Some("2") {
+            self.conn
+                .execute("DELETE FROM settings WHERE key = 'inbox_group_order'", [])?;
+            self.set_setting("inbox_group_version", "2")?;
+        }
         // Rules an early version seeded: one repeats the built-in searches, the other watched a
         // repository this app has no reason to know about.
         self.conn.execute(
