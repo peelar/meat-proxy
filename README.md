@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="snapshots/onboarding-dark.gif">
-  <img alt="First launch: a finger presses the approve button and the logo flies into the header, then you sign in to the GitHub CLI, turn on notifications, and open the inbox" src="snapshots/onboarding-light.gif">
+  <img alt="First launch: a finger presses the approve button, then you connect the GitHub CLI, turn on notifications, and open the inbox" src="snapshots/onboarding-light.gif">
 </picture>
 
 # meat proxy
