@@ -32,13 +32,19 @@ The Inbox tab is a list of sections: Merge these, Hotfixes, Security, Do first, 
 
 Most sections are plain rules (who asked, size, title, author). Three (Do first, Read carefully, Approve at will) can also use a language model's yes/no answers, and a brain marks them. The model answers with a probability read from its token log-probabilities. It is asked only about review requests sent to you, and only when a cheap rule (bots, dependency bumps, one-line changes) does not already know. Answers are cached until the text changes, private repositories are never sent, each sync sends at most 30, and the app stops after $0.25 in one run. "Sorted by rules" ignores the model entirely, and without a key the Inbox runs on rules alone.
 
-To turn the model on create `~/.config/meat-proxy/judge.json`. Any OpenAI-compatible endpoint works, and the model must return log-probabilities:
+To turn the model on create `~/.config/meat-proxy/judge.json`. Two kinds of endpoint work. A **decision model** (TypeSafe's Jev, or `ggml-org/Kev-4B-GGUF` served by llama.cpp) takes a state and typed yes/no questions at `/v1/systemone` and returns probabilities itself (`"provider": "systemone"`). Any **OpenAI-compatible chat model** that returns token log-probabilities can stand in for one (`"provider": "chat"`, the default):
+
+```json
+{ "provider": "systemone", "base_url": "https://api.typesafe.ai/v1", "api_key": "…", "model": "jev-latest", "input_usd_per_million": 0.042 }
+```
+
+The chat stand-in looks like this:
 
 ```json
 { "base_url": "https://openrouter.ai/api/v1", "api_key": "…", "model": "openai/gpt-4o-mini" }
 ```
 
-`include_private`, `max_per_sync` and `max_spend_usd` are optional. `MEAT_PROXY_JUDGE_URL`, `_KEY` and `_MODEL` override the file. `meat-proxy --judge-eval` prints the section of each of your open pull requests without opening a window.
+`include_private`, `max_per_sync`, `max_spend_usd` and `input_usd_per_million` are optional. `MEAT_PROXY_JUDGE_URL`, `_KEY`, `_MODEL` and `_PROVIDER` override the file. `meat-proxy --judge-eval` prints the section of each of your open pull requests without opening a window.
 
 ## Build from source
 

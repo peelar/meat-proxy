@@ -6,6 +6,11 @@
 //! (merge readiness, who the author is, how long it has waited) stays in code: the model only
 //! answers what needs reading. Which questions exist, and what a "yes" does, is in `sections`.
 //!
+//! Two kinds of endpoint can answer. A decision model (TypeSafe's Jev, `ggml-org/Kev-4B-GGUF` under
+//! llama.cpp) takes a state and typed questions at `/v1/systemone` and returns probabilities
+//! natively: `provider: "systemone"`. Any OpenAI-compatible chat model that returns token
+//! log-probabilities can stand in for one: `provider: "chat"`, the default.
+//!
 //! A model costs money and time, so it is the last resort. A pull request goes to it only when
 //! it asks something of the user, lives in a repository whose text may leave the machine, has
 //! changed since it was last judged, and no cheap rule already knows the answer.
@@ -60,6 +65,13 @@ pub struct JudgeConfig {
     pub api_key: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// "chat" (an OpenAI-compatible chat model read through its log-probabilities, the default) or
+    /// "systemone" (a decision model's `/systemone` endpoint, which returns probabilities itself).
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// What a million input tokens cost, for the spending cap, when the endpoint does not say.
+    #[serde(default)]
+    pub input_usd_per_million: f64,
     /// Send text from private repositories too. Off: they are never sent.
     #[serde(default)]
     pub include_private: bool,
@@ -73,6 +85,9 @@ pub struct JudgeConfig {
 
 fn default_url() -> String {
     DEFAULT_URL.into()
+}
+fn default_provider() -> String {
+    "chat".into()
 }
 fn default_model() -> String {
     DEFAULT_MODEL.into()
@@ -96,6 +111,8 @@ impl JudgeConfig {
             base_url: default_url(),
             api_key: String::new(),
             model: default_model(),
+            provider: default_provider(),
+            input_usd_per_million: 0.0,
             include_private: false,
             max_per_sync: default_max_per_sync(),
             max_spend_usd: default_max_spend(),
@@ -108,6 +125,9 @@ impl JudgeConfig {
         }
         if let Ok(model) = std::env::var("MEAT_PROXY_JUDGE_MODEL") {
             cfg.model = model;
+        }
+        if let Ok(provider) = std::env::var("MEAT_PROXY_JUDGE_PROVIDER") {
+            cfg.provider = provider;
         }
         // A local server needs no key; a hosted one without a key would only fail.
         let local = cfg.base_url.contains("localhost") || cfg.base_url.contains("127.0.0.1");
@@ -214,21 +234,16 @@ fn tidy(body: &str) -> String {
     clip(&lines.join("\n"), BODY_CHARS)
 }
 
-fn prompt(pr: &PullRequest, questions: &[Question]) -> String {
+/// What a model is told about the pull request, without the questions.
+fn facts(pr: &PullRequest) -> String {
     let labels = if pr.labels.is_empty() {
         "none".to_owned()
     } else {
         pr.labels.join(", ")
     };
     let body = tidy(&pr.body);
-    let asked: String = questions
-        .iter()
-        .enumerate()
-        .map(|(n, q)| format!("{}. {}: {}\n", n + 1, q.id, q.ask))
-        .collect();
     format!(
-        "Pull request in {repo}\nTitle: {title}\nAuthor: {author}{external}\nLabels: {labels}\nSize: +{add} -{del}\nBranch: {branch}\nDescription:\n{body}\n\n\
-         Answer {n} yes/no question{s} about this pull request, in this order, as {n} letter{s} Y or N separated by spaces. Nothing else. Most pull requests are routine, so answer N unless the text clearly says otherwise.\n{asked}",
+        "Pull request in {repo}\nTitle: {title}\nAuthor: {author}{external}\nLabels: {labels}\nSize: +{add} -{del}\nBranch: {branch}\nDescription:\n{body}",
         repo = pr.repo,
         title = pr.title,
         author = pr.author,
@@ -241,9 +256,63 @@ fn prompt(pr: &PullRequest, questions: &[Question]) -> String {
         del = pr.deletions,
         branch = pr.head_ref,
         body = if body.is_empty() { "(none)" } else { &body },
-        n = questions.len(),
-        s = if questions.len() == 1 { "" } else { "s" },
     )
+}
+
+/// The chat stand-in's prompt: the facts, then the questions and how to answer them.
+fn prompt(pr: &PullRequest, questions: &[Question]) -> String {
+    let asked: String = questions
+        .iter()
+        .enumerate()
+        .map(|(n, q)| format!("{}. {}: {}\n", n + 1, q.id, q.ask))
+        .collect();
+    let (n, s) = (questions.len(), if questions.len() == 1 { "" } else { "s" });
+    format!(
+        "{facts}\n\nAnswer {n} yes/no question{s} about this pull request, in this order, as {n} letter{s} Y or N separated by spaces. Nothing else. Most pull requests are routine, so answer N unless the text clearly says otherwise.\n{asked}",
+        facts = facts(pr),
+    )
+}
+
+/// A decision model's request: the state, and one yes/no (`noul`) question per id.
+fn systemone_request(
+    cfg: &JudgeConfig,
+    pr: &PullRequest,
+    questions: &[Question],
+) -> serde_json::Value {
+    let asked: serde_json::Map<String, serde_json::Value> = questions
+        .iter()
+        .map(|q| {
+            (
+                q.id.clone(),
+                serde_json::json!({ "type": "noul", "instructions": q.ask }),
+            )
+        })
+        .collect();
+    serde_json::json!({ "model": cfg.model, "state": facts(pr), "questions": asked })
+}
+
+/// The probability of yes for each question, from a decision model's response.
+pub fn parse_systemone(
+    response: &serde_json::Value,
+    questions: &[Question],
+    input_usd_per_million: f64,
+) -> Result<(Vec<f32>, Usage), String> {
+    let mut odds = Vec::new();
+    for q in questions {
+        let p = response["answers"][q.id.as_str()]["noul"]
+            .as_f64()
+            .ok_or_else(|| format!("the decision model gave no answer for \"{}\"", q.id))?;
+        odds.push(p.clamp(0.0, 1.0) as f32);
+    }
+    let input = response["usage"]["input_tokens"].as_u64().unwrap_or(0);
+    Ok((
+        odds,
+        Usage {
+            prompt_tokens: input,
+            completion_tokens: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
+            cost_usd: input as f64 * input_usd_per_million / 1e6,
+        },
+    ))
 }
 
 /// What one call used, as the provider reports it.
@@ -320,7 +389,11 @@ pub fn parse_answers(
     }
 }
 
-fn post_chat(cfg: &JudgeConfig, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn post_json(
+    cfg: &JudgeConfig,
+    endpoint: &str,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     // The body goes through a private temp file and the key through curl's stdin, so neither shows in `ps`.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -341,7 +414,7 @@ fn post_chat(cfg: &JudgeConfig, request: &serde_json::Value) -> Result<serde_jso
     }
     let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let config = format!(
-        "url = \"{}/chat/completions\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
+        "url = \"{}{endpoint}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
         escape(cfg.base_url.trim_end_matches('/')),
         escape(&cfg.api_key)
     );
@@ -382,21 +455,28 @@ pub fn ask(
     questions: &[Question],
     pr: &PullRequest,
 ) -> Result<(Judgment, Usage), String> {
-    let request = serde_json::json!({
-        "model": cfg.model,
-        "temperature": 0,
-        "max_tokens": 4 * questions.len().max(1) + 4,
-        "logprobs": true,
-        "top_logprobs": 8,
-        // OpenRouter would otherwise route to a provider that drops the log-probabilities.
-        "provider": { "require_parameters": true },
-        "messages": [
-            { "role": "system", "content": "You triage pull requests for a busy reviewer. Reply with only the letters Y or N, separated by spaces, one per question." },
-            { "role": "user", "content": prompt(pr, questions) },
-        ],
-    });
-    let response = post_chat(cfg, &request)?;
-    let (odds, usage) = parse_answers(&response, questions.len())?;
+    let (odds, usage) = if cfg.provider == "systemone" {
+        let response = post_json(cfg, "/systemone", &systemone_request(cfg, pr, questions))?;
+        parse_systemone(&response, questions, cfg.input_usd_per_million)?
+    } else {
+        let request = serde_json::json!({
+            "model": cfg.model,
+            "temperature": 0,
+            "max_tokens": 4 * questions.len().max(1) + 4,
+            "logprobs": true,
+            "top_logprobs": 8,
+            // OpenRouter would otherwise route to a provider that drops the log-probabilities.
+            "provider": { "require_parameters": true },
+            "messages": [
+                { "role": "system", "content": "You triage pull requests for a busy reviewer. Reply with only the letters Y or N, separated by spaces, one per question." },
+                { "role": "user", "content": prompt(pr, questions) },
+            ],
+        });
+        parse_answers(
+            &post_json(cfg, "/chat/completions", &request)?,
+            questions.len(),
+        )?
+    };
     Ok((
         Judgment {
             answers: questions.iter().map(|q| q.id.clone()).zip(odds).collect(),
@@ -579,6 +659,52 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_model_is_asked_with_a_state_and_noul_questions() {
+        let questions = defaults();
+        let cfg = JudgeConfig {
+            provider: "systemone".into(),
+            model: "jev-latest".into(),
+            input_usd_per_million: 0.042,
+            ..cfg(30)
+        };
+        let request = systemone_request(&cfg, &pr("Add webhook retries"), &questions);
+        assert_eq!(request["model"], "jev-latest");
+        assert!(
+            request["state"]
+                .as_str()
+                .unwrap()
+                .contains("Title: Add webhook retries")
+        );
+        assert_eq!(request["questions"]["urgent"]["type"], "noul");
+        assert!(
+            request["questions"]["risky"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("authentication")
+        );
+        assert_eq!(
+            request["questions"].as_object().unwrap().len(),
+            questions.len()
+        );
+        // The answers come back as probabilities keyed by question id, and the input is priced.
+        let response = json!({
+            "model": "jev-1.13.0",
+            "answers": {
+                "trivial": { "type": "noul", "noul": 0.04 },
+                "urgent": { "type": "noul", "noul": 0.91 },
+                "risky": { "type": "noul", "noul": 0.5 },
+            },
+            "usage": { "input_tokens": 1000, "output_tokens": 0 },
+        });
+        let (odds, usage) = parse_systemone(&response, &questions, 0.042).unwrap();
+        assert_eq!(odds, [0.04, 0.91, 0.5]);
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert!((usage.cost_usd - 0.000042).abs() < 1e-9);
+        let missing = json!({ "answers": { "trivial": { "noul": 0.1 } } });
+        assert!(parse_systemone(&missing, &questions, 0.0).is_err());
+    }
+
+    #[test]
     fn rules_answer_bots_and_tiny_changes_without_a_call() {
         let mut bot = pr("Update lockfile");
         bot.author = "dependabot".into();
@@ -612,6 +738,8 @@ mod tests {
             base_url: String::new(),
             api_key: "k".into(),
             model: "m".into(),
+            provider: "chat".into(),
+            input_usd_per_million: 0.0,
             include_private: false,
             max_per_sync: max,
             max_spend_usd: 1.0,
