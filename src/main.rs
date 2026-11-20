@@ -2648,14 +2648,7 @@ fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     } else if armed {
         Button::new("Confirm approve").variant(ButtonVariant::Submit)
     } else {
-        // The text is the button's own; the icon carries the colour: mint for a check.
-        Button::new("Approve")
-            .variant(ButtonVariant::Outline)
-            .label_with(tinted_label(
-                &rune_kit::glyphs::CHECK,
-                Some(mint(k)),
-                "Approve",
-            ))
+        Button::new("Approve").variant(ButtonVariant::Outline)
     }
     .control_size(ControlSize::Small)
     .on_press(move |s: &mut App| s.press_approve(&id))
@@ -2666,6 +2659,34 @@ fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     } else {
         rune::Cursor::Pointer
     });
+    // At rest it is a soft mint pill, so it sits apart from Merge's white button and still
+    // looks finished: a tinted fill and ring, the text and check in the usual ink, the check turning mint on hover.
+    let button = if done || busy || armed {
+        button
+    } else {
+        let id = pr.id.clone();
+        let ink = mint(k);
+        row()
+            .key(format!("approve-{}", pr.id))
+            .role("button")
+            .label("Approve")
+            .h(20.0)
+            .px(9.0)
+            .gap(6.0)
+            .center()
+            .radius(k.radius.sm)
+            .fill(ink.alpha(0.12))
+            .border(1.0, ink.alpha(0.32))
+            .hover(ink.alpha(0.2))
+            .cursor(rune::Cursor::Pointer)
+            .on_press(move |s: &mut App| s.press_approve(&id))
+            .child(
+                rune::icon(&rune_kit::glyphs::CHECK, 16.0)
+                    .color(k.c.text_base)
+                    .group_color(ink),
+            )
+            .child(text("Approve").font(k.ty.small_medium).color(k.c.text_base))
+    };
     let wrap = row()
         .center_y()
         .hover_group()
