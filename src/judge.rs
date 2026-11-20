@@ -53,7 +53,7 @@ impl Judgment {
     }
     pub fn summary(&self) -> String {
         format!(
-            "urgent {:.0}%  ·  risky {:.0}%  ·  trivial {:.0}%  ·  {}",
+            "Alien intelligence says: urgent {:.0}%  ·  risky {:.0}%  ·  trivial {:.0}%  ·  {}",
             self.urgent * 100.0,
             self.risky * 100.0,
             self.trivial * 100.0,

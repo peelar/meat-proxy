@@ -2475,7 +2475,7 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                             .child(if model_group(position) {
                                 rune::icon(&BRAIN, 13.0)
                                     .color(model_ink(k))
-                                    .help("Sorted by a model that read each title and description. Rules alone can't tell these apart.")
+                                    .help("Sorted by alien intelligence: a model read each title and description")
                             } else {
                                 el()
                             }),
