@@ -2842,6 +2842,20 @@ fn settings_content(s: &App, k: &Kit) -> El {
         })
 }
 
+/// The release this app was built as. A packaged app carries it in its Info.plist (the release tag,
+/// which can be ahead of Cargo.toml); a `cargo run` build says so.
+fn app_version() -> String {
+    let from_bundle = std::env::current_exe().ok().and_then(|exe| {
+        let plist = std::fs::read_to_string(exe.parent()?.parent()?.join("Info.plist")).ok()?;
+        let after = plist
+            .split("<key>CFBundleShortVersionString</key>")
+            .nth(1)?;
+        let value = after.split("<string>").nth(1)?.split("</string>").next()?;
+        Some(value.trim().to_owned())
+    });
+    from_bundle.unwrap_or_else(|| format!("{} (dev build)", env!("CARGO_PKG_VERSION")))
+}
+
 fn settings_modal(s: &App, k: &Kit) -> El {
     let close = rune_kit::IconButton::new(k.glyph.close)
         .variant(rune_kit::IconButtonVariant::Ghost)
@@ -2870,9 +2884,20 @@ fn settings_modal(s: &App, k: &Kit) -> El {
                 .center_y()
                 .justify_between()
                 .child(
-                    text("Settings")
-                        .font(TextStyle::new(22.0, 650.0))
-                        .color(k.c.text_base),
+                    row()
+                        .center_y()
+                        .gap(10.0)
+                        .child(
+                            text("Settings")
+                                .font(TextStyle::new(22.0, 650.0))
+                                .color(k.c.text_base),
+                        )
+                        .child(
+                            text(format!("v{}", app_version()))
+                                .font(TextStyle::new(11.0, 450.0))
+                                .color(k.c.text_faint)
+                                .key("app-version"),
+                        ),
                 )
                 .child(close),
         )
