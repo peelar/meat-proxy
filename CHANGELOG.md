@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0
+
+### Inbox
+- The Inbox is about your pull requests and the review requests that name you. Team requests leave it (a Settings switch brings them back) and stay under Theirs and All.
+- Review requests are split into sections: Merge these, Hotfixes, Security, Do first, Read carefully, Approve at will, Big reviews and Review these. Your own pull requests keep Address feedback, Get a reviewer and Finish or close.
+- Three of those sections can use a decision model's yes/no answers (a brain marks them). Rules answer first, answers are cached, private repositories are never sent, and a spending cap applies. Jev, through OpenRouter or TypeSafe, and Kev-4B under llama.cpp are supported, and so is any chat model that returns log-probabilities. `meat-proxy --judge-eval` prints the result on your own pull requests.
+- A "Sorted by AI / rules" label switches the model off, and a button next to it puts the sections back in the default order.
+- An Ignore button moves a pull request to an Ignored section at the bottom, folded.
+- Settings can hide outside contributors from the Inbox.
+- New pull requests slide in. Rows show how old a pull request is ("6mo old") and the tooltip gives its last activity. Approvals name who approved.
+- The age limit holds a pull request to both its created and updated dates, and the setting reads "Show PRs opened in the last".
+
+### Merging
+- Auto-merge is a state of the Merge button: Auto-merge turns it on, Auto-merge on turns it off. A pull request GitHub merges by itself stays at the bottom of its section, faded, until cleared, and sends a notification.
+
+### Look
+- New thumb logo, called "meat proxy" in the app; the Dock icon follows. The settings header shows the version, tooltips appear sooner, and notifications moved under their own heading.
+- Setup is one step: connect the GitHub CLI and the inbox opens.
+
 ## 0.2.2
 
 - Setup is one step: once the GitHub CLI is connected, the inbox opens with the defaults and finds your repositories itself. Everything it asked on the second screen is in Settings.
