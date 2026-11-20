@@ -122,21 +122,6 @@ mod mac {
     }
 }
 
-pub fn launch_gh_auth_in_terminal() -> Result<(), String> {
-    let script = r#"tell application "Terminal"
-        activate
-        do script "gh auth login --hostname github.com --web"
-    end tell"#;
-    let output = Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    Ok(())
-}
-
 /// Opens a PR URL directly in the user's default browser (`open <url>` on macOS).
 pub fn open_url_in_browser(url: &str, allow_os_open: bool) {
     if !allow_os_open {

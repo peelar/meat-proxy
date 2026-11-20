@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- First launch opens with an intro: a finger presses the approve button, and the logo and name fly into the header. A click or Escape skips it; Reduce Motion turns it off.
+- Setup is one screen. Authenticate with GitHub CLI signs in from inside the app and shows gh's one-time code; Terminal no longer opens. A switch turns notifications on (they start off), and Open inbox finishes setup.
+
 ## 0.3.0
 
 ### Inbox
