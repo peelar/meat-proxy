@@ -1,0 +1,85 @@
+#!/bin/sh
+# Removes meat proxy and everything it saved, so the next launch is a first run:
+#
+#   uninstall-meat-proxy            asks first
+#   uninstall-meat-proxy --yes      does not ask
+#   uninstall-meat-proxy --dry-run  only lists what it would remove
+#
+# Your GitHub CLI login is not touched. macOS keeps its own record of the notification permission
+# (System Settings > Notifications); that is the one thing a script cannot reset.
+set -eu
+
+HOME_DIR="$HOME"
+LABEL="co.anomaly.meat-proxy.updater"
+# The bundle id, and the one an earlier port of the app used.
+DOMAINS="co.anomaly.meat-proxy co.anomaly.meat-proxy-exact"
+
+PATHS="
+$HOME_DIR/Applications/meat-proxy.app
+/Applications/meat-proxy.app
+$HOME_DIR/.cargo/bin/meat-proxy
+$HOME_DIR/.config/meat-proxy
+$HOME_DIR/Library/Caches/meat-proxy
+$HOME_DIR/Library/Application Support/meat-proxy
+$HOME_DIR/Library/LaunchAgents/$LABEL.plist
+$HOME_DIR/Library/Application Support/co.anomaly.meat-proxy
+$HOME_DIR/Library/Application Support/co.anomaly.meat-proxy-exact
+$HOME_DIR/Library/Application Support/exact/co.anomaly.meat-proxy-exact
+$HOME_DIR/Library/Caches/exact/co.anomaly.meat-proxy-exact
+$HOME_DIR/Library/Preferences/co.anomaly.meat-proxy.plist
+$HOME_DIR/Library/Preferences/co.anomaly.meat-proxy-exact.plist
+$HOME_DIR/Library/Saved Application State/co.anomaly.meat-proxy.savedState
+$HOME_DIR/Library/Saved Application State/co.anomaly.meat-proxy-exact.savedState
+"
+
+mode="ask"
+for arg in "$@"; do
+	case "$arg" in
+	--yes | -y) mode="yes" ;;
+	--dry-run | -n) mode="dry" ;;
+	-h | --help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	*) echo "unknown option: $arg" >&2; exit 2 ;;
+	esac
+done
+
+found=""
+OLDIFS=$IFS
+IFS='
+'
+for p in $PATHS; do
+	[ -n "$p" ] && { [ -e "$p" ] || [ -L "$p" ]; } && found="$found$p
+"
+done
+
+if [ -z "$found" ]; then
+	echo "Nothing to remove: meat proxy is not installed and has no saved data."
+	IFS=$OLDIFS
+	exit 0
+fi
+
+echo "This removes:"
+for p in $found; do echo "  $p"; done
+
+if [ "$mode" = "dry" ]; then
+	IFS=$OLDIFS
+	exit 0
+fi
+if [ "$mode" = "ask" ]; then
+	printf "\nThe repositories, pins and settings it saved go with it. Continue? [y/N] "
+	read -r answer </dev/tty
+	case "$answer" in y | Y | yes) ;; *) echo "Nothing removed."; IFS=$OLDIFS; exit 1 ;; esac
+fi
+
+# Stop the updater first so it cannot put the app back, then the app itself.
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+pkill -f "meat-proxy.app/Contents/MacOS/" 2>/dev/null || true
+pkill -x meat-proxy 2>/dev/null || true
+sleep 1
+
+for d in $DOMAINS; do defaults delete "$d" 2>/dev/null || true; done
+for p in $found; do rm -rf "$p"; done
+IFS=$OLDIFS
+# Forget the preferences macOS cached in memory.
+killall cfprefsd 2>/dev/null || true
+
+echo "meat proxy is removed. Build it again with ./package.sh, or install a release."
