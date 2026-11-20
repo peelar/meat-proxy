@@ -31,8 +31,9 @@ const ARRIVAL_GLOW_SECS: f32 = 2.6;
 /// Gap between rows arriving together, so a batch cascades.
 const ARRIVAL_STAGGER_SECS: f32 = 0.07;
 
-/// What to do first, then what to read, then the rest, until the user drags groups elsewhere.
-const DEFAULT_GROUP_ORDER: [u8; 11] = [8, 9, 0, 10, 1, 2, 3, 7, 4, 5, 6];
+/// Ready to merge first (it is one press), then what to do and read, then the rest, until the
+/// user drags groups elsewhere. Rules and AI sorting share it.
+const DEFAULT_GROUP_ORDER: [u8; 11] = [2, 8, 9, 0, 10, 1, 3, 7, 4, 5, 6];
 /// Review requests are split by how to review them. The model decides these three (the brain
 /// marks them); size is a plain rule.
 const DO_FIRST: (u8, &str) = (8, "Do first");
@@ -108,6 +109,8 @@ pub struct App {
     pub boot_worker: Latest<Result<db::AppSnapshot, rusqlite::Error>>,
     pub sync_worker: Latest<Result<SyncOutput, String>>,
     pub judge: Option<judge::JudgeConfig>,
+    /// Sort with the model's verdicts (true) or by rules alone (false); unset follows what exists.
+    pub smart_sort: Option<bool>,
     pub judgments: std::collections::HashMap<String, judge::Judgment>,
     pub judge_worker: Latest<judge::Batch>,
     /// Spent on the model in this run of the app, against the config's cap.
@@ -179,6 +182,7 @@ fn init() -> App {
         boot_worker: Latest::default(),
         sync_worker: Latest::default(),
         judge: None,
+        smart_sort: None,
         judgments: std::collections::HashMap::new(),
         judge_worker: Latest::default(),
         judge_spent: 0.0,
@@ -273,6 +277,7 @@ impl App {
         self.last_notif_modified = snap.last_notif_modified;
         self.organization = TextEdit::new(&snap.organization);
         self.judgments = snap.judgments;
+        self.smart_sort = snap.smart_sort;
         self.drop_removed_prs();
         if self.onboarded {
             self.page = Page::Inbox;
@@ -310,6 +315,49 @@ impl App {
         self.judgments.get(&pr.id)
     }
 
+    /// Whether a model has anything to say here: a key is set, or verdicts were saved earlier.
+    pub fn smart_available(&self) -> bool {
+        self.judge.is_some() || !self.judgments.is_empty()
+    }
+
+    /// Sorting with the model's verdicts. The user's choice wins; without one, the model is used
+    /// when it is there.
+    pub fn smart_active(&self) -> bool {
+        self.smart_sort.unwrap_or_else(|| self.smart_available()) && self.smart_available()
+    }
+
+    pub fn toggle_smart_sort(&mut self) {
+        if !self.smart_available() {
+            return;
+        }
+        let next = !self.smart_active();
+        self.smart_sort = Some(next);
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting("smart_sort", if next { "1" } else { "0" });
+        }
+    }
+
+    /// The verdict the sorting uses: with AI, the model's or a rule's; with rules alone, only what
+    /// a rule can say (bots, tiny changes), whether or not it was saved.
+    fn verdict(&self, pr: &PullRequest) -> Option<judge::Judgment> {
+        match self.judgment(pr) {
+            Some(j) if self.smart_active() || j.by == "rules" => Some(j.clone()),
+            _ => judge::rule_judgment(pr),
+        }
+    }
+
+    pub fn group_order_is_default(&self) -> bool {
+        self.group_order == DEFAULT_GROUP_ORDER
+    }
+
+    /// Put the Inbox groups back in the order the app picked.
+    pub fn reset_group_order(&mut self) {
+        self.group_order = DEFAULT_GROUP_ORDER.to_vec();
+        self.persist_groups();
+    }
+
     /// The Inbox group of a pull request: what it asks of you. A review request is split by how
     /// to review it: urgent ones first, risky ones to read carefully, huge ones to schedule, and
     /// trivial ones (however long) to approve at will. Without a judgment it stays where its request put it.
@@ -318,12 +366,12 @@ impl App {
         if !matches!(group.0, 0 | 3) {
             return group;
         }
-        let judgment = self.judgment(pr);
-        if judgment.is_some_and(judge::Judgment::is_urgent) {
+        let judgment = self.verdict(pr);
+        if judgment.as_ref().is_some_and(judge::Judgment::is_urgent) {
             DO_FIRST
-        } else if judgment.is_some_and(judge::Judgment::is_risky) {
+        } else if judgment.as_ref().is_some_and(judge::Judgment::is_risky) {
             READ_CAREFULLY
-        } else if judgment.is_some_and(judge::Judgment::is_skim) {
+        } else if judgment.as_ref().is_some_and(judge::Judgment::is_skim) {
             APPROVE_AT_WILL
         } else if pr.additions + pr.deletions >= BIG_PR_LINES {
             BIG_REVIEWS
@@ -333,7 +381,9 @@ impl App {
     }
 
     fn is_urgent(&self, pr: &PullRequest) -> bool {
-        self.judgment(pr).is_some_and(judge::Judgment::is_urgent)
+        self.verdict(pr)
+            .as_ref()
+            .is_some_and(judge::Judgment::is_urgent)
     }
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
@@ -1300,6 +1350,60 @@ fn top_bar(s: &App, k: &Kit) -> El {
         .child(el().w_full().h(1.0).fill(c.border_weak))
 }
 
+/// Says how the Inbox is sorted, and lets you change it: AI (a model reads the review requests) or
+/// rules alone. Next to it, a button puts the groups back in the default order.
+fn sort_control(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let ai = s.smart_active();
+    let available = s.smart_available();
+    let tip = if !available {
+        "Sorted by rules. Add a model API key in ~/.config/meat-proxy/judge.json to sort with AI."
+    } else if ai {
+        "Sorted by alien intelligence: a model reads each review request. Click to sort by rules alone, with nothing sent to a model."
+    } else {
+        "Sorted by rules alone. Nothing is sent to a model. Click to sort with AI."
+    };
+    let mut label = row().center_y().gap(5.0);
+    if ai {
+        label = label.child(rune::icon(&BRAIN, 13.0).color(model_ink(k)));
+    }
+    let label = label.child(
+        text(if ai {
+            "Sorted by AI"
+        } else {
+            "Sorted by rules"
+        })
+        .font(k.ty.small)
+        .color(c.text_muted),
+    );
+    let mut toggle = row()
+        .key("sort-mode")
+        .role("button")
+        .label(if ai {
+            "Sorted by AI"
+        } else {
+            "Sorted by rules"
+        })
+        .px(8.0)
+        .py(4.0)
+        .radius(6.0)
+        .center_y()
+        .help(tip)
+        .child(label);
+    if available {
+        toggle = toggle
+            .cursor(rune::Cursor::Pointer)
+            .hover(c.hover)
+            .on_press(|s: &mut App| s.toggle_smart_sort());
+    }
+    let reset = icon_action(&RESET, "Reset to the default order")
+        .disabled(s.group_order_is_default())
+        .on_press(|s: &mut App| s.reset_group_order())
+        .build(k)
+        .key("reset-group-order");
+    row().center_y().gap(2.0).child(toggle).child(reset)
+}
+
 fn inbox_tools(s: &App, k: &Kit) -> El {
     let labels = InboxFilter::TABS.map(|(_, label)| label);
     let filter_seg = SegmentedControl::new(&labels, Some(s.filter.index()))
@@ -1697,6 +1801,13 @@ const BRAIN: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 3.4C8 2.3 7.1 1.7 6.2 2c-1-.4-2.2.3-2.1 1.4-1.1.2-1.8 1.4-1.2 2.4C2 6.5 2 7.8 2.9 8.4c-.2 1.1.5 2.1 1.6 2.2.2 1.1 1.3 1.8 2.3 1.5.4.5.8.6 1.2.6"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 3.4C8 2.3 8.9 1.7 9.8 2c1-.4 2.2.3 2.1 1.4 1.1.2 1.8 1.4 1.2 2.4.9.7.9 2 0 2.6.2 1.1-.5 2.1-1.6 2.2-.2 1.1-1.3 1.8-2.3 1.5-.4.5-.8.6-1.2.6"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 3.4v9.1"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M4.2 5.2c1 .2 1.7.9 1.8 1.8M11.8 5.2c-1 .2-1.7.9-1.8 1.8M4.5 10.6c.9-.2 1.5-.8 1.6-1.6M11.5 10.6c-.9-.2-1.5-.8-1.6-1.6"/>"#,
 };
 
+/// Back to the default: an arrow turning counter-clockwise.
+const RESET: rune::Icon = rune::Icon {
+    name: "reset-order",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5M3 2.6v2.6h2.6"/>"#,
+};
+
 /// The color of anything a model decided, so it reads as one thing apart from the rules.
 fn model_ink(k: &Kit) -> Color {
     // Quiet on purpose: a hint of violet, close to the muted text, so it never competes with a status.
@@ -1822,10 +1933,9 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .child(text(status).font(k.ty.small_medium).color(tone));
     // A brain marks what the model judged; a rule's verdict needs none. The group already says
     // what it means in the Inbox, so the word only appears where there are no such groups.
-    if let Some(judgment) = s
-        .judgment(pr)
-        .filter(|j| j.by != "rules" && (j.is_urgent() || j.is_risky() || j.is_skim()))
-    {
+    if let Some(judgment) = s.judgment(pr).filter(|j| {
+        s.smart_active() && j.by != "rules" && (j.is_urgent() || j.is_risky() || j.is_skim())
+    }) {
         let word = if s.filter == InboxFilter::Inbox {
             None
         } else if judgment.is_urgent() {
@@ -2090,19 +2200,27 @@ fn document_inbox_view(s: &App, k: &Kit) -> El {
         .count();
     doc = doc
         .child(
-            col()
-                .gap(5.0)
-                .child(heading(k, "Pull requests"))
-                .child(if s.prs.is_empty() {
-                    el()
+            row()
+                .w_full()
+                .justify_between()
+                .items_end()
+                .child(col().gap(5.0).child(heading(k, "Pull requests")).child(
+                    if s.prs.is_empty() {
+                        el()
+                    } else {
+                        text(format!(
+                            "{} open  ·  {} need your thumb",
+                            s.prs.len(),
+                            attention
+                        ))
+                        .font(k.ty.body)
+                        .color(c.text_muted)
+                    },
+                ))
+                .child(if s.filter == InboxFilter::Inbox {
+                    sort_control(s, k)
                 } else {
-                    text(format!(
-                        "{} open  ·  {} need your thumb",
-                        s.prs.len(),
-                        attention
-                    ))
-                    .font(k.ty.body)
-                    .color(c.text_muted)
+                    el()
                 }),
         )
         .child(inbox_tools(s, k));
@@ -2528,7 +2646,7 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                                     .font(k.ty.small)
                                     .color(c.text_faint),
                             )
-                            .child(if model_group(position) {
+                            .child(if model_group(position) && s.smart_active() {
                                 rune::icon(&BRAIN, 13.0)
                                     .color(model_ink(k))
                                     .help("Sorted by alien intelligence: a model read each title and description")
@@ -3226,6 +3344,17 @@ fn main() {
             s.last_synced = Some(std::time::Instant::now());
             s.refresh_ranks();
         }),
+        ("sorted-by-rules", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.smart_sort = Some(false);
+        }),
+        // The groups dragged away from the default, so the reset button is on offer.
+        ("reordered", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.group_order = vec![0, 2, 8, 9, 10, 1, 3, 7, 4, 5, 6];
+        }),
         // A moment into two pull requests arriving: the tint is still fading.
         ("arriving", |s| {
             seed_preview(s);
@@ -3422,14 +3551,19 @@ mod tests {
     fn inbox_groups_can_be_dragged_and_folded() {
         let mut state = init();
         state.preview = true;
-        assert_eq!(state.group_rank(8), 0, "do first leads");
-        assert_eq!(state.group_rank(0), 2);
+        assert_eq!(state.group_rank(2), 0, "ready to merge leads");
+        assert_eq!(state.group_rank(8), 1, "then do first");
+        assert_eq!(state.group_rank(0), 3);
         // Groups 0, 2 and 4 are on screen; drag the last to the top.
         state.drop_group(&[0, 2, 4], 2, 0);
-        assert_eq!(state.group_order, [8, 9, 4, 0, 10, 1, 2, 3, 7, 5, 6]);
+        assert_eq!(state.group_order, [2, 8, 9, 4, 0, 10, 1, 3, 7, 5, 6]);
         // Drag the first to the bottom of what is shown: it lands after group 2.
         state.drop_group(&[4, 0, 2], 0, 2);
-        assert_eq!(state.group_order, [8, 9, 0, 10, 1, 2, 4, 3, 7, 5, 6]);
+        assert_eq!(state.group_order, [2, 4, 8, 9, 0, 10, 1, 3, 7, 5, 6]);
+        // Reordering is undone by the reset, which is only on offer while the order differs.
+        assert!(!state.group_order_is_default());
+        state.reset_group_order();
+        assert!(state.group_order_is_default());
 
         state.toggle_collapse_group(2);
         assert_eq!(state.collapsed_groups, [2]);
@@ -3445,6 +3579,45 @@ mod tests {
         assert!(shown.iter().all(|g| state.collapsed_groups.contains(g)));
         state.toggle_collapse_all();
         assert!(state.collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn rules_alone_ignore_the_models_verdicts_but_keep_the_rules_own() {
+        let mut state = init();
+        state.preview = true;
+        let prs = github::demo_prs();
+        let (draft, open, now) = (72, 48, current_epoch_hour());
+        let mut review = prs.iter().find(|p| p.number == 904).unwrap().clone();
+        review.additions = 300;
+        let att = review.attention(draft, open, now);
+        let model_says = |trivial, urgent, risky| judge::Judgment {
+            trivial,
+            urgent,
+            risky,
+            by: "gpt".into(),
+            fingerprint: String::new(),
+        };
+        state
+            .judgments
+            .insert(review.id.clone(), model_says(0.1, 0.9, 0.1));
+        // A model's verdict counts while sorting by AI, and not once the user picks rules.
+        assert!(state.smart_active());
+        assert_eq!(state.action_group_of(&review, att), DO_FIRST);
+        state.toggle_smart_sort();
+        assert!(!state.smart_active());
+        assert_eq!(state.action_group_of(&review, att).0, 0);
+        // A rule needs no model: a bot's bump is approved at will either way, saved or not.
+        let mut bump = review.clone();
+        bump.id = "acme/cli#950".into();
+        bump.author = "dependabot".into();
+        bump.title = "Bump serde from 1.0.1 to 1.0.2".into();
+        assert_eq!(state.action_group_of(&bump, att), APPROVE_AT_WILL);
+        // With no key and no saved verdicts there is nothing to sort by except rules.
+        let mut bare = init();
+        bare.preview = true;
+        assert!(!bare.smart_available() && !bare.smart_active());
+        bare.toggle_smart_sort();
+        assert_eq!(bare.smart_sort, None);
     }
 
     #[test]

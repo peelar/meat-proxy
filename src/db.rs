@@ -25,6 +25,8 @@ pub struct AppSnapshot {
     pub last_notif_modified: Option<String>,
     pub organization: String,
     pub judgments: std::collections::HashMap<String, Judgment>,
+    /// The user's choice of AI or rules for sorting, if they made one.
+    pub smart_sort: Option<bool>,
 }
 
 pub fn default_db_path() -> PathBuf {
@@ -177,10 +179,10 @@ impl Database {
             tx.commit()?;
         }
         // The Inbox groups changed: an order saved for the old set would bury the new ones.
-        if self.get_setting("inbox_group_version")?.as_deref() != Some("2") {
+        if self.get_setting("inbox_group_version")?.as_deref() != Some("3") {
             self.conn
                 .execute("DELETE FROM settings WHERE key = 'inbox_group_order'", [])?;
-            self.set_setting("inbox_group_version", "2")?;
+            self.set_setting("inbox_group_version", "3")?;
         }
         // Rules an early version seeded: one repeats the built-in searches, the other watched a
         // repository this app has no reason to know about.
@@ -257,6 +259,7 @@ impl Database {
             last_notif_modified,
             organization: self.get_setting("organization")?.unwrap_or_default(),
             judgments: self.load_judgments()?,
+            smart_sort: self.get_setting("smart_sort")?.map(|v| v == "1"),
         })
     }
 

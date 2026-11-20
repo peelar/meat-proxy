@@ -138,6 +138,15 @@ pub fn is_candidate(pr: &PullRequest, attention: PrAttention, cfg: &JudgeConfig)
 
 /// What cheap rules already know. A hit costs nothing and is final.
 pub fn shortcut(pr: &PullRequest) -> Option<Judgment> {
+    rule_judgment(pr).map(|j| Judgment {
+        fingerprint: fingerprint(pr),
+        ..j
+    })
+}
+
+/// The same verdict without the fingerprint, cheap enough to compute whenever a list is drawn:
+/// it is what the inbox sorts by when no model is involved.
+pub fn rule_judgment(pr: &PullRequest) -> Option<Judgment> {
     let author = pr.author.to_ascii_lowercase();
     let bot = author.ends_with("[bot]")
         || author.contains("dependabot")
@@ -155,7 +164,7 @@ pub fn shortcut(pr: &PullRequest) -> Option<Judgment> {
         urgent: 0.03,
         risky: 0.05,
         by: "rules".into(),
-        fingerprint: fingerprint(pr),
+        fingerprint: String::new(),
     })
 }
 
