@@ -314,6 +314,7 @@ impl Database {
                 // Merge state is fetched fresh on every sync, never stored.
                 merge_readiness: Default::default(),
                 merge_method: Default::default(),
+                external: false,
             })
         })?;
         let mut out = Vec::new();

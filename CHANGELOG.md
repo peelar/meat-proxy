@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Teammates' pull requests sort ahead of outsiders' within each section, and outsiders' carry a faint "external" label. Outsiders are GitHub authors who aren't members of the organization.
+
 ## 0.2.0
 
 ### Inbox

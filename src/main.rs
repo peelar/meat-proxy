@@ -521,10 +521,12 @@ impl App {
             .cloned()
             .collect();
 
-        // Newest activity first: whatever has gone stale usually has a reason.
+        // Teammates before outsiders, then newest activity first: whatever has gone stale usually
+        // has a reason.
         list.sort_by(|a, b| {
-            a.idle_hours
-                .cmp(&b.idle_hours)
+            a.external
+                .cmp(&b.external)
+                .then_with(|| a.idle_hours.cmp(&b.idle_hours))
                 .then_with(|| b.number.cmp(&a.number))
         });
         list
@@ -1783,7 +1785,12 @@ fn author_badge(s: &App, pr: &PullRequest, k: &Kit) -> El {
             .fill(tint)
             .child(text("You").font(k.ty.small_medium).color(ink))
     } else {
-        author.child(text(handle).font(k.ty.small).color(k.c.text_muted))
+        let author = author.child(text(handle).font(k.ty.small).color(k.c.text_muted));
+        if pr.external {
+            author.child(text("external").font(k.ty.small).color(k.c.text_faint))
+        } else {
+            author
+        }
     }
 }
 
@@ -2392,6 +2399,7 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
     items.sort_by(|a, b| {
         s.group_rank(group(a).0)
             .cmp(&s.group_rank(group(b).0))
+            .then_with(|| a.external.cmp(&b.external))
             .then_with(|| a.idle_hours.cmp(&b.idle_hours))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -3093,6 +3101,29 @@ fn main() {
 mod tests {
     use super::*;
     use rune::{Env, Runtime};
+
+    #[test]
+    fn teammates_sort_ahead_of_outsiders_then_newest_first() {
+        let mut s = init();
+        s.filter = InboxFilter::All;
+        let mut prs = github::demo_prs();
+        prs.retain(|p| p.repo == "acme/cli");
+        for pr in &mut prs {
+            pr.external = false;
+            pr.idle_hours = 10;
+        }
+        // The newest pull request is an outsider's; the oldest is a teammate's.
+        let newest = prs.iter().position(|p| p.number == 904).unwrap();
+        prs[newest].external = true;
+        prs[newest].idle_hours = 1;
+        s.prs = prs;
+        let order: Vec<u64> = s
+            .prs_for_repo("acme/cli")
+            .iter()
+            .map(|p| p.number)
+            .collect();
+        assert_eq!(order.last(), Some(&904), "outsiders go last: {order:?}");
+    }
 
     #[test]
     fn unified_inbox_sorts_assigned_and_stale_nudges_first_and_persists_to_sqlite() {

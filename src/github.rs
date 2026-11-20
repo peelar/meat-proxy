@@ -311,6 +311,7 @@ const PR_FIELDS: &str = r#"
       additions
       deletions
       author { login }
+      authorAssociation
       state
       mergeable
       mergeStateStatus
@@ -770,6 +771,10 @@ fn parse_graphql_pr(
                 .as_str()
                 .unwrap_or_default(),
         ),
+        external: matches!(
+            node["authorAssociation"].as_str(),
+            Some("CONTRIBUTOR" | "FIRST_TIME_CONTRIBUTOR" | "FIRST_TIMER" | "NONE")
+        ),
     })
 }
 
@@ -862,6 +867,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 38,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         PullRequest {
             id: "acme/engine#412".to_string(),
@@ -887,6 +893,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 14,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         PullRequest {
             id: "acme/engine#397".to_string(),
@@ -912,6 +919,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 19,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         PullRequest {
             id: "acme/engine#421".to_string(),
@@ -937,6 +945,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 29,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -963,6 +972,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 84,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: true,
         },
         PullRequest {
             id: "acme/cli#889".to_string(),
@@ -988,6 +998,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 12,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         PullRequest {
             id: "acme/cli#908".to_string(),
@@ -1013,6 +1024,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 7,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         // --- acme/inbox (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -1040,6 +1052,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 44,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
         PullRequest {
             id: "acme/inbox#19".to_string(),
@@ -1066,6 +1079,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 0,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         },
     ]
 }

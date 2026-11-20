@@ -292,6 +292,10 @@ pub struct PullRequest {
     pub merge_readiness: MergeReadiness,
     #[serde(default)]
     pub merge_method: MergeMethod,
+    /// Written by someone outside the organization (GitHub's author association: a contributor with
+    /// no membership, a first-timer or no one). Teammates sort ahead of these within a section.
+    #[serde(default)]
+    pub external: bool,
 }
 
 impl PullRequest {
@@ -708,6 +712,7 @@ mod tests {
             deletions: 0,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            external: false,
         }
     }
 
