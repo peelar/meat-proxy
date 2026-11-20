@@ -151,6 +151,17 @@ impl Database {
             }
             tx.commit()?;
         }
+        let has_opened: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pull_requests') WHERE name='opened_hours')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_opened {
+            self.conn.execute(
+                "ALTER TABLE pull_requests ADD COLUMN opened_hours INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         let has_removed: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repos') WHERE name='removed')",
             [],
@@ -373,7 +384,7 @@ impl Database {
             "SELECT id, repo, number, title, url, author, ownership, is_draft,
                     review_state, ci_status, incoming_reason, reviewers_json,
                     idle_hours, unreviewed_hours, head_ref, matched_rule,
-                    snoozed_until_hour, additions, deletions, head_repo, stack_base
+                    snoozed_until_hour, additions, deletions, head_repo, stack_base, opened_hours
              FROM pull_requests
              ORDER BY number DESC",
         )?;
@@ -406,6 +417,7 @@ impl Database {
                 head_ref: row.get(14)?,
                 head_repo: row.get(19)?,
                 stack_base: row.get(20)?,
+                opened_hours: row.get::<_, i64>(21)? as u64,
                 matched_rule: row.get(15)?,
                 snoozed_until_hour: row.get::<_, i64>(16)? as u64,
                 additions: row.get::<_, i64>(17)? as u32,
@@ -449,8 +461,8 @@ impl Database {
                     id, repo, number, title, url, author, ownership, is_draft,
                     review_state, ci_status, incoming_reason, reviewers_json,
                     idle_hours, unreviewed_hours, head_ref, matched_rule,
-                    snoozed_until_hour, additions, deletions, head_repo, stack_base
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                    snoozed_until_hour, additions, deletions, head_repo, stack_base, opened_hours
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     pr.id,
                     pr.repo,
@@ -476,6 +488,7 @@ impl Database {
                     i64::from(pr.deletions),
                     pr.head_repo,
                     pr.stack_base,
+                    pr.opened_hours as i64,
                 ],
             )?;
         }

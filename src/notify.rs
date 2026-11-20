@@ -184,7 +184,7 @@ pub fn evaluate_inbox_notifications(
                         body: format!("@{}: {}", pr.author, pr.title),
                         pr_url: pr.url.clone(),
                         kind: NotificationKind::InstantAssigned,
-                        timestamp_label: pr.age_label(),
+                        timestamp_label: pr.activity_label(),
                         unread: true,
                     });
                 }
@@ -208,7 +208,7 @@ pub fn evaluate_inbox_notifications(
                         body: format!("{} ({})", pr.title, reason),
                         pr_url: pr.url.clone(),
                         kind: NotificationKind::OpenPrStaleNudge,
-                        timestamp_label: pr.age_label(),
+                        timestamp_label: pr.activity_label(),
                         unread: true,
                     });
                 }
@@ -224,7 +224,7 @@ pub fn evaluate_inbox_notifications(
                         body: format!("Resume or close: {}", pr.title),
                         pr_url: pr.url.clone(),
                         kind: NotificationKind::DraftStaleNudge,
-                        timestamp_label: pr.age_label(),
+                        timestamp_label: pr.activity_label(),
                         unread: true,
                     });
                 }

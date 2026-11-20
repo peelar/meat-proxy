@@ -1973,7 +1973,12 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
                 .color(c.text_muted),
         )
         .child(author_badge(s, pr, k))
-        .child(text(pr.age_label()).font(k.ty.small).color(c.text_muted))
+        .child(
+            text(pr.age_label())
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .help(pr.age_detail()),
+        )
         .child(el().size(1.0, 10.0).fill(c.border_base))
         .child(text(status).font(k.ty.small_medium).color(tone));
     // A brain marks what the model judged; a rule's verdict needs none. In the Inbox the section

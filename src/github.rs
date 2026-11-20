@@ -747,6 +747,7 @@ fn parse_graphql_pr(
         incoming_reason: reason,
         reviewers,
         idle_hours,
+        opened_hours: estimate_hours_since_iso8601(node["createdAt"].as_str().unwrap_or_default()),
         unreviewed_hours: estimate_hours_since_iso8601(review_clock),
         head_ref,
         head_repo: node["headRepository"]["nameWithOwner"]
@@ -870,6 +871,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::AssignedOrReviewRequested,
             reviewers: vec!["mira".to_string()],
             idle_hours: 1,
+            opened_hours: 0,
             unreviewed_hours: 1,
             head_ref: "metal-layer-coalesce".to_string(),
             head_repo: Some("acme/engine".into()),
@@ -899,6 +901,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(), // No reviewer assigned -> NUDGE to send to colleague!
             idle_hours: 54,
+            opened_hours: 0,
             unreviewed_hours: 54, // > 48h (2 days) without review -> NUDGE!
             head_ref: "feat/baseline-cache".to_string(),
             head_repo: Some("acme/engine".into()),
@@ -928,6 +931,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(),
             idle_hours: 120, // 5 days idle draft -> NUDGE!
+            opened_hours: 0,
             unreviewed_hours: 120,
             head_ref: "draft/coreaudio-ring".to_string(),
             head_repo: Some("acme/engine".into()),
@@ -957,6 +961,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::SubscribedRule,
             reviewers: vec!["kai".to_string()],
             idle_hours: 5,
+            opened_hours: 0,
             unreviewed_hours: 5,
             head_ref: "windfoil-cjk-1x".to_string(),
             head_repo: Some("acme/engine".into()),
@@ -987,6 +992,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::AssignedOrReviewRequested,
             reviewers: vec!["mira".to_string()],
             idle_hours: 3,
+            opened_hours: 0,
             unreviewed_hours: 3,
             head_ref: "acp-zero-copy-diffs".to_string(),
             head_repo: Some("acme/cli".into()),
@@ -1016,6 +1022,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: vec!["juno".to_string()],
             idle_hours: 74,
+            opened_hours: 0,
             unreviewed_hours: 74, // Waiting on @rekram for 3 days -> NUDGE to ping colleague!
             head_ref: "fix/retry-529-backoff".to_string(),
             head_repo: Some("acme/cli".into()),
@@ -1045,6 +1052,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: vec!["kai".to_string()],
             idle_hours: 2,
+            opened_hours: 0,
             unreviewed_hours: 0,
             head_ref: "feat/json-events".to_string(),
             head_repo: Some("acme/cli".into()),
@@ -1076,6 +1084,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: vec!["alex".to_string()],
             idle_hours: 6,
+            opened_hours: 0,
             unreviewed_hours: 6,
             head_ref: "sqlite-importance-weights".to_string(),
             head_repo: Some("acme/inbox".into()),
@@ -1106,6 +1115,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(),
             idle_hours: 8, // Fresh draft (< 72h), not stale
+            opened_hours: 0,
             unreviewed_hours: 8,
             head_ref: "draft/ws-webhook-bridge".to_string(),
             head_repo: Some("acme/inbox".into()),
@@ -1122,6 +1132,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             private_repo: false,
         },
     ];
+    // Opened a while before it last moved, as real ones are.
+    for pr in &mut prs {
+        pr.opened_hours = pr.idle_hours * 4 + 20;
+    }
     let base = prs[0].clone();
     let review = |repo: &str,
                   number: u64,
@@ -1155,6 +1169,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
         pr.stack_base = None;
         (pr.additions, pr.deletions) = size;
         pr.idle_hours = idle;
+        pr.opened_hours = idle * 4 + 20;
         pr.unreviewed_hours = idle;
         pr
     };

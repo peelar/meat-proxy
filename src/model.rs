@@ -273,6 +273,9 @@ pub struct PullRequest {
     pub reviewers: Vec<String>,
     /// Hours since last update/commit (for draft staleness)
     pub idle_hours: u64,
+    /// Hours since it was opened; 0 when not known (older saved data).
+    #[serde(default)]
+    pub opened_hours: u64,
     /// Hours since last review activity or since opened without review (for open PR staleness)
     pub unreviewed_hours: u64,
     /// Branch name (for `gh pr checkout`)
@@ -304,6 +307,18 @@ pub struct PullRequest {
     /// The repository is private: its text does not go to a model unless the config allows it.
     #[serde(skip)]
     pub private_repo: bool,
+}
+
+/// Hours as a short span: 5h, 3d, 6mo, 2y.
+pub fn span(hours: u64) -> String {
+    let days = hours / 24;
+    match hours {
+        0 => "under 1h".to_owned(),
+        1..=23 => format!("{hours}h"),
+        _ if days < 60 => format!("{days}d"),
+        _ if days < 700 => format!("{}mo", days / 30),
+        _ => format!("{}y", days / 365),
+    }
 }
 
 impl PullRequest {
@@ -374,16 +389,30 @@ impl PullRequest {
     }
 
     /// Human-readable age / staleness badge text.
+    /// How old the pull request is, as people mean it: since it was opened. Saved data from before
+    /// that was known falls back to the last activity.
     pub fn age_label(&self) -> String {
-        let h = self.idle_hours;
-        if h == 0 {
-            "just now".to_string()
-        } else if h < 24 {
-            format!("{h}h ago")
-        } else {
-            let d = h / 24;
-            format!("{d}d ago")
+        if self.opened_hours == 0 {
+            return self.activity_label();
         }
+        format!("{} old", span(self.opened_hours))
+    }
+
+    /// When it last moved: "3h ago".
+    pub fn activity_label(&self) -> String {
+        match self.idle_hours {
+            0 => "just now".to_string(),
+            h => format!("{} ago", span(h)),
+        }
+    }
+
+    /// What the age label does not say: when it was opened and when it last moved.
+    pub fn age_detail(&self) -> String {
+        format!(
+            "Opened {} ago  ·  last activity {} ago",
+            span(self.opened_hours.max(self.idle_hours)),
+            span(self.idle_hours)
+        )
     }
 
     /// Detailed status pill text for the row.
@@ -710,6 +739,7 @@ mod tests {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(),
             idle_hours: idle_days * 24,
+            opened_hours: 0,
             unreviewed_hours: idle_days * 24,
             head_ref: String::new(),
             head_repo: None,
@@ -725,6 +755,24 @@ mod tests {
             labels: Vec::new(),
             private_repo: false,
         }
+    }
+
+    #[test]
+    fn a_pull_request_is_as_old_as_it_was_opened_not_as_recently_touched() {
+        let mut pr = my_pr("o/r", 1, 1);
+        pr.opened_hours = 24 * 190; // opened in May
+        pr.idle_hours = 24 * 14; // an edit two weeks ago
+        assert_eq!(pr.age_label(), "6mo old");
+        assert_eq!(pr.activity_label(), "14d ago");
+        assert!(pr.age_detail().contains("Opened 6mo ago"));
+        assert!(pr.age_detail().contains("last activity 14d ago"));
+        // Data saved before the opening time was known keeps showing the last activity.
+        pr.opened_hours = 0;
+        assert_eq!(pr.age_label(), "14d ago");
+        assert_eq!(span(0), "under 1h");
+        assert_eq!(span(5), "5h");
+        assert_eq!(span(24 * 59), "59d");
+        assert_eq!(span(24 * 800), "2y");
     }
 
     #[test]
