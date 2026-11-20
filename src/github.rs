@@ -313,6 +313,7 @@ const PR_FIELDS: &str = r#"
       author { login }
       authorAssociation
       bodyText
+      body
       labels(first: 6) { nodes { name } }
       files(first: 40) { nodes { path } }
       state
@@ -819,6 +820,7 @@ fn parse_graphql_pr(
             Some("CONTRIBUTOR" | "FIRST_TIME_CONTRIBUTOR" | "FIRST_TIMER" | "NONE")
         ),
         body: node["bodyText"].as_str().unwrap_or_default().to_owned(),
+        description: node["body"].as_str().unwrap_or_default().to_owned(),
         labels: node["labels"]["nodes"]
             .as_array()
             .map(|labels| {
@@ -877,6 +879,24 @@ pub fn pr_state(url: &str) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Approves the PR with `gh`, with no comment.
+pub fn approve_pr(url: &str) -> Result<(), String> {
+    let out = gh_command()
+        .args(["pr", "review", url, "--approve"])
+        .output()
+        .map_err(|e| format!("Could not run gh: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("GitHub would not take this approval")
+        .trim()
+        .to_owned())
 }
 
 pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
@@ -972,6 +992,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1005,6 +1026,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1038,6 +1060,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1071,6 +1094,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1105,6 +1129,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: true,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1138,6 +1163,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1171,6 +1197,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1206,6 +1233,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
@@ -1240,6 +1268,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),

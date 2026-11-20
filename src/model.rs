@@ -357,6 +357,9 @@ pub struct PullRequest {
     /// Plain-text description, kept only in memory for the judgment model (never saved).
     #[serde(skip)]
     pub body: String,
+    /// The description as Markdown, kept only in memory for the expanded row.
+    #[serde(skip)]
+    pub description: String,
     #[serde(skip)]
     pub labels: Vec<String>,
     /// The repository is private: its text does not go to a model unless the config allows it.
@@ -834,6 +837,7 @@ mod tests {
             auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
+            description: String::new(),
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),

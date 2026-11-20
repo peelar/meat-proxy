@@ -2,7 +2,9 @@ use rune::{
     Chrome, Color, Cx, El, KeyEvent, Latest, ScrollSpec, TextEdit, TextStyle, Tx, col, el, oklch,
     row, text,
 };
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch, TextInput};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Kit, Markdown, SegmentedControl, Switch, TextInput,
+};
 
 mod avatars;
 mod db;
@@ -62,6 +64,14 @@ pub struct App {
     /// The PR whose Merge button was pressed once and waits for a second press.
     pub merge_armed: Option<(String, std::time::Instant)>,
     pub merging: Vec<String>,
+    /// Rows opened to show the description.
+    pub expanded: std::collections::HashSet<String>,
+    /// The PR whose Approve button was pressed once and waits for a second press.
+    pub approve_armed: Option<(String, std::time::Instant)>,
+    pub approving: Vec<String>,
+    /// Approved from here; the button stays done until a sync moves the row.
+    pub approved: Vec<String>,
+    pub approve_worker: Latest<(String, Result<(), String>)>,
     /// PRs just merged, with the moment they were: the row celebrates, then leaves the list.
     pub celebrations: Vec<(String, std::time::Instant)>,
     /// Pull requests a sync just brought in, with when each starts to appear.
@@ -165,6 +175,11 @@ fn init() -> App {
         inbox_show_all: false,
         merge_armed: None,
         merging: Vec::new(),
+        expanded: std::collections::HashSet::new(),
+        approve_armed: None,
+        approving: Vec::new(),
+        approved: Vec::new(),
+        approve_worker: Latest::default(),
         celebrations: Vec::new(),
         arrivals: Vec::new(),
         merge_worker: Latest::default(),
@@ -721,6 +736,38 @@ impl App {
             .request((), move |()| (id, github::merge_pr(&url, method)));
     }
 
+    pub fn toggle_expanded(&mut self, pr_id: &str) {
+        if !self.expanded.remove(pr_id) {
+            self.expanded.insert(pr_id.to_owned());
+        }
+    }
+
+    /// First press arms the button, the second approves. An approval can't be taken back.
+    pub fn press_approve(&mut self, pr_id: &str) {
+        if !self.approving.is_empty() || self.approved.iter().any(|id| id == pr_id) {
+            return;
+        }
+        let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
+            return;
+        };
+        let armed = self
+            .approve_armed
+            .as_ref()
+            .is_some_and(|(id, _)| id == pr_id);
+        if !armed {
+            self.approve_armed = Some((pr_id.to_owned(), std::time::Instant::now()));
+            return;
+        }
+        self.approve_armed = None;
+        if self.preview {
+            return;
+        }
+        self.approving.push(pr_id.to_owned());
+        let (id, url) = (pr.id.clone(), pr.url.clone());
+        self.approve_worker
+            .request((), move |()| (id, github::approve_pr(&url)));
+    }
+
     /// What pressing the auto-merge button does: Some(true) turns it on, Some(false) turns it off,
     /// None when it is not on offer (the pull request can be merged now, or GitHub does not allow it).
     pub fn auto_merge_target(&self, pr_id: &str) -> Option<bool> {
@@ -1259,6 +1306,7 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.verify_worker.set_waker(waker.clone());
     s.auto_merge_worker.set_waker(waker.clone());
     s.resolve_worker.set_waker(waker.clone());
+    s.approve_worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
@@ -1531,6 +1579,24 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             }
             Err(error) => s.status_banner = Some(format!("Could not merge. {error}")),
         }
+        changed = true;
+    }
+    if let Some((id, result)) = s.approve_worker.take() {
+        s.approving.retain(|a| *a != id);
+        match result {
+            Ok(()) => {
+                s.approved.push(id);
+                s.trigger_sync();
+            }
+            Err(error) => s.status_banner = Some(format!("Could not approve. {error}")),
+        }
+        changed = true;
+    }
+    if s.approve_armed
+        .as_ref()
+        .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > ARMED_SECS)
+    {
+        s.approve_armed = None;
         changed = true;
     }
     if s.merge_armed
@@ -2282,6 +2348,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         PrAttention::IncomingWatched => ("Watching".to_owned(), c.text_muted),
     };
     let pr_url_open = pr.url.clone();
+    let id_toggle = pr.id.clone();
 
     let mut right_side = row().center_y().gap(2.0);
     if s.filter == InboxFilter::Inbox && s.page == Page::Inbox {
@@ -2306,6 +2373,14 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         } else {
             button.group_opacity(0.0, 1.0)
         });
+    }
+    if matches!(
+        att,
+        PrAttention::IncomingAssigned | PrAttention::IncomingViaTeam
+    ) && !pr.is_draft
+        && s.page == Page::Inbox
+    {
+        right_side = right_side.child(approve_control(s, k, pr));
     }
     if pr.ownership == Ownership::Mine && !pr.is_draft && s.page == Page::Inbox {
         right_side = right_side.child(merge_control(s, k, pr));
@@ -2386,9 +2461,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .gap(12.0)
         .hover(c.hover)
         .cursor(rune::Cursor::Pointer)
-        .on_press(move |s: &mut App| {
-            notify::open_url_in_browser(&pr_url_open, s.allow_os_side_effects);
-        })
+        .on_press(move |s: &mut App| s.toggle_expanded(&id_toggle))
         .child(
             rune::icon(
                 if item.depth == 0 {
@@ -2410,10 +2483,19 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
                 .min_w(0.0)
                 .gap(4.0)
                 .child(
+                    // Only the title goes to GitHub; the rest of the row opens the description.
                     text(pr.title.clone())
                         .font(TextStyle::new(14.0, 530.0))
                         .color(c.text_base)
-                        .truncate(),
+                        .truncate()
+                        .link(
+                            rune::Link::new(0..pr.title.len(), "open")
+                                .hover(rune::LinkPaint::new().underline(c.text_base))
+                                .help("Open on GitHub"),
+                        )
+                        .on_link(move |s: &mut App, _: &str, _: &mut Tx| {
+                            notify::open_url_in_browser(&pr_url_open, s.allow_os_side_effects);
+                        }),
                 )
                 .child(metadata),
         )
@@ -2432,7 +2514,103 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
             .offset(0.0, (1.0 - ease) * -10.0)
             .fill(mint(k).alpha(0.16 * glow * glow));
     }
+    if s.expanded.contains(&pr.id) {
+        let indent = 14.0 + 28.0 + item.depth.min(5) as f32 * 18.0;
+        return col()
+            .w_full()
+            .child(line)
+            .child(description(s, k, pr, indent));
+    }
     line
+}
+
+/// The PR description as Markdown, under its row.
+fn description(s: &App, k: &Kit, pr: &PullRequest, indent: f32) -> El {
+    let c = &k.c;
+    let source = clean_description(&pr.description);
+    let body = if source.is_empty() {
+        text("No description.").font(k.ty.small).color(c.text_faint)
+    } else {
+        let _ = s;
+        Markdown::new(source)
+            .on_link(|s: &mut App, url: &str| {
+                notify::open_url_in_browser(url, s.allow_os_side_effects)
+            })
+            .build(k)
+    };
+    col()
+        .key(format!("pr-description-{}", pr.id))
+        .w_full()
+        .pl(indent)
+        .pr(28.0)
+        .pb(14.0)
+        .child(
+            col()
+                .w_full()
+                .max_h(320.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(body),
+        )
+}
+
+/// Drops the HTML comments PR templates leave in, and keeps a very long description short.
+fn clean_description(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    let trimmed = out.trim();
+    match trimmed.char_indices().nth(8000) {
+        Some((at, _)) => format!("{}…", &trimmed[..at]),
+        None => trimmed.to_owned(),
+    }
+}
+
+fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
+    let id = pr.id.clone();
+    let done = s.approved.contains(&pr.id);
+    let busy = s.approving.contains(&pr.id);
+    let armed = s
+        .approve_armed
+        .as_ref()
+        .is_some_and(|(armed, _)| *armed == pr.id);
+    let button = if done {
+        Button::new("Approved")
+            .variant(ButtonVariant::Outline)
+            .icon(&rune_kit::glyphs::CHECK)
+            .disabled(true)
+    } else if busy {
+        Button::new("Approving…")
+            .variant(ButtonVariant::Outline)
+            .disabled(true)
+    } else if armed {
+        Button::new("Confirm approve").variant(ButtonVariant::Submit)
+    } else {
+        Button::new("Approve").variant(ButtonVariant::Outline)
+    }
+    .control_size(ControlSize::Small)
+    .on_press(move |s: &mut App| s.press_approve(&id))
+    .build(k)
+    .key(format!("approve-{}", pr.id));
+    row()
+        .center_y()
+        .help(if armed {
+            format!("Press again to approve {}#{}", pr.repo, pr.number)
+        } else {
+            "Approve without a comment".to_owned()
+        })
+        .child(button)
 }
 
 /// A pull request GitHub merged by itself, kept faded at the bottom of its section until cleared.
@@ -3645,6 +3823,10 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 }
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
+    if ev.key == rune::Key::Escape && s.approve_armed.is_some() {
+        s.approve_armed = None;
+        return true;
+    }
     if ev.key == rune::Key::Escape && s.merge_armed.is_some() {
         s.merge_armed = None;
         return true;
@@ -3672,6 +3854,9 @@ fn seed_preview(s: &mut App) {
         username: "octocat".to_string(),
     };
     s.prs = github::demo_prs();
+    if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/engine#418") {
+        pr.description = "## What\n\nBinding the offscreen `Rgba16Float` layer once per pinch frame instead of once per draw. **Cuts about 40%** of encoder time on a 3-finger pinch.\n\n<!-- template: link the issue -->\n\n- coalesce binds in `metal/layer.rs`\n- keep the bind cache across passes\n- add a pinch trace to the bench\n\nFixes [#402](https://github.com/acme/engine/issues/402)".into();
+    }
     s.repos = github::infer_repos_from_prs(&s.prs, &[]);
     s.last_synced = Some(std::time::Instant::now());
     // What a model would have said about some of the demo review requests, and a rule about one.
@@ -3850,6 +4035,12 @@ fn main() {
         ("inbox", |s| {
             seed_preview(s);
             s.page = Page::Inbox;
+        }),
+        ("inbox-open", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.expanded.insert("acme/engine#418".into());
+            s.approve_armed = Some(("acme/cli#904".into(), std::time::Instant::now()));
         }),
         ("settings-ai", |s| {
             seed_preview(s);
@@ -4521,6 +4712,32 @@ mod tests {
             Some("o/r#9")
         );
         assert!(state.merging.is_empty(), "one press only arms the button");
+    }
+
+    #[test]
+    fn a_row_opens_on_press_and_approve_needs_two() {
+        let mut state = init();
+        state.preview = true;
+        state.prs = github::demo_prs();
+        let id = state.prs[0].id.clone();
+        state.toggle_expanded(&id);
+        assert!(state.expanded.contains(&id));
+        state.toggle_expanded(&id);
+        assert!(!state.expanded.contains(&id));
+
+        state.press_approve(&id);
+        assert_eq!(
+            state.approve_armed.as_ref().map(|(a, _)| a.as_str()),
+            Some(id.as_str())
+        );
+        state.press_approve(&id);
+        assert!(state.approve_armed.is_none());
+        assert!(state.approving.is_empty(), "a preview never calls GitHub");
+    }
+
+    #[test]
+    fn template_comments_are_dropped_from_a_description() {
+        assert_eq!(clean_description("a <!-- note --> b\n<!-- open"), "a  b");
     }
 
     #[test]

@@ -531,6 +531,7 @@ impl Database {
                 auto_merge: Default::default(),
                 external: false,
                 body: String::new(),
+                description: String::new(),
                 labels: Vec::new(),
                 private_repo: false,
                 files: Vec::new(),
