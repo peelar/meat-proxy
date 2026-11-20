@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installs the meat-proxy Mac app from the latest GitHub release and keeps it there:
+# Installs the meat-proxy Mac app (the Rune app, which reads GitHub through the GitHub CLI) from the latest GitHub
+# release and keeps it there:
 #
 #   curl -fsSL https://github.com/peelar/meat-proxy/releases/latest/download/install-mac.sh | sh
 #
@@ -97,4 +98,8 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$AGENT"
 
 echo "meat-proxy $(cat "$SUPPORT/version") is in ~/Applications and keeps itself up to date."
+# The app reads GitHub through the GitHub CLI, as you are signed in to it.
+if ! command -v gh >/dev/null && [ ! -x /opt/homebrew/bin/gh ] && [ ! -x /usr/local/bin/gh ]; then
+	echo "It reads GitHub through the GitHub CLI, which is not installed: brew install gh && gh auth login"
+fi
 open "$APP"

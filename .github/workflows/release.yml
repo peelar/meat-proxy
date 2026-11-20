@@ -1,16 +1,11 @@
-# Every push to main releases the Exact app (exact/) as a GitHub release, which installed copies update to within the
-# hour (scripts/install-web.sh, scripts/install-mac.sh):
+# Every push to main releases the Mac app as a GitHub release, which installed copies update to within the hour
+# (scripts/install-mac.sh):
 #
-#   meat-proxy-web-vX.Y.Z.tar.gz   the web app to run on your own computer (scripts/package.sh web)
-#   install-web.sh                 its installer
-#   meat-proxy-macos.zip           the ad-hoc signed Mac app (scripts/package.sh mac)
-#   install-mac.sh                 its installer
+#   meat-proxy-macos.zip   the ad-hoc signed app (./package.sh --zip)
+#   install-mac.sh         its installer
 #
-# The version is exact/package.json's while it has no release, else the next patch after the newest release: raise
-# the version there for a minor or major release. A push that changes only docs or screenshots releases nothing.
-#
-# The OAuth app is the repository's OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET secrets (GitHub refuses secret names
-# starting GITHUB_): the one whose callback is http://127.0.0.1/, which both parts sign in through.
+# The version is Cargo.toml's while it has no release, else the next patch after the newest release: raise the
+# version there for a minor or major release. A push that changes only docs or screenshots releases nothing.
 name: Release
 
 on:
@@ -27,17 +22,15 @@ concurrency:
   group: release
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.next.outputs.tag }}
+  release:
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: next
+      - id: version
         run: |
-          base=$(node -p 'require("./exact/package.json").version')
+          base=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           newest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
           # The higher of the two; a release of it already made means the next patch.
           top=$(printf '%s\n%s\n' "$base" "${newest:-0.0.0}" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
@@ -46,53 +39,17 @@ jobs:
           fi
           echo "tag=v$top" >> "$GITHUB_OUTPUT"
           echo "Releasing v$top"
-
-  package:
-    needs: version
-    strategy:
-      matrix:
-        include:
-          - part: web
-            runner: ubuntu-latest
-          - part: mac
-            # Exact's Mac host needs the macOS 26 SDK or newer.
-            runner: macos-26
-    runs-on: ${{ matrix.runner }}
-    env:
-      EXACT: ${{ github.workspace }}/../exact
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup/toolchains
-            ~/.cache/exact
-          key: exact-${{ matrix.part }}-${{ runner.os }}-${{ hashFiles('exact/exact-rev') }}
-      - run: sh scripts/setup.sh ${{ matrix.part }}
-      - run: scripts/package.sh ${{ matrix.part }} "${{ needs.version.outputs.tag }}" out
-        env:
-          GITHUB_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
-          GITHUB_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.part }}
-          path: out/
-
-  release:
-    needs: [version, package]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: out
-          merge-multiple: true
+            target
+          key: rune-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: ./package.sh --zip "${{ steps.version.outputs.tag }}" out
       # The tag is created at the commit that was built.
       - run: gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
         env:
-          TAG: ${{ needs.version.outputs.tag }}
+          TAG: ${{ steps.version.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
