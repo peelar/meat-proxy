@@ -2460,6 +2460,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .py(10.0)
         .center_y()
         .gap(12.0)
+        .hover_group()
         .hover(c.hover)
         .cursor(rune::Cursor::Pointer)
         .on_press(move |s: &mut App| s.toggle_expanded(&id_toggle))
@@ -2621,14 +2622,20 @@ fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     .on_press(move |s: &mut App| s.press_approve(&id))
     .build(k)
     .key(format!("approve-{}", pr.id));
-    row()
+    let wrap = row()
         .center_y()
         .help(if armed {
             format!("Press again to approve {}#{}", pr.repo, pr.number)
         } else {
             "Approve without a comment".to_owned()
         })
-        .child(button)
+        .child(button);
+    // It shows while the row is hovered, and stays once it is armed, busy or done.
+    if armed || busy || done {
+        wrap
+    } else {
+        wrap.group_opacity(0.0, 1.0)
+    }
 }
 
 /// A pull request GitHub merged by itself, kept faded at the bottom of its section until cleared.
@@ -4751,6 +4758,29 @@ mod tests {
         state.press_approve(&id);
         assert!(state.approve_armed.is_none());
         assert!(state.approving.is_empty(), "a preview never calls GitHub");
+    }
+
+    #[test]
+    fn approve_shows_only_while_its_row_is_hovered() {
+        let mut state = init();
+        state.preview = true;
+        seed_preview(&mut state);
+        state.page = Page::Inbox;
+        let mut rt = Runtime::new(state, view, (1000.0, 800.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let key = "approve-acme/engine#418";
+        let opacity = |rt: &Runtime<App>| {
+            rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .map(|e| e.opacity)
+        };
+        assert_eq!(opacity(&rt), Some(0.0));
+        let (x, y) = rt.find("pr-row-acme/engine#418").unwrap();
+        rt.pointer_move(x + 20.0, y);
+        rt.frame(0.5);
+        rt.frame(1.0);
+        assert_eq!(opacity(&rt), Some(1.0));
     }
 
     #[test]
