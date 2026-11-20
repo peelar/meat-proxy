@@ -1,10 +1,5 @@
-"""The GitHub that parity drives see: one signed-in account and `github::demo_prs()`'s nine pull requests.
-
-It answers what meat-proxy (Rune) and its Exact port ask `gh`: `auth token`,
-`auth status`, `api graphql` searches, and `api /notifications -i`. The pull
-requests are `github::demo_prs()`'s nine, as GraphQL nodes, timed relative to
-now so both apps compute the same ages. MEAT_PROXY_FAKE_GH=signed-out makes
-every call fail as a signed-out gh does.
+"""The GitHub that api.py serves: one signed-in account and the sample inbox's nine pull requests, as GraphQL
+nodes, timed relative to now.
 """
 import json
 import os

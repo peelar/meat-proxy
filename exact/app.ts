@@ -17,7 +17,7 @@ const CLIENT_ID = import.meta.env.GITHUB_CLIENT_ID ?? '';
 const CLIENT_SECRET = import.meta.env.GITHUB_CLIENT_SECRET ?? '';
 const TOKEN_ORIGIN = import.meta.env.GITHUB_TOKEN_ORIGIN ?? 'https://github.com';
 const TOKEN_URL = TOKEN_ORIGIN === 'https://github.com' ? 'https://github.com/login/oauth/access_token' : `${TOKEN_ORIGIN}/api/github-token`;
-// The API, which a launch may replace with the parity harness's fake (harness/api.py). Its token is honoured
+// The API, which a launch may replace with the fake in harness/api.py. Its token is honoured
 // only for an API that is not GitHub's, so a shipped build always signs in.
 const API = import.meta.env.GITHUB_API ?? 'https://api.github.com';
 const REAL = API === 'https://api.github.com';
@@ -339,7 +339,7 @@ function ruleQueryText(r: Rule): string {
   return ['is:pr', 'is:open', ...(r.excludeDrafts ? ['-is:draft'] : []), ...(r.excludeMine ? ['-author:@me'] : []), r.query.trim()].filter(Boolean).join(' ');
 }
 
-/** `github::demo_prs()`: the sample inbox before GitHub is connected. */
+/** The sample inbox before GitHub is connected. */
 function demoPrs(nowMs: number): PullRequest[] {
   const at = (h: number) => new Date(nowMs - h * 3_600_000).toISOString();
   const row = (repo: string, number: number, title: string, author: string, mine: boolean, draft: boolean, review: PullRequest['review'],

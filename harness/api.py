@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A fake api.github.com for the Exact port's parity drives, answered from github_fake.py:
+"""A fake api.github.com for the app's drives and tests, answered from github_fake.py:
 POST /graphql, GET /user and GET /notifications. `python3 api.py [port]` (default 8787).
 MEAT_PROXY_FAKE_GH=signed-out answers every request 401, as GitHub does for a revoked token."""
 import json
