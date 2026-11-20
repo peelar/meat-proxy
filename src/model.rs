@@ -219,6 +219,56 @@ impl MergeReadiness {
     }
 }
 
+/// Whether GitHub can merge this pull request by itself once its requirements are met.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoMerge {
+    /// The repository or the user's permissions do not allow it.
+    #[default]
+    Unavailable,
+    /// It can be turned on.
+    Available,
+    /// It is on: GitHub merges as soon as the checks and reviews allow.
+    On,
+}
+
+/// What became of a pull request with auto-merge on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackedState {
+    /// Auto-merge is on and the pull request is still open.
+    Watching,
+    Merged,
+    /// Closed without merging.
+    Closed,
+}
+
+impl TrackedState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrackedState::Watching => "watching",
+            TrackedState::Merged => "merged",
+            TrackedState::Closed => "closed",
+        }
+    }
+
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "merged" => TrackedState::Merged,
+            "closed" => TrackedState::Closed,
+            _ => TrackedState::Watching,
+        }
+    }
+}
+
+/// A pull request with auto-merge on, kept as it was when last seen so that it can stay on screen,
+/// faded, once GitHub has merged it and it has left the lists.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tracked {
+    pub pr: PullRequest,
+    /// The Inbox section it was in.
+    pub section: String,
+    pub state: TrackedState,
+}
+
 /// The merge method the repository prefers for this user.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeMethod {
@@ -271,6 +321,9 @@ pub struct PullRequest {
     pub incoming_reason: IncomingReason,
     /// Requested reviewers or people who have reviewed
     pub reviewers: Vec<String>,
+    /// People whose latest deciding review is an approval.
+    #[serde(default)]
+    pub approved_by: Vec<String>,
     /// Hours since last update/commit (for draft staleness)
     pub idle_hours: u64,
     /// Hours since it was opened; 0 when not known (older saved data).
@@ -295,6 +348,8 @@ pub struct PullRequest {
     pub merge_readiness: MergeReadiness,
     #[serde(default)]
     pub merge_method: MergeMethod,
+    #[serde(default)]
+    pub auto_merge: AutoMerge,
     /// Written by someone outside the organization (GitHub's author association: a contributor with
     /// no membership, a first-timer or no one). Teammates sort ahead of these within a section.
     #[serde(default)]
@@ -408,6 +463,16 @@ impl PullRequest {
     /// have to fall inside it.
     pub fn within_days(&self, days: u32) -> bool {
         days == 0 || self.age_hours() < u64::from(days) * 24
+    }
+
+    /// "lkostrowski approved", "lkostrowski and mirekm approved", "lkostrowski +2 approved".
+    pub fn approval_label(&self) -> String {
+        match self.approved_by.as_slice() {
+            [] => "Approved".to_owned(),
+            [one] => format!("{one} approved"),
+            [a, b] => format!("{a} and {b} approved"),
+            [a, rest @ ..] => format!("{a} +{} approved", rest.len()),
+        }
     }
 
     /// When it last moved: "3h ago".
@@ -751,6 +816,7 @@ mod tests {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(),
             idle_hours: idle_days * 24,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: idle_days * 24,
             head_ref: String::new(),
@@ -762,6 +828,7 @@ mod tests {
             deletions: 0,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),

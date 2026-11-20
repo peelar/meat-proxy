@@ -67,6 +67,13 @@ pub struct App {
     /// Pull requests a sync just brought in, with when each starts to appear.
     pub arrivals: Vec<(String, std::time::Instant)>,
     pub merge_worker: Latest<(String, Result<(), String>)>,
+    /// Turning auto-merge on or off: the pull request, which, and how it went.
+    pub auto_merge_worker: Latest<(String, bool, Result<(), String>)>,
+    pub auto_merging: Vec<String>,
+    /// Pull requests with auto-merge on, and the ones GitHub merged by itself (shown faded).
+    pub tracked: Vec<model::Tracked>,
+    /// Asks GitHub what became of tracked pull requests that left the lists.
+    pub resolve_worker: Latest<Vec<(String, Result<String, String>)>>,
     pub last_synced: Option<std::time::Instant>,
     /// The status text as last drawn, to redraw only when it changes.
     pub sync_label_shown: String,
@@ -151,6 +158,10 @@ fn init() -> App {
         celebrations: Vec::new(),
         arrivals: Vec::new(),
         merge_worker: Latest::default(),
+        auto_merge_worker: Latest::default(),
+        auto_merging: Vec::new(),
+        tracked: Vec::new(),
+        resolve_worker: Latest::default(),
         last_synced: None,
         sync_label_shown: String::new(),
         group_order: (0..sections::Layout::default().sections.len() as u8).collect(),
@@ -298,6 +309,7 @@ impl App {
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
         self.ignored = snap.ignored;
+        self.tracked = snap.tracked;
         self.drop_removed_prs();
         // Pull requests saved before the limit was set, or under another one, do not slip through.
         let days = self.sync_options.max_age_days;
@@ -639,6 +651,119 @@ impl App {
         let (id, url, method) = (pr.id.clone(), pr.url.clone(), pr.merge_method);
         self.merge_worker
             .request((), move |()| (id, github::merge_pr(&url, method)));
+    }
+
+    /// What pressing the auto-merge button does: Some(true) turns it on, Some(false) turns it off,
+    /// None when it is not on offer (the pull request can be merged now, or GitHub does not allow it).
+    pub fn auto_merge_target(&self, pr_id: &str) -> Option<bool> {
+        let pr = self.prs.iter().find(|p| p.id == pr_id)?;
+        match pr.auto_merge {
+            model::AutoMerge::On => Some(false),
+            model::AutoMerge::Available if !pr.merge_readiness.is_ready() => Some(true),
+            _ => None,
+        }
+    }
+
+    pub fn press_auto_merge(&mut self, pr_id: &str) {
+        let Some(enable) = self.auto_merge_target(pr_id) else {
+            return;
+        };
+        if self.preview || !self.auto_merging.is_empty() {
+            return;
+        }
+        let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
+            return;
+        };
+        self.auto_merging.push(pr_id.to_owned());
+        let (id, url, method) = (pr.id.clone(), pr.url.clone(), pr.merge_method);
+        self.auto_merge_worker.request((), move |()| {
+            (id, enable, github::set_auto_merge(&url, method, enable))
+        });
+    }
+
+    fn save_tracked_row(&self, t: &model::Tracked) {
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.save_tracked(t);
+        }
+    }
+
+    /// Remove the faded row of a pull request that auto-merge finished.
+    pub fn clear_tracked(&mut self, pr_id: &str) {
+        self.tracked.retain(|t| t.pr.id != pr_id);
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.delete_tracked(pr_id);
+        }
+    }
+
+    /// After a sync: remember pull requests that have auto-merge on, forget the ones it was turned
+    /// off for, and ask GitHub what became of the ones that left the lists.
+    pub fn after_sync_track(&mut self) {
+        let (draft, open, now) = (
+            self.draft_stale_hours,
+            self.open_stale_hours,
+            current_epoch_hour(),
+        );
+        let live: Vec<model::PullRequest> = self.prs.clone();
+        for pr in &live {
+            let on = pr.ownership == Ownership::Mine && pr.auto_merge == model::AutoMerge::On;
+            let known = self.tracked.iter().position(|t| t.pr.id == pr.id);
+            match (on, known) {
+                (true, Some(i)) => {
+                    self.tracked[i].pr = pr.clone();
+                    self.tracked[i].state = model::TrackedState::Watching;
+                }
+                (true, None) => {
+                    let section = self
+                        .action_group_of(pr, pr.attention(draft, open, now))
+                        .map_or_else(|| "Merge these".to_owned(), |(_, name)| name.to_owned());
+                    self.tracked.push(model::Tracked {
+                        pr: pr.clone(),
+                        section,
+                        state: model::TrackedState::Watching,
+                    });
+                }
+                (false, Some(i)) if self.tracked[i].state == model::TrackedState::Watching => {
+                    // Auto-merge was turned off: nothing to follow any more.
+                    let id = self.tracked.remove(i).pr.id;
+                    if !self.preview
+                        && let Ok(db) = Database::open_default()
+                    {
+                        let _ = db.delete_tracked(&id);
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+            if let Some(t) = self.tracked.iter().find(|t| t.pr.id == pr.id) {
+                self.save_tracked_row(t);
+            }
+        }
+        if self.resolve_worker.is_pending() || self.preview {
+            return;
+        }
+        let gone: Vec<(String, String)> = self
+            .tracked
+            .iter()
+            .filter(|t| {
+                t.state == model::TrackedState::Watching
+                    && !self.prs.iter().any(|p| p.id == t.pr.id)
+            })
+            .map(|t| (t.pr.id.clone(), t.pr.url.clone()))
+            .collect();
+        if !gone.is_empty() {
+            self.resolve_worker.request(gone, |list| {
+                list.into_iter()
+                    .map(|(id, url)| {
+                        let state = github::pr_state(&url);
+                        (id, state)
+                    })
+                    .collect()
+            });
+        }
     }
 
     pub fn set_max_age_days(&mut self, days: u32) {
@@ -1061,6 +1186,8 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.fast_notif_worker.set_waker(waker.clone());
     s.discovery_worker.set_waker(waker.clone());
     s.verify_worker.set_waker(waker.clone());
+    s.auto_merge_worker.set_waker(waker.clone());
+    s.resolve_worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
@@ -1187,6 +1314,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     s.trigger_discovery();
                 }
                 s.queue_judgments();
+                s.after_sync_track();
                 let events: Vec<_> = events
                     .into_iter()
                     .filter(|e| !s.is_ignored_url(&e.pr_url))
@@ -1271,6 +1399,56 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             s.trigger_sync();
         }
     }
+    if let Some((id, enable, result)) = s.auto_merge_worker.take() {
+        s.auto_merging.retain(|x| *x != id);
+        match result {
+            Ok(()) => {
+                if let Some(pr) = s.prs.iter_mut().find(|p| p.id == id) {
+                    pr.auto_merge = if enable {
+                        model::AutoMerge::On
+                    } else {
+                        model::AutoMerge::Available
+                    };
+                }
+                s.after_sync_track();
+                s.trigger_sync();
+            }
+            Err(error) => {
+                s.status_banner = Some(format!(
+                    "Could not turn auto-merge {}. {error}",
+                    if enable { "on" } else { "off" }
+                ));
+            }
+        }
+        changed = true;
+    }
+
+    if let Some(results) = s.resolve_worker.take() {
+        for (id, state) in results {
+            let Ok(state) = state else { continue };
+            let finished = match state.as_str() {
+                "MERGED" => model::TrackedState::Merged,
+                "CLOSED" => model::TrackedState::Closed,
+                _ => continue,
+            };
+            if let Some(t) = s.tracked.iter_mut().find(|t| t.pr.id == id) {
+                t.state = finished;
+                let t = t.clone();
+                s.save_tracked_row(&t);
+                if finished == model::TrackedState::Merged {
+                    notify::post(
+                        &format!("auto-merged-{id}"),
+                        "Auto-merged",
+                        &format!("{}#{}: {}", t.pr.repo, t.pr.number, t.pr.title),
+                        Some(&t.pr.url),
+                        s.allow_os_side_effects,
+                    );
+                }
+            }
+        }
+        changed = true;
+    }
+
     if let Some((id, result)) = s.merge_worker.take() {
         s.merging.retain(|m| *m != id);
         match result {
@@ -1896,6 +2074,13 @@ const EYE: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M1.6 8s2.3-4.2 6.4-4.2S14.4 8 14.4 8s-2.3 4.2-6.4 4.2S1.6 8 1.6 8Z"/><circle fill="none" stroke="currentColor" stroke-width="1.3" cx="8" cy="8" r="1.9"/>"#,
 };
 
+/// Auto-merge: a bolt.
+const BOLT: rune::Icon = rune::Icon {
+    name: "auto-merge",
+    view: 16.0,
+    body: r#"<path fill="currentColor" d="M9.2 1.5 3.8 9h3.5l-.7 5.5L12.2 7H8.7l.5-5.5Z"/>"#,
+};
+
 const TRASH: rune::Icon = rune::Icon {
     name: "remove",
     view: 16.0,
@@ -2014,7 +2199,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         ),
         PrAttention::MyDraftNeedsNudge => ("Stale draft".to_owned(), c.warning.fg),
         PrAttention::MyOpenChangesRequested => ("Changes requested".to_owned(), c.danger.fg),
-        PrAttention::MyOpenApproved => ("Approved".to_owned(), mint(k)),
+        PrAttention::MyOpenApproved => (pr.approval_label(), mint(k)),
         PrAttention::MyOpenWaiting => ("Waiting for review".to_owned(), c.text_muted),
         PrAttention::MyDraftActive => ("Draft".to_owned(), c.text_muted),
         PrAttention::IncomingWatched => ("Watching".to_owned(), c.text_muted),
@@ -2173,6 +2358,58 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
     line
 }
 
+/// A pull request GitHub merged by itself, kept faded at the bottom of its section until cleared.
+fn finished_row(k: &Kit, t: &model::Tracked) -> El {
+    let c = &k.c;
+    let pr = &t.pr;
+    let (label, color) = match t.state {
+        model::TrackedState::Merged => ("Auto-merged ✓", mint(k)),
+        _ => ("Closed without merging", c.text_muted),
+    };
+    let id = pr.id.clone();
+    row()
+        .key(format!("finished-{}", pr.id))
+        .w_full()
+        .pl(14.0)
+        .pr(14.0)
+        .py(10.0)
+        .center_y()
+        .gap(12.0)
+        .opacity(0.62)
+        .child(rune::icon(&PR_ICON, 16.0).color(c.text_faint))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(
+                    text(pr.title.clone())
+                        .font(TextStyle::new(14.0, 530.0))
+                        .color(c.text_muted)
+                        .truncate(),
+                )
+                .child(
+                    row()
+                        .center_y()
+                        .gap(9.0)
+                        .child(text(pr.repo.clone()).font(k.ty.small).color(c.text_muted))
+                        .child(
+                            text(format!("#{}", pr.number))
+                                .font(k.ty.mono)
+                                .color(c.text_muted),
+                        )
+                        .child(el().size(1.0, 10.0).fill(c.border_base))
+                        .child(text(label).font(k.ty.small_medium).color(color)),
+                ),
+        )
+        .child(
+            icon_action(k.glyph.close, "Clear")
+                .on_press(move |s: &mut App| s.clear_tracked(&id))
+                .build(k)
+                .key(format!("clear-{}", pr.id)),
+        )
+}
+
 /// The Merge button on one of the user's PRs: off until GitHub says it can merge, armed by the
 /// first press, and replaced by a celebration once the merge lands.
 fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
@@ -2187,6 +2424,11 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .as_ref()
         .is_some_and(|(armed, _)| *armed == pr.id);
     let busy = !s.merging.is_empty();
+    // Not mergeable yet: GitHub can merge it by itself once it is, which is its own state.
+    let auto_on = pr.auto_merge == model::AutoMerge::On;
+    let auto_offer = !ready && s.auto_merge_target(&pr.id) == Some(true);
+    let auto = auto_on || auto_offer;
+    let auto_busy = s.auto_merging.contains(&pr.id);
 
     let button = if merging {
         Button::new("Merging…")
@@ -2194,6 +2436,16 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             .disabled(true)
     } else if armed {
         Button::new("Confirm merge").variant(ButtonVariant::Submit)
+    } else if auto_on {
+        Button::new("Auto-merge on")
+            .variant(ButtonVariant::Submit)
+            .icon(&BOLT)
+            .disabled(auto_busy)
+    } else if auto_offer {
+        Button::new("Auto-merge")
+            .variant(ButtonVariant::Outline)
+            .icon(&BOLT)
+            .disabled(auto_busy)
     } else {
         Button::new("Merge")
             .variant(if ready {
@@ -2204,13 +2456,26 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             .disabled(!ready || busy)
     }
     .control_size(ControlSize::Small)
-    .on_press(move |s: &mut App| s.press_merge(&id))
+    .on_press(move |s: &mut App| {
+        if auto {
+            s.press_auto_merge(&id)
+        } else {
+            s.press_merge(&id)
+        }
+    })
     .build(k)
     .key(format!("merge-{}", pr.id));
 
     row()
         .center_y()
-        .help(if armed {
+        .help(if auto_on {
+            "Merges by itself as soon as GitHub allows it. Click to turn off".to_owned()
+        } else if auto_offer {
+            format!(
+                "Merge by itself once GitHub allows it ({}). Click to turn on",
+                pr.merge_readiness.blocked_reason().to_lowercase()
+            )
+        } else if armed {
             format!(
                 "Press again to {} merge {}#{}",
                 pr.merge_method.label(),
@@ -2654,6 +2919,12 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
     };
     // A pull request no section claims is not listed.
     items.retain(|pr| group(pr).is_some());
+    // Ones auto-merge finished stay at the bottom of their section, faded, until cleared.
+    let finished: Vec<&model::Tracked> = s
+        .tracked
+        .iter()
+        .filter(|t| t.state != model::TrackedState::Watching && s.matches_search(&t.pr))
+        .collect();
     items.sort_by(|a, b| {
         let rank = |pr: &PullRequest| group(pr).map_or(usize::MAX, |(id, _)| s.group_rank(id));
         rank(a)
@@ -2663,7 +2934,7 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    if items.is_empty() {
+    if items.is_empty() && finished.is_empty() {
         return col()
             .key("empty-inbox-state")
             .w_full()
@@ -2702,6 +2973,18 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
             displayed.push(g);
         }
     }
+    for t in &finished {
+        if let Some(at) = s
+            .layout
+            .sections
+            .iter()
+            .position(|sec| sec.name == t.section)
+            && !displayed.iter().any(|(p, _)| usize::from(*p) == at)
+        {
+            displayed.push((at as u8, s.layout.sections[at].name.as_str()));
+        }
+    }
+    displayed.sort_by_key(|(p, _)| s.group_rank(*p));
     // Ignored sits at the bottom and is not dragged, so it is left out of the drag order.
     let order: Vec<u8> = displayed
         .iter()
@@ -2786,11 +3069,13 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                                     .font(TextStyle::new(13.0, 650.0))
                                     .color(c.text_muted),
                             )
-                            .child(
+                            .child(if in_group > 0 {
                                 text(in_group.to_string())
                                     .font(k.ty.small)
-                                    .color(c.text_faint),
-                            )
+                                    .color(c.text_faint)
+                            } else {
+                                el()
+                            })
                             .child(if s.smart_active()
                                 && s.layout.sections.get(usize::from(position)).is_some_and(sections::Section::uses_model)
                             {
@@ -2829,6 +3114,16 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                     parent: None,
                 };
                 list = list.child(minimal_pr_row(s, &item, k, true));
+            }
+            let mut first = !items
+                .iter()
+                .any(|pr| group(pr).is_some_and(|(id, _)| id == position));
+            for t in finished.iter().filter(|t| t.section == heading) {
+                if !first {
+                    list = list.child(el().w_full().h(1.0).fill(c.border_weak));
+                }
+                first = false;
+                list = list.child(finished_row(k, t));
             }
         }
         section = section.child(list);
@@ -3579,6 +3874,36 @@ fn main() {
             s.ignored.insert("acme/cli#910".into());
             s.ignored_open = true;
         }),
+        ("auto-merge", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            for pr in &mut s.prs {
+                match pr.number {
+                    412 => {
+                        pr.auto_merge = model::AutoMerge::Available;
+                        pr.merge_readiness = model::MergeReadiness::NeedsReview;
+                    }
+                    889 => {
+                        pr.auto_merge = model::AutoMerge::On;
+                        pr.merge_readiness = model::MergeReadiness::NeedsReview;
+                    }
+                    _ => {}
+                }
+            }
+            // One GitHub merged by itself while the app was closed.
+            if let Some(done) = s.prs.iter().find(|p| p.number == 908).cloned() {
+                let mut pr = done;
+                pr.id = "acme/cli#901".into();
+                pr.number = 901;
+                pr.title = "cli: print the version next to the command name".into();
+                pr.approved_by = vec!["lkostrowski".into()];
+                s.tracked.push(model::Tracked {
+                    pr,
+                    section: "Merge these".into(),
+                    state: model::TrackedState::Merged,
+                });
+            }
+        }),
         // A moment into two pull requests arriving: the tint is still fading.
         ("arriving", |s| {
             seed_preview(s);
@@ -4011,6 +4336,104 @@ mod tests {
         state.apply_snapshot(snap);
         assert_eq!(state.prs.len(), 1);
         assert_eq!(state.prs[0].id, pr.id);
+    }
+
+    #[test]
+    fn auto_merge_is_a_state_of_the_merge_button() {
+        let mut state = init();
+        state.preview = true;
+        state.prs = github::demo_prs();
+        let id = "acme/engine#412".to_owned();
+        let set = |s: &mut App, auto: model::AutoMerge, ready: model::MergeReadiness| {
+            let pr = s.prs.iter_mut().find(|p| p.id == id).unwrap();
+            pr.auto_merge = auto;
+            pr.merge_readiness = ready;
+        };
+        use model::{AutoMerge, MergeReadiness};
+        // Not mergeable yet but GitHub allows it: auto-merge is on offer.
+        set(
+            &mut state,
+            AutoMerge::Available,
+            MergeReadiness::NeedsReview,
+        );
+        assert_eq!(state.auto_merge_target(&id), Some(true));
+        // Mergeable now: plain Merge, no auto-merge.
+        set(&mut state, AutoMerge::Available, MergeReadiness::Ready);
+        assert_eq!(state.auto_merge_target(&id), None);
+        // Not allowed: nothing to offer.
+        set(
+            &mut state,
+            AutoMerge::Unavailable,
+            MergeReadiness::NeedsReview,
+        );
+        assert_eq!(state.auto_merge_target(&id), None);
+        // Already on: pressing turns it off.
+        set(&mut state, AutoMerge::On, MergeReadiness::NeedsReview);
+        assert_eq!(state.auto_merge_target(&id), Some(false));
+    }
+
+    #[test]
+    fn a_pull_request_auto_merge_finished_stays_faded_until_cleared() {
+        let mut state = init();
+        state.preview = true;
+        state.page = Page::Inbox;
+        state.filter = InboxFilter::Inbox;
+        state.prs = github::demo_prs();
+        let mut merged = state.prs.iter().find(|p| p.number == 908).unwrap().clone();
+        merged.id = "acme/cli#999".into();
+        merged.number = 999;
+        merged.auto_merge = model::AutoMerge::On;
+        // It is followed while auto-merge is on, in the section it was in.
+        state.prs.push(merged.clone());
+        state.after_sync_track();
+        let tracked = state.tracked.iter().find(|t| t.pr.id == merged.id).unwrap();
+        assert_eq!(tracked.state, model::TrackedState::Watching);
+        assert_eq!(tracked.section, "Merge these");
+        // GitHub merges it, and it leaves the lists.
+        state.prs.retain(|p| p.id != merged.id);
+        state.tracked[0].state = model::TrackedState::Merged;
+        let mut rt = Runtime::new(state, view, (920.0, 1500.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        assert!(
+            rt.find("finished-acme/cli#999").is_some(),
+            "it stays on screen"
+        );
+        let (x, y) = rt.find("clear-acme/cli#999").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(2.0 / 60.0);
+        assert!(
+            rt.find("finished-acme/cli#999").is_none(),
+            "clearing removes it"
+        );
+        // It survives a restart until it is cleared.
+        let db = Database::open_in_memory().unwrap();
+        let mut t = rt.state.tracked.first().cloned().unwrap_or(model::Tracked {
+            pr: merged.clone(),
+            section: "Merge these".into(),
+            state: model::TrackedState::Merged,
+        });
+        t.state = model::TrackedState::Merged;
+        db.save_tracked(&t).unwrap();
+        let loaded = db.load_snapshot().unwrap().tracked;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].state, model::TrackedState::Merged);
+        db.delete_tracked(&t.pr.id).unwrap();
+        assert!(db.load_snapshot().unwrap().tracked.is_empty());
+    }
+
+    #[test]
+    fn who_approved_is_named() {
+        let mut pr = github::demo_prs().remove(0);
+        assert_eq!(pr.approval_label(), "Approved");
+        pr.approved_by = vec!["lkostrowski".into()];
+        assert_eq!(pr.approval_label(), "lkostrowski approved");
+        pr.approved_by.push("mirekm".into());
+        assert_eq!(pr.approval_label(), "lkostrowski and mirekm approved");
+        pr.approved_by.push("kai".into());
+        pr.approved_by.push("juno".into());
+        assert_eq!(pr.approval_label(), "lkostrowski +3 approved");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::process::Command;
 
 use crate::model::{
-    CiStatus, IncomingReason, MergeMethod, MergeReadiness, NotificationEvent, NotificationKind,
-    Ownership, PullRequest, RepoConfig, ReviewState, WatchRule,
+    AutoMerge, CiStatus, IncomingReason, MergeMethod, MergeReadiness, NotificationEvent,
+    NotificationKind, Ownership, PullRequest, RepoConfig, ReviewState, WatchRule,
 };
 
 #[derive(Clone, Debug)]
@@ -317,6 +317,8 @@ const PR_FIELDS: &str = r#"
       state
       mergeable
       mergeStateStatus
+      autoMergeRequest { enabledAt }
+      viewerCanEnableAutoMerge
       repository { nameWithOwner isArchived isPrivate viewerDefaultMergeMethod defaultBranchRef { name } }
       reviewDecision
       reviewRequests(first: 6) {
@@ -325,6 +327,12 @@ const PR_FIELDS: &str = r#"
             ... on User { login }
             ... on Team { name }
           }
+        }
+      }
+      decisions: reviews(last: 20, states: [APPROVED, CHANGES_REQUESTED, DISMISSED]) {
+        nodes {
+          author { login }
+          state
         }
       }
       reviews(last: 6) {
@@ -729,6 +737,27 @@ fn parse_graphql_pr(
         }
     }
 
+    // Who approved: the people whose latest deciding review is an approval.
+    let mut verdicts: Vec<(String, bool)> = Vec::new();
+    if let Some(nodes) = node["decisions"]["nodes"].as_array() {
+        for rev in nodes {
+            let (Some(login), Some(state)) =
+                (rev["author"]["login"].as_str(), rev["state"].as_str())
+            else {
+                continue;
+            };
+            if login == author {
+                continue;
+            }
+            verdicts.retain(|(who, _)| who != login);
+            verdicts.push((login.to_owned(), state == "APPROVED"));
+        }
+    }
+    let approved_by: Vec<String> = verdicts
+        .into_iter()
+        .filter_map(|(who, approved)| approved.then_some(who))
+        .collect();
+
     let updated_at = node
         .get("updatedAt")
         .and_then(|v| v.as_str())
@@ -748,6 +777,7 @@ fn parse_graphql_pr(
         ci_status,
         incoming_reason: reason,
         reviewers,
+        approved_by,
         idle_hours,
         opened_hours: estimate_hours_since_iso8601(node["createdAt"].as_str().unwrap_or_default()),
         unreviewed_hours: estimate_hours_since_iso8601(review_clock),
@@ -771,6 +801,13 @@ fn parse_graphql_pr(
             node["mergeable"].as_str().unwrap_or_default(),
             node["mergeStateStatus"].as_str().unwrap_or_default(),
         ),
+        auto_merge: if node["autoMergeRequest"].is_object() {
+            AutoMerge::On
+        } else if node["viewerCanEnableAutoMerge"].as_bool() == Some(true) {
+            AutoMerge::Available
+        } else {
+            AutoMerge::Unavailable
+        },
         merge_method: MergeMethod::from_github(
             node["repository"]["viewerDefaultMergeMethod"]
                 .as_str()
@@ -795,6 +832,43 @@ fn parse_graphql_pr(
 }
 
 /// Merges the PR with `gh`, the way the repository prefers.
+/// Turn auto-merge on (merging with `method`) or off. GitHub merges by itself once the checks and
+/// reviews the repository asks for are in.
+pub fn set_auto_merge(url: &str, method: MergeMethod, enable: bool) -> Result<(), String> {
+    let mut command = gh_command();
+    command.args(["pr", "merge", url]);
+    if enable {
+        command.args(["--auto", method.flag()]);
+    } else {
+        command.arg("--disable-auto");
+    }
+    let out = command
+        .output()
+        .map_err(|e| format!("Could not run gh: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("GitHub would not change auto-merge on this pull request")
+        .trim()
+        .to_owned())
+}
+
+/// OPEN, MERGED or CLOSED, for a pull request that has left the lists.
+pub fn pr_state(url: &str) -> Result<String, String> {
+    let out = gh_command()
+        .args(["pr", "view", url, "--json", "state", "-q", ".state"])
+        .output()
+        .map_err(|e| format!("Could not run gh: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
 pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
     let out = gh_command()
         .args(["pr", "merge", url, method.flag()])
@@ -873,6 +947,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::AssignedOrReviewRequested,
             reviewers: vec!["mira".to_string()],
             idle_hours: 1,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 1,
             head_ref: "metal-layer-coalesce".to_string(),
@@ -884,6 +959,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 38,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -903,6 +979,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(), // No reviewer assigned -> NUDGE to send to colleague!
             idle_hours: 54,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 54, // > 48h (2 days) without review -> NUDGE!
             head_ref: "feat/baseline-cache".to_string(),
@@ -914,6 +991,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 14,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -933,6 +1011,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(),
             idle_hours: 120, // 5 days idle draft -> NUDGE!
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 120,
             head_ref: "draft/coreaudio-ring".to_string(),
@@ -944,6 +1023,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 19,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -963,6 +1043,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::SubscribedRule,
             reviewers: vec!["kai".to_string()],
             idle_hours: 5,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 5,
             head_ref: "windfoil-cjk-1x".to_string(),
@@ -974,6 +1055,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 29,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -994,6 +1076,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::AssignedOrReviewRequested,
             reviewers: vec!["mira".to_string()],
             idle_hours: 3,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 3,
             head_ref: "acp-zero-copy-diffs".to_string(),
@@ -1005,6 +1088,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 84,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: true,
             body: String::new(),
             labels: Vec::new(),
@@ -1024,6 +1108,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: vec!["juno".to_string()],
             idle_hours: 74,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 74, // Waiting on @rekram for 3 days -> NUDGE to ping colleague!
             head_ref: "fix/retry-529-backoff".to_string(),
@@ -1035,6 +1120,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 12,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -1054,6 +1140,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: vec!["kai".to_string()],
             idle_hours: 2,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 0,
             head_ref: "feat/json-events".to_string(),
@@ -1065,6 +1152,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 7,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -1086,6 +1174,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: vec!["alex".to_string()],
             idle_hours: 6,
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 6,
             head_ref: "sqlite-importance-weights".to_string(),
@@ -1097,6 +1186,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 44,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
@@ -1117,6 +1207,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             incoming_reason: IncomingReason::NotIncoming,
             reviewers: Vec::new(),
             idle_hours: 8, // Fresh draft (< 72h), not stale
+            approved_by: Vec::new(),
             opened_hours: 0,
             unreviewed_hours: 8,
             head_ref: "draft/ws-webhook-bridge".to_string(),
@@ -1128,12 +1219,18 @@ pub fn demo_prs() -> Vec<PullRequest> {
             deletions: 0,
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
+            auto_merge: AutoMerge::Unavailable,
             external: false,
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
         },
     ];
+    for pr in &mut prs {
+        if pr.number == 908 {
+            pr.approved_by = vec!["kai".to_owned()];
+        }
+    }
     // Opened a while before it last moved, as real ones are.
     for pr in &mut prs {
         pr.opened_hours = pr.idle_hours * 4 + 20;

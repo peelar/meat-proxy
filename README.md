@@ -35,8 +35,11 @@ Most sections are plain rules (who asked, size, title, author). Three (Do first,
 To turn the model on create `~/.config/meat-proxy/judge.json`. Two kinds of endpoint work. A **decision model** (TypeSafe's Jev, or `ggml-org/Kev-4B-GGUF` served by llama.cpp) takes a state and typed yes/no questions at `/v1/systemone` and returns probabilities itself (`"provider": "systemone"`). Any **OpenAI-compatible chat model** that returns token log-probabilities can stand in for one (`"provider": "chat"`, the default):
 
 ```json
-{ "provider": "systemone", "base_url": "https://api.typesafe.ai/v1", "api_key": "…", "model": "jev-latest", "input_usd_per_million": 0.042 }
+{ "provider": "systemone", "base_url": "https://openrouter.ai/api/v1", "decisions_url": "https://openrouter.ai/api/alpha/decisions",
+  "api_key": "…", "model": "typesafe/jev-1.13" }
 ```
+
+That is Jev through OpenRouter. Straight from TypeSafe, use `"base_url": "https://api.typesafe.ai/v1"`, `"model": "jev-latest"` and no `decisions_url`; a local llama.cpp server running `ggml-org/Kev-4B-GGUF` works the same way.
 
 The chat stand-in looks like this:
 

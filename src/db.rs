@@ -5,7 +5,7 @@ use crate::github::SyncOptions;
 use crate::judge::Judgment;
 use crate::model::{
     CiStatus, InboxFilter, IncomingReason, NotificationEvent, NotificationKind, Ownership,
-    PullRequest, RepoConfig, ReviewState, WatchRule,
+    PullRequest, RepoConfig, ReviewState, Tracked, TrackedState, WatchRule,
 };
 
 #[derive(Clone, Debug)]
@@ -32,6 +32,8 @@ pub struct AppSnapshot {
     pub show_team_reviews: bool,
     /// Pull requests the user moved to Ignored.
     pub ignored: std::collections::HashSet<String>,
+    /// Pull requests with auto-merge on, and what became of them.
+    pub tracked: Vec<Tracked>,
     /// Which sections the saved group order was made for.
     pub layout_key: Option<String>,
 }
@@ -164,6 +166,17 @@ impl Database {
                 [],
             )?;
         }
+        let has_approvers: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pull_requests') WHERE name='approved_by')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_approvers {
+            self.conn.execute(
+                "ALTER TABLE pull_requests ADD COLUMN approved_by TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
         let has_removed: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repos') WHERE name='removed')",
             [],
@@ -187,6 +200,15 @@ impl Database {
             }
             tx.commit()?;
         }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_merges (
+                pr_id TEXT PRIMARY KEY,
+                pr_json TEXT NOT NULL,
+                section TEXT NOT NULL,
+                state TEXT NOT NULL,
+                changed_at INTEGER NOT NULL
+            );",
+        )?;
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS ignored_prs (
                 pr_id TEXT PRIMARY KEY,
@@ -294,7 +316,56 @@ impl Database {
                 .is_some_and(|v| v == "1"),
             layout_key: self.get_setting("inbox_layout")?,
             ignored: self.load_ignored()?,
+            tracked: self.load_tracked()?,
         })
+    }
+
+    pub fn load_tracked(&self) -> Result<Vec<Tracked>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pr_json, section, state FROM auto_merges ORDER BY changed_at")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (json, section, state) = row?;
+            if let Ok(pr) = serde_json::from_str::<PullRequest>(&json) {
+                out.push(Tracked {
+                    pr,
+                    section,
+                    state: TrackedState::from_db(&state),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn save_tracked(&self, t: &Tracked) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO auto_merges (pr_id, pr_json, section, state, changed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(pr_id) DO UPDATE SET pr_json = ?2, section = ?3, state = ?4,
+               changed_at = CASE WHEN state != ?4 THEN ?5 ELSE changed_at END",
+            params![
+                t.pr.id,
+                serde_json::to_string(&t.pr).unwrap_or_default(),
+                t.section,
+                t.state.as_str(),
+                chrono::Utc::now().timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_tracked(&self, pr_id: &str) -> Result<(), rusqlite::Error> {
+        self.conn
+            .execute("DELETE FROM auto_merges WHERE pr_id = ?1", params![pr_id])?;
+        Ok(())
     }
 
     pub fn load_ignored(&self) -> Result<std::collections::HashSet<String>, rusqlite::Error> {
@@ -412,7 +483,8 @@ impl Database {
             "SELECT id, repo, number, title, url, author, ownership, is_draft,
                     review_state, ci_status, incoming_reason, reviewers_json,
                     idle_hours, unreviewed_hours, head_ref, matched_rule,
-                    snoozed_until_hour, additions, deletions, head_repo, stack_base, opened_hours
+                    snoozed_until_hour, additions, deletions, head_repo, stack_base, opened_hours,
+                    approved_by
              FROM pull_requests
              ORDER BY number DESC",
         )?;
@@ -446,6 +518,7 @@ impl Database {
                 head_repo: row.get(19)?,
                 stack_base: row.get(20)?,
                 opened_hours: row.get::<_, i64>(21)? as u64,
+                approved_by: serde_json::from_str(&row.get::<_, String>(22)?).unwrap_or_default(),
                 matched_rule: row.get(15)?,
                 snoozed_until_hour: row.get::<_, i64>(16)? as u64,
                 additions: row.get::<_, i64>(17)? as u32,
@@ -453,6 +526,7 @@ impl Database {
                 // Merge state is fetched fresh on every sync, never stored.
                 merge_readiness: Default::default(),
                 merge_method: Default::default(),
+                auto_merge: Default::default(),
                 external: false,
                 body: String::new(),
                 labels: Vec::new(),
@@ -489,8 +563,9 @@ impl Database {
                     id, repo, number, title, url, author, ownership, is_draft,
                     review_state, ci_status, incoming_reason, reviewers_json,
                     idle_hours, unreviewed_hours, head_ref, matched_rule,
-                    snoozed_until_hour, additions, deletions, head_repo, stack_base, opened_hours
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                    snoozed_until_hour, additions, deletions, head_repo, stack_base, opened_hours,
+                    approved_by
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     pr.id,
                     pr.repo,
@@ -517,6 +592,7 @@ impl Database {
                     pr.head_repo,
                     pr.stack_base,
                     pr.opened_hours as i64,
+                    serde_json::to_string(&pr.approved_by).unwrap_or_else(|_| "[]".to_string()),
                 ],
             )?;
         }

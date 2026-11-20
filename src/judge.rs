@@ -69,6 +69,10 @@ pub struct JudgeConfig {
     /// "systemone" (a decision model's `/systemone` endpoint, which returns probabilities itself).
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// Where a decision model answers, when it is not `<base_url>/systemone`. OpenRouter serves
+    /// Jev at `https://openrouter.ai/api/alpha/decisions`.
+    #[serde(default)]
+    pub decisions_url: Option<String>,
     /// What a million input tokens cost, for the spending cap, when the endpoint does not say.
     #[serde(default)]
     pub input_usd_per_million: f64,
@@ -112,6 +116,7 @@ impl JudgeConfig {
             api_key: String::new(),
             model: default_model(),
             provider: default_provider(),
+            decisions_url: None,
             input_usd_per_million: 0.0,
             include_private: false,
             max_per_sync: default_max_per_sync(),
@@ -128,6 +133,9 @@ impl JudgeConfig {
         }
         if let Ok(provider) = std::env::var("MEAT_PROXY_JUDGE_PROVIDER") {
             cfg.provider = provider;
+        }
+        if let Ok(url) = std::env::var("MEAT_PROXY_JUDGE_DECISIONS_URL") {
+            cfg.decisions_url = Some(url);
         }
         // A local server needs no key; a hosted one without a key would only fail.
         let local = cfg.base_url.contains("localhost") || cfg.base_url.contains("127.0.0.1");
@@ -310,7 +318,10 @@ pub fn parse_systemone(
         Usage {
             prompt_tokens: input,
             completion_tokens: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
-            cost_usd: input as f64 * input_usd_per_million / 1e6,
+            // OpenRouter reports what the call cost; elsewhere it is priced by the config.
+            cost_usd: response["usage"]["cost"]
+                .as_f64()
+                .unwrap_or(input as f64 * input_usd_per_million / 1e6),
         },
     ))
 }
@@ -413,9 +424,15 @@ fn post_json(
             .map_err(|e| e.to_string())?;
     }
     let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    // An endpoint that is a whole address (OpenRouter's decisions URL) is used as it is.
+    let url = if endpoint.starts_with("http") {
+        endpoint.to_owned()
+    } else {
+        format!("{}{endpoint}", cfg.base_url.trim_end_matches('/'))
+    };
     let config = format!(
-        "url = \"{}{endpoint}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
-        escape(cfg.base_url.trim_end_matches('/')),
+        "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
+        escape(&url),
         escape(&cfg.api_key)
     );
     let spawned = Command::new("curl")
@@ -456,7 +473,8 @@ pub fn ask(
     pr: &PullRequest,
 ) -> Result<(Judgment, Usage), String> {
     let (odds, usage) = if cfg.provider == "systemone" {
-        let response = post_json(cfg, "/systemone", &systemone_request(cfg, pr, questions))?;
+        let endpoint = cfg.decisions_url.as_deref().unwrap_or("/systemone");
+        let response = post_json(cfg, endpoint, &systemone_request(cfg, pr, questions))?;
         parse_systemone(&response, questions, cfg.input_usd_per_million)?
     } else {
         let request = serde_json::json!({
@@ -700,6 +718,14 @@ mod tests {
         assert_eq!(odds, [0.04, 0.91, 0.5]);
         assert_eq!(usage.prompt_tokens, 1000);
         assert!((usage.cost_usd - 0.000042).abs() < 1e-9);
+        // OpenRouter reports the cost itself, and that wins over the configured price.
+        let routed = json!({
+            "model": "typesafe/jev-1.13-20260917",
+            "answers": { "trivial": { "noul": 0.93 }, "urgent": { "noul": 0.02 }, "risky": { "noul": 0.1 } },
+            "usage": { "input_tokens": 346, "output_tokens": 37, "cost": 0.000014532 },
+        });
+        let (_, usage) = parse_systemone(&routed, &questions, 0.042).unwrap();
+        assert_eq!(usage.cost_usd, 0.000014532);
         let missing = json!({ "answers": { "trivial": { "noul": 0.1 } } });
         assert!(parse_systemone(&missing, &questions, 0.0).is_err());
     }
@@ -739,6 +765,7 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
             provider: "chat".into(),
+            decisions_url: None,
             input_usd_per_million: 0.0,
             include_private: false,
             max_per_sync: max,
