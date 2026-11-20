@@ -1,9 +1,15 @@
 // meat-proxy: a pull request inbox. Screens: Connect GitHub (/setup), Set up your inbox (/setup/preferences),
 // the inbox (/), the sample inbox (/sample) and Settings (/settings, the Mac's Settings window on ⌘,).
-// app.ts answers every source; the rules are logic.ts's. Colours and controls are the platform's.
+// app.ts answers every source; the rules are logic.ts's. Controls are the platform's; the type is Inter and the accent black, as the Rune app's (app.forma).
 use OAuthSession, OAuthResult from "@exact/oauth"
 use showNotification, notificationclick, NotificationEvent from "@exact/notifications"
 use EmptyState from "exact:content"
+
+// Inter, the Rune app's typeface (rsms/inter, OFL: assets/fonts/Inter-LICENSE.txt); the 700 of headings is SemiBold.
+font "Inter"
+  400 = "assets/fonts/Inter-Regular.ttf"
+  500 = "assets/fonts/Inter-Medium.ttf"
+  600 700 = "assets/fonts/Inter-SemiBold.ttf"
 
 shape Time
   epochAtZero: number
@@ -266,7 +272,7 @@ component MeatProxy
     nav = go(nav, "/setup")
 
   view
-    main testId="root" navigationKey=`${top(nav).id}` navigate=follow width="100%" height="100%"
+    main testId="root" font-family="Inter" navigationKey=`${top(nav).id}` navigate=follow width="100%" height="100%"
       notificationclick=opened
       for e in stack(nav) key=e.id
         if e.name == "setup"
