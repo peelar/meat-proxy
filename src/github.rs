@@ -312,10 +312,12 @@ const PR_FIELDS: &str = r#"
       deletions
       author { login }
       authorAssociation
+      bodyText
+      labels(first: 6) { nodes { name } }
       state
       mergeable
       mergeStateStatus
-      repository { nameWithOwner isArchived viewerDefaultMergeMethod defaultBranchRef { name } }
+      repository { nameWithOwner isArchived isPrivate viewerDefaultMergeMethod defaultBranchRef { name } }
       reviewDecision
       reviewRequests(first: 6) {
         nodes {
@@ -775,6 +777,17 @@ fn parse_graphql_pr(
             node["authorAssociation"].as_str(),
             Some("CONTRIBUTOR" | "FIRST_TIME_CONTRIBUTOR" | "FIRST_TIMER" | "NONE")
         ),
+        body: node["bodyText"].as_str().unwrap_or_default().to_owned(),
+        labels: node["labels"]["nodes"]
+            .as_array()
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|l| l["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        private_repo: node["repository"]["isPrivate"].as_bool().unwrap_or(false),
     })
 }
 
@@ -868,6 +881,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         PullRequest {
             id: "acme/engine#412".to_string(),
@@ -894,6 +910,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         PullRequest {
             id: "acme/engine#397".to_string(),
@@ -920,6 +939,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         PullRequest {
             id: "acme/engine#421".to_string(),
@@ -946,6 +968,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -973,6 +998,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: true,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         PullRequest {
             id: "acme/cli#889".to_string(),
@@ -999,6 +1027,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         PullRequest {
             id: "acme/cli#908".to_string(),
@@ -1025,6 +1056,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         // --- acme/inbox (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -1053,6 +1087,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
         PullRequest {
             id: "acme/inbox#19".to_string(),
@@ -1080,6 +1117,9 @@ pub fn demo_prs() -> Vec<PullRequest> {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         },
     ]
 }

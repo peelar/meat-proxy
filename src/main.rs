@@ -7,6 +7,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch
 mod avatars;
 mod db;
 mod github;
+mod judge;
 mod model;
 mod notify;
 mod reorder;
@@ -25,7 +26,9 @@ const ARMED_SECS: f32 = 4.0;
 /// How long a merged PR's row celebrates before it leaves the list.
 const CELEBRATION_SECS: f32 = 1.9;
 
-const DEFAULT_GROUP_ORDER: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
+const DEFAULT_GROUP_ORDER: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+/// Review requests the model judged trivial, split off from the ones worth reading.
+const SKIM_GROUP: (u8, &str) = (7, "Skim these");
 
 fn current_epoch_hour() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64 / 3600
@@ -85,6 +88,13 @@ pub struct App {
     pub status_banner: Option<String>,
     pub boot_worker: Latest<Result<db::AppSnapshot, rusqlite::Error>>,
     pub sync_worker: Latest<Result<SyncOutput, String>>,
+    pub judge: Option<judge::JudgeConfig>,
+    pub judgments: std::collections::HashMap<String, judge::Judgment>,
+    pub judge_worker: Latest<judge::Batch>,
+    /// Spent on the model in this run of the app, against the config's cap.
+    pub judge_spent: f64,
+    /// An error that would repeat (bad key, no credit): no more asking until the app restarts.
+    pub judge_off: bool,
     pub auth_worker: Latest<Result<(), String>>,
     pub fast_notif_worker: Latest<Result<github::NotificationPoll, String>>,
     pub discovery_worker: Latest<Result<github::Discovery, String>>,
@@ -148,6 +158,11 @@ fn init() -> App {
         status_banner: None,
         boot_worker: Latest::default(),
         sync_worker: Latest::default(),
+        judge: None,
+        judgments: std::collections::HashMap::new(),
+        judge_worker: Latest::default(),
+        judge_spent: 0.0,
+        judge_off: false,
         auth_worker: Latest::default(),
         fast_notif_worker: Latest::default(),
         discovery_worker: Latest::default(),
@@ -237,10 +252,72 @@ impl App {
         self.max_age_input = TextEdit::new(&self.sync_options.max_age_days.to_string());
         self.last_notif_modified = snap.last_notif_modified;
         self.organization = TextEdit::new(&snap.organization);
+        self.judgments = snap.judgments;
         self.drop_removed_prs();
         if self.onboarded {
             self.page = Page::Inbox;
         }
+    }
+
+    /// What a judgment says about this pull request, if one was made.
+    pub fn judgment(&self, pr: &PullRequest) -> Option<&judge::Judgment> {
+        self.judgments.get(&pr.id)
+    }
+
+    /// The Inbox group of a pull request: what it asks of you, except that a review request the
+    /// model found trivial moves to its own group.
+    fn action_group_of(&self, pr: &PullRequest, attention: PrAttention) -> (u8, &'static str) {
+        let group = attention.action_group();
+        if matches!(group.0, 0 | 3) && self.judgment(pr).is_some_and(judge::Judgment::is_skim) {
+            SKIM_GROUP
+        } else {
+            group
+        }
+    }
+
+    fn is_urgent(&self, pr: &PullRequest) -> bool {
+        self.judgment(pr).is_some_and(judge::Judgment::is_urgent)
+    }
+
+    /// After a sync: answer what cheap rules can, and send the model only what is left.
+    pub fn queue_judgments(&mut self) {
+        let Some(cfg) = self.judge.clone() else {
+            return;
+        };
+        if self.judge_off || self.preview || self.judge_worker.is_pending() {
+            return;
+        }
+        let (draft, open, now) = (
+            self.draft_stale_hours,
+            self.open_stale_hours,
+            current_epoch_hour(),
+        );
+        let plan = judge::plan(
+            &self.prs,
+            |pr| pr.attention(draft, open, now),
+            &self.judgments,
+            &cfg,
+        );
+        let settled = plan.settled;
+        if !settled.is_empty() {
+            self.store_judgments(settled);
+        }
+        if plan.to_ask.is_empty() || self.judge_spent >= cfg.max_spend_usd {
+            return;
+        }
+        let spent = self.judge_spent;
+        self.judge_worker
+            .request(plan.to_ask, move |prs| judge::run_batch(&cfg, prs, spent));
+    }
+
+    fn store_judgments(&mut self, judged: Vec<(String, judge::Judgment)>) {
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let live: Vec<String> = self.prs.iter().map(|p| p.id.clone()).collect();
+            let _ = db.save_judgments(&judged, &live);
+        }
+        self.judgments.extend(judged);
     }
 
     pub fn refresh_ranks(&mut self) {
@@ -396,9 +473,11 @@ impl App {
                     && self.matches_search(pr)
             })
             .map(|pr| {
-                pr.attention(self.draft_stale_hours, self.open_stale_hours, now)
-                    .action_group()
-                    .0
+                self.action_group_of(
+                    pr,
+                    pr.attention(self.draft_stale_hours, self.open_stale_hours, now),
+                )
+                .0
             })
             .collect();
         groups.sort_unstable();
@@ -525,6 +604,7 @@ impl App {
         list.sort_by(|a, b| {
             a.external
                 .cmp(&b.external)
+                .then_with(|| self.is_urgent(b).cmp(&self.is_urgent(a)))
                 .then_with(|| a.idle_hours.cmp(&b.idle_hours))
                 .then_with(|| b.number.cmp(&a.number))
         });
@@ -769,6 +849,10 @@ fn setup(s: &mut App, waker: rune::Waker) {
     }
     s.boot_worker.set_waker(waker.clone());
     s.sync_worker.set_waker(waker.clone());
+    s.judge_worker.set_waker(waker.clone());
+    if !s.preview && s.allow_os_side_effects {
+        s.judge = judge::JudgeConfig::load();
+    }
     s.auth_worker.set_waker(waker.clone());
     s.fast_notif_worker.set_waker(waker.clone());
     s.discovery_worker.set_waker(waker.clone());
@@ -897,6 +981,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     s.complete_onboarding();
                     s.trigger_discovery();
                 }
+                s.queue_judgments();
                 if s.onboarded {
                     deliver_events(s, events);
                     if let Ok(db) = Database::open_default() {
@@ -907,6 +992,16 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             }
             Err(reason) => s.sync_status = SyncStatus::NeedsAuth { reason },
         }
+        changed = true;
+    }
+
+    if let Some(batch) = s.judge_worker.take() {
+        s.judge_spent += batch.usage.cost_usd;
+        s.judge_off |= batch.fatal;
+        for error in batch.errors.iter().take(3) {
+            eprintln!("meat-proxy judge: {error}");
+        }
+        s.store_judgments(batch.judged);
         changed = true;
     }
 
@@ -1644,6 +1739,24 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .child(text(pr.age_label()).font(k.ty.small).color(c.text_muted))
         .child(el().size(1.0, 10.0).fill(c.border_base))
         .child(text(status).font(k.ty.small_medium).color(tone));
+    if let Some(judgment) = s.judgment(pr) {
+        // One quiet word at most: what the model thinks should change how you review it.
+        let tag = if judgment.is_urgent() {
+            Some(("urgent", c.danger.fg))
+        } else if judgment.is_risky() {
+            Some(("read carefully", c.warning.fg))
+        } else {
+            None
+        };
+        if let Some((word, color)) = tag {
+            metadata = metadata.child(
+                text(word)
+                    .font(k.ty.small)
+                    .color(color)
+                    .help(judgment.summary()),
+            );
+        }
+    }
     if let Some(parent) = item.parent {
         metadata = metadata.child(
             text(format!("↳ #{parent}"))
@@ -2191,13 +2304,16 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
         })
         .collect();
     let group = |pr: &PullRequest| {
-        pr.attention(s.draft_stale_hours, s.open_stale_hours, now)
-            .action_group()
+        s.action_group_of(
+            pr,
+            pr.attention(s.draft_stale_hours, s.open_stale_hours, now),
+        )
     };
     items.sort_by(|a, b| {
         s.group_rank(group(a).0)
             .cmp(&s.group_rank(group(b).0))
             .then_with(|| a.external.cmp(&b.external))
+            .then_with(|| s.is_urgent(b).cmp(&s.is_urgent(a)))
             .then_with(|| a.idle_hours.cmp(&b.idle_hours))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -2825,9 +2941,131 @@ fn seed_preview(s: &mut App) {
     s.prs = github::demo_prs();
     s.repos = github::infer_repos_from_prs(&s.prs, &[]);
     s.last_synced = Some(std::time::Instant::now());
+    // What the model would have said about the two review requests in the demo data.
+    for (id, trivial, urgent, risky) in [
+        ("acme/engine#418", 0.04, 0.83, 0.12),
+        ("acme/cli#904", 0.93, 0.02, 0.03),
+    ] {
+        s.judgments.insert(
+            id.to_owned(),
+            judge::Judgment {
+                trivial,
+                urgent,
+                risky,
+                by: "gpt-4o-mini".into(),
+                fingerprint: String::new(),
+            },
+        );
+    }
+}
+
+/// `meat-proxy --judge-eval`: fetch the real pull requests (read only), judge them the way the app
+/// does, and print what each would get. Point MEAT_PROXY_DB at a copy of the database.
+fn judge_eval() {
+    let Some(mut cfg) = judge::JudgeConfig::load() else {
+        eprintln!("No judge config: put an api_key in ~/.config/meat-proxy/judge.json");
+        return;
+    };
+    cfg.max_per_sync = 100;
+    let snap = match Database::open_default().and_then(|db| db.load_snapshot()) {
+        Ok(snap) => snap,
+        Err(error) => return eprintln!("Could not read the saved data: {error}"),
+    };
+    let started = std::time::Instant::now();
+    let out = match github::fetch_live(&snap.repos, &snap.rules, snap.sync_options) {
+        Ok(out) => out,
+        Err(error) => return eprintln!("Sync failed: {error}"),
+    };
+    println!(
+        "synced {} pull requests in {:.1}s; model {} via {}",
+        out.prs.len(),
+        started.elapsed().as_secs_f32(),
+        cfg.model,
+        cfg.base_url
+    );
+    let now = current_epoch_hour();
+    let attention =
+        |pr: &PullRequest| pr.attention(snap.draft_stale_hours, snap.open_stale_hours, now);
+    let mut cache = std::collections::HashMap::new();
+    let plan = judge::plan(&out.prs, attention, &cache, &cfg);
+    let candidates = plan.cached + plan.settled.len() + plan.to_ask.len() + plan.deferred;
+    println!(
+        "{} need a judgment: {} answered by rules, {} for the model ({} deferred by the cap)",
+        candidates,
+        plan.settled.len(),
+        plan.to_ask.len(),
+        plan.deferred
+    );
+    cache.extend(plan.settled);
+    let asked = plan.to_ask.len();
+    let started = std::time::Instant::now();
+    let batch = judge::run_batch(&cfg, plan.to_ask, 0.0);
+    println!(
+        "{} calls in {:.1}s ({} answered): {} prompt + {} completion tokens, ${:.5}{}",
+        asked,
+        started.elapsed().as_secs_f32(),
+        batch.judged.len(),
+        batch.usage.prompt_tokens,
+        batch.usage.completion_tokens,
+        batch.usage.cost_usd,
+        if batch.fatal { "  STOPPED EARLY" } else { "" }
+    );
+    for error in batch.errors.iter().take(5) {
+        println!("  error: {error}");
+    }
+    cache.extend(batch.judged);
+
+    let again = judge::plan(&out.prs, attention, &cache, &cfg);
+    println!(
+        "second pass: {} calls, {} answered from the cache\n",
+        again.to_ask.len(),
+        again.cached
+    );
+
+    let mut rows: Vec<_> = out
+        .prs
+        .iter()
+        .filter_map(|pr| cache.get(&pr.id).map(|j| (pr, j)))
+        .collect();
+    rows.sort_by(|(a, ja), (b, jb)| {
+        jb.urgent
+            .partial_cmp(&ja.urgent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    println!(
+        "{:<5} {:<5} {:<5}  {:<4} {:<14} title",
+        "urg", "risk", "triv", "ext", "author"
+    );
+    for (pr, j) in rows {
+        let title: String = pr.title.chars().take(70).collect();
+        let verdict = if j.is_urgent() {
+            "URGENT"
+        } else if j.is_risky() {
+            "CAREFUL"
+        } else if j.is_skim() {
+            "skim"
+        } else {
+            ""
+        };
+        println!(
+            "{:<5.0} {:<5.0} {:<5.0}  {:<4} {:<14} {} {}   [{}]",
+            j.urgent * 100.0,
+            j.risky * 100.0,
+            j.trivial * 100.0,
+            if pr.external { "ext" } else { "" },
+            pr.author.chars().take(14).collect::<String>(),
+            title,
+            verdict,
+            j.by
+        );
+    }
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--judge-eval") {
+        return judge_eval();
+    }
     rune::prewarm_gpu();
     let chrome = Chrome {
         full_size_content: true,
@@ -3066,10 +3304,10 @@ mod tests {
         assert_eq!(state.group_rank(0), 0);
         // Groups 0, 2 and 4 are on screen; drag the last to the top.
         state.drop_group(&[0, 2, 4], 2, 0);
-        assert_eq!(state.group_order, [4, 0, 1, 2, 3, 5, 6]);
+        assert_eq!(state.group_order, [4, 0, 1, 2, 3, 5, 6, 7]);
         // Drag the first to the bottom of what is shown: it lands after group 2.
         state.drop_group(&[4, 0, 2], 0, 2);
-        assert_eq!(state.group_order, [0, 1, 2, 4, 3, 5, 6]);
+        assert_eq!(state.group_order, [0, 1, 2, 4, 3, 5, 6, 7]);
 
         state.toggle_collapse_group(2);
         assert_eq!(state.collapsed_groups, [2]);
@@ -3085,6 +3323,86 @@ mod tests {
         assert!(shown.iter().all(|g| state.collapsed_groups.contains(g)));
         state.toggle_collapse_all();
         assert!(state.collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn trivial_review_requests_get_their_own_group_and_urgent_ones_lead() {
+        let mut state = init();
+        state.preview = true;
+        state.prs = github::demo_prs();
+        let (draft, open, now) = (72, 48, current_epoch_hour());
+        let pr_904 = state.prs.iter().find(|p| p.number == 904).unwrap().clone();
+        let att = pr_904.attention(draft, open, now);
+        assert_eq!(
+            state.action_group_of(&pr_904, att).0,
+            0,
+            "no judgment: stays a review"
+        );
+
+        let judged = |trivial, urgent, risky| judge::Judgment {
+            trivial,
+            urgent,
+            risky,
+            by: "test".into(),
+            fingerprint: String::new(),
+        };
+        state
+            .judgments
+            .insert(pr_904.id.clone(), judged(0.9, 0.02, 0.02));
+        assert_eq!(state.action_group_of(&pr_904, att), SKIM_GROUP);
+        // A trivial change that is also urgent, or risky, is not for skimming.
+        state
+            .judgments
+            .insert(pr_904.id.clone(), judged(0.9, 0.7, 0.02));
+        assert_eq!(state.action_group_of(&pr_904, att).0, 0);
+        state
+            .judgments
+            .insert(pr_904.id.clone(), judged(0.9, 0.02, 0.8));
+        assert_eq!(state.action_group_of(&pr_904, att).0, 0);
+        // Pull requests of mine are never moved.
+        let mine = state
+            .prs
+            .iter()
+            .find(|p| p.ownership == Ownership::Mine)
+            .unwrap()
+            .clone();
+        state
+            .judgments
+            .insert(mine.id.clone(), judged(0.99, 0.0, 0.0));
+        let mine_att = mine.attention(draft, open, now);
+        assert_eq!(
+            state.action_group_of(&mine, mine_att),
+            mine_att.action_group()
+        );
+
+        // Within a repository, the urgent one jumps ahead of a newer one.
+        let mut older = state
+            .prs
+            .iter()
+            .find(|p| p.repo == "acme/engine")
+            .unwrap()
+            .clone();
+        older.id = "acme/engine#900".into();
+        older.number = 900;
+        older.external = false;
+        older.idle_hours = 500;
+        let mut newer = older.clone();
+        newer.id = "acme/engine#901".into();
+        newer.number = 901;
+        newer.idle_hours = 1;
+        state.prs = vec![older.clone(), newer];
+        state.filter = InboxFilter::All;
+        let order = |s: &App| {
+            s.prs_for_repo("acme/engine")
+                .iter()
+                .map(|p| p.number)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&state), [901, 900]);
+        state
+            .judgments
+            .insert(older.id.clone(), judged(0.1, 0.9, 0.1));
+        assert_eq!(order(&state), [900, 901]);
     }
 
     #[test]

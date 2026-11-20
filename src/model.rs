@@ -296,6 +296,14 @@ pub struct PullRequest {
     /// no membership, a first-timer or no one). Teammates sort ahead of these within a section.
     #[serde(default)]
     pub external: bool,
+    /// Plain-text description, kept only in memory for the judgment model (never saved).
+    #[serde(skip)]
+    pub body: String,
+    #[serde(skip)]
+    pub labels: Vec<String>,
+    /// The repository is private: its text does not go to a model unless the config allows it.
+    #[serde(skip)]
+    pub private_repo: bool,
 }
 
 impl PullRequest {
@@ -713,6 +721,9 @@ mod tests {
             merge_readiness: MergeReadiness::Unknown,
             merge_method: MergeMethod::Squash,
             external: false,
+            body: String::new(),
+            labels: Vec::new(),
+            private_repo: false,
         }
     }
 

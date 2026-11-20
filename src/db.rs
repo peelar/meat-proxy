@@ -2,6 +2,7 @@ use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
 use crate::github::SyncOptions;
+use crate::judge::Judgment;
 use crate::model::{
     CiStatus, InboxFilter, IncomingReason, NotificationEvent, NotificationKind, Ownership,
     PullRequest, RepoConfig, ReviewState, WatchRule,
@@ -23,6 +24,7 @@ pub struct AppSnapshot {
     pub collapsed_groups: Vec<u8>,
     pub last_notif_modified: Option<String>,
     pub organization: String,
+    pub judgments: std::collections::HashMap<String, Judgment>,
 }
 
 pub fn default_db_path() -> PathBuf {
@@ -113,6 +115,16 @@ impl Database {
                 exclude_drafts INTEGER NOT NULL DEFAULT 1,
                 exclude_mine INTEGER NOT NULL DEFAULT 1,
                 enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS judgments (
+                pr_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                trivial REAL NOT NULL,
+                urgent REAL NOT NULL,
+                risky REAL NOT NULL,
+                judged_by TEXT NOT NULL,
+                judged_at INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS notifications (
@@ -238,7 +250,60 @@ impl Database {
             },
             last_notif_modified,
             organization: self.get_setting("organization")?.unwrap_or_default(),
+            judgments: self.load_judgments()?,
         })
+    }
+
+    pub fn load_judgments(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Judgment>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pr_id, fingerprint, trivial, urgent, risky, judged_by FROM judgments",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Judgment {
+                    fingerprint: row.get(1)?,
+                    trivial: row.get::<_, f64>(2)? as f32,
+                    urgent: row.get::<_, f64>(3)? as f32,
+                    risky: row.get::<_, f64>(4)? as f32,
+                    by: row.get(5)?,
+                },
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Saves judgments and forgets the ones of pull requests that are no longer listed.
+    pub fn save_judgments(
+        &self,
+        judged: &[(String, Judgment)],
+        live_ids: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = chrono::Utc::now().timestamp();
+        for (id, j) in judged {
+            tx.execute(
+                "INSERT INTO judgments (pr_id, fingerprint, trivial, urgent, risky, judged_by, judged_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(pr_id) DO UPDATE SET fingerprint = ?2, trivial = ?3, urgent = ?4,
+                   risky = ?5, judged_by = ?6, judged_at = ?7",
+                params![id, j.fingerprint, f64::from(j.trivial), f64::from(j.urgent), f64::from(j.risky), j.by, now],
+            )?;
+        }
+        let keep: std::collections::HashSet<&String> = live_ids.iter().collect();
+        let mut stmt = tx.prepare("SELECT pr_id FROM judgments")?;
+        let stale: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(Result::ok)
+            .filter(|id| !keep.contains(id))
+            .collect();
+        drop(stmt);
+        for id in stale {
+            tx.execute("DELETE FROM judgments WHERE pr_id = ?1", params![id])?;
+        }
+        tx.commit()
     }
 
     /// Small numbers saved as `1,2,3`.
@@ -321,6 +386,9 @@ impl Database {
                 merge_readiness: Default::default(),
                 merge_method: Default::default(),
                 external: false,
+                body: String::new(),
+                labels: Vec::new(),
+                private_repo: false,
             })
         })?;
         let mut out = Vec::new();
