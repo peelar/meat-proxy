@@ -30,6 +30,7 @@ pub struct AppSnapshot {
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
     pub show_team_reviews: bool,
+    pub classify_private: bool,
     /// Pull requests the user moved to Ignored.
     pub ignored: std::collections::HashSet<String>,
     /// Pull requests with auto-merge on, and what became of them.
@@ -313,6 +314,9 @@ impl Database {
             hide_external: self.get_setting("hide_external")?.is_some_and(|v| v == "1"),
             show_team_reviews: self
                 .get_setting("show_team_reviews")?
+                .is_some_and(|v| v == "1"),
+            classify_private: self
+                .get_setting("classify_private")?
                 .is_some_and(|v| v == "1"),
             layout_key: self.get_setting("inbox_layout")?,
             ignored: self.load_ignored()?,

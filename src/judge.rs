@@ -77,8 +77,9 @@ pub struct JudgeConfig {
     /// What a million input tokens cost, for the spending cap, when the endpoint does not say.
     #[serde(default)]
     pub input_usd_per_million: f64,
-    /// Send text from private repositories too. Off: they are never sent.
-    #[serde(default)]
+    /// Send text from private repositories too. Off: they are never sent. Set from the app's
+    /// "private repositories" setting, not from this file.
+    #[serde(skip)]
     pub include_private: bool,
     /// The most pull requests one sync sends to the model.
     #[serde(default = "default_max_per_sync")]

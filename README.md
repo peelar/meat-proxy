@@ -47,7 +47,7 @@ The chat stand-in looks like this:
 { "base_url": "https://openrouter.ai/api/v1", "api_key": "…", "model": "openai/gpt-4o-mini" }
 ```
 
-`include_private`, `max_per_sync`, `max_spend_usd` and `input_usd_per_million` are optional. `MEAT_PROXY_JUDGE_URL`, `_KEY`, `_MODEL` and `_PROVIDER` override the file. `meat-proxy --judge-eval` prints the section of each of your open pull requests without opening a window.
+`max_per_sync`, `max_spend_usd` and `input_usd_per_million` are optional. `MEAT_PROXY_JUDGE_URL`, `_KEY`, `_MODEL` and `_PROVIDER` override the file. `meat-proxy --judge-eval` prints the section of each of your open pull requests without opening a window.
 
 ## Build from source
 

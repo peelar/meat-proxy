@@ -111,6 +111,8 @@ pub struct App {
     pub hide_external: bool,
     /// List requests made of a team you are in, not of you by name, in the Inbox too.
     pub show_team_reviews: bool,
+    /// Whether private repositories may be sent to the decision model. Off unless chosen.
+    pub classify_private: bool,
     /// Pull requests moved to the Ignored section, and whether that section is open.
     pub ignored: std::collections::HashSet<String>,
     pub ignored_open: bool,
@@ -193,6 +195,7 @@ fn init() -> App {
         layout: sections::Layout::default(),
         hide_external: false,
         show_team_reviews: false,
+        classify_private: false,
         ignored: std::collections::HashSet::new(),
         ignored_open: false,
         judgments: std::collections::HashMap::new(),
@@ -308,6 +311,7 @@ impl App {
         self.smart_sort = snap.smart_sort;
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
+        self.classify_private = snap.classify_private;
         self.ignored = snap.ignored;
         self.tracked = snap.tracked;
         self.drop_removed_prs();
@@ -428,6 +432,20 @@ impl App {
         }
     }
 
+    pub fn toggle_classify_private(&mut self) {
+        self.classify_private = !self.classify_private;
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting(
+                "classify_private",
+                if self.classify_private { "1" } else { "0" },
+            );
+        }
+        // Private pull requests become (or stop being) candidates: ask again on the next sync.
+        self.queue_judgments();
+    }
+
     pub fn toggle_hide_external(&mut self) {
         self.hide_external = !self.hide_external;
         if !self.preview
@@ -494,9 +512,10 @@ impl App {
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
     pub fn queue_judgments(&mut self) {
-        let Some(cfg) = self.judge.clone() else {
+        let Some(mut cfg) = self.judge.clone() else {
             return;
         };
+        cfg.include_private = self.classify_private;
         if self.judge_off || self.preview || self.judge_worker.is_pending() {
             return;
         }
@@ -3414,6 +3433,18 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         .build(k)
                         .key("option-hide-external"),
                 ))
+                .children(s.judge.is_some().then(|| {
+                    setup_row(
+                        k,
+                        "Send private repositories to the AI sorter",
+                        Switch::new(s.classify_private)
+                            .label("Send private repositories to the AI sorter")
+                            .hide_label()
+                            .on_toggle(|s: &mut App| s.toggle_classify_private())
+                            .build(k)
+                            .key("option-classify-private"),
+                    )
+                }))
                 .child(sync_option_row(
                     k,
                     "Show archived repositories",
@@ -3818,6 +3849,22 @@ fn main() {
         ("inbox", |s| {
             seed_preview(s);
             s.page = Page::Inbox;
+        }),
+        ("settings-ai", |s| {
+            seed_preview(s);
+            s.judge = Some(judge::JudgeConfig {
+                base_url: String::new(),
+                api_key: "x".into(),
+                model: "jev".into(),
+                provider: "systemone".into(),
+                decisions_url: None,
+                input_usd_per_million: 0.0,
+                include_private: false,
+                max_per_sync: 30,
+                max_spend_usd: 0.25,
+            });
+            s.page = Page::Inbox;
+            s.settings_open = true;
         }),
         ("settings", |s| {
             seed_preview(s);
