@@ -398,6 +398,18 @@ impl PullRequest {
         format!("{} old", span(self.opened_hours))
     }
 
+    /// How old it is by the older of its two clocks: when it was opened, and when it last moved.
+    /// An edit to a months-old pull request does not make it young.
+    pub fn age_hours(&self) -> u64 {
+        self.opened_hours.max(self.idle_hours)
+    }
+
+    /// Within the user's age limit, in days (0 = no limit): both its created and its updated date
+    /// have to fall inside it.
+    pub fn within_days(&self, days: u32) -> bool {
+        days == 0 || self.age_hours() < u64::from(days) * 24
+    }
+
     /// When it last moved: "3h ago".
     pub fn activity_label(&self) -> String {
         match self.idle_hours {

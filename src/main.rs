@@ -299,6 +299,9 @@ impl App {
         self.show_team_reviews = snap.show_team_reviews;
         self.ignored = snap.ignored;
         self.drop_removed_prs();
+        // Pull requests saved before the limit was set, or under another one, do not slip through.
+        let days = self.sync_options.max_age_days;
+        self.prs.retain(|pr| pr.within_days(days));
         if self.onboarded {
             self.page = Page::Inbox;
         }
@@ -641,7 +644,7 @@ impl App {
     pub fn set_max_age_days(&mut self, days: u32) {
         self.sync_options.max_age_days = days;
         if days > 0 {
-            self.prs.retain(|pr| pr.idle_hours < u64::from(days) * 24);
+            self.prs.retain(|pr| pr.within_days(days));
         }
         if !self.preview
             && let Ok(db) = Database::open_default()
@@ -3125,7 +3128,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 ))
                 .child(setup_row(
                     k,
-                    "Show PRs active in the last",
+                    "Show PRs opened in the last",
                     row()
                         .center_y()
                         .gap(8.0)
@@ -3136,7 +3139,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         )
                         .child(
                             TextInput::new(&s.max_age_input)
-                                .label("Show PRs active in the last (days)")
+                                .label("Show PRs opened in the last (days)")
                                 .width(Some(64.0))
                                 .on_edit(|s: &mut App| &mut s.max_age_input)
                                 .build(k)
@@ -3980,6 +3983,34 @@ mod tests {
         db.set_ignored("a/b#2", true).unwrap();
         db.set_ignored("a/b#1", false).unwrap();
         assert_eq!(db.load_snapshot().unwrap().ignored.len(), 1);
+    }
+
+    #[test]
+    fn the_age_limit_looks_at_when_it_was_opened_as_well_as_when_it_last_moved() {
+        let mut pr = github::demo_prs().remove(0);
+        pr.opened_hours = 24 * 190; // opened in May
+        pr.idle_hours = 24 * 14; // an edit two weeks ago
+        assert!(!pr.within_days(30), "an edit does not make it young");
+        assert!(pr.within_days(0), "0 means no limit");
+        assert!(pr.within_days(365));
+        // Opened recently but untouched for a while: the older clock counts too.
+        pr.opened_hours = 24 * 5;
+        pr.idle_hours = 24 * 40;
+        assert!(!pr.within_days(30));
+        pr.idle_hours = 24 * 3;
+        assert!(pr.within_days(30));
+        // Saved ones are held to it when they load.
+        let mut state = init();
+        state.preview = true;
+        let mut old = pr.clone();
+        old.id = "a/b#1".into();
+        old.opened_hours = 24 * 190;
+        old.idle_hours = 24 * 14;
+        let mut snap = Database::open_in_memory().unwrap().load_snapshot().unwrap();
+        snap.prs = vec![pr.clone(), old];
+        state.apply_snapshot(snap);
+        assert_eq!(state.prs.len(), 1);
+        assert_eq!(state.prs[0].id, pr.id);
     }
 
     #[test]

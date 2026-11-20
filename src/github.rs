@@ -489,7 +489,7 @@ pub fn fetch_live(
             ) else {
                 continue;
             };
-            if options.max_age_days > 0 && pr.idle_hours >= u64::from(options.max_age_days) * 24 {
+            if !pr.within_days(options.max_age_days) {
                 continue;
             }
             if search.tracked_only && !repos.iter().any(|r| !r.removed && r.name == pr.repo) {
@@ -537,7 +537,9 @@ fn fetch_search(
     search: &Search,
     options: SyncOptions,
 ) -> Result<(String, Vec<serde_json::Value>), String> {
-    // Archived repositories and old PRs are skipped server-side, which keeps the sync light.
+    // Archived repositories and old PRs are skipped server-side, which keeps the sync light. A
+    // pull request is old when it was opened long ago: updated is never before created, so the
+    // created date is the one that has to be inside the limit.
     let archived = if options.hide_archived {
         " archived:false"
     } else {
@@ -545,7 +547,7 @@ fn fetch_search(
     };
     let recent = if options.max_age_days > 0 {
         format!(
-            " updated:>={}",
+            " created:>={}",
             &utc_days_ago(u64::from(options.max_age_days))[..10]
         )
     } else {
