@@ -111,8 +111,9 @@ pub struct App {
     pub hide_external: bool,
     /// List requests made of a team you are in, not of you by name, in the Inbox too.
     pub show_team_reviews: bool,
-    /// Whether private repositories may be sent to the decision model. Off unless chosen.
-    pub classify_private: bool,
+    /// Whether the decision model may be asked at all. Off until chosen: turning it on sends the
+    /// description and changed file paths of review requests, private repositories included.
+    pub ai_enabled: bool,
     pub ai_url: TextEdit,
     pub ai_model: TextEdit,
     pub ai_key: TextEdit,
@@ -200,7 +201,7 @@ fn init() -> App {
         layout: sections::Layout::default(),
         hide_external: false,
         show_team_reviews: false,
-        classify_private: false,
+        ai_enabled: false,
         ai_url: TextEdit::new(judge::DECISIONS_URL),
         ai_model: TextEdit::new(judge::DECISIONS_MODEL),
         ai_key: TextEdit::new(""),
@@ -324,7 +325,7 @@ impl App {
         self.smart_sort = snap.smart_sort;
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
-        self.classify_private = snap.classify_private;
+        self.ai_enabled = snap.ai_enabled;
         self.ignored = snap.ignored;
         self.tracked = snap.tracked;
         self.drop_removed_prs();
@@ -369,7 +370,8 @@ impl App {
 
     /// Whether a model has anything to say here: a key is set, or verdicts were saved earlier.
     pub fn smart_available(&self) -> bool {
-        (self.judge.is_some() || !self.judgments.is_empty())
+        self.ai_enabled
+            && (self.judge.is_some() || !self.judgments.is_empty())
             && !self.layout.needed_questions().is_empty()
     }
 
@@ -474,15 +476,12 @@ impl App {
         true
     }
 
-    pub fn toggle_classify_private(&mut self) {
-        self.classify_private = !self.classify_private;
+    pub fn toggle_ai(&mut self) {
+        self.ai_enabled = !self.ai_enabled;
         if !self.preview
             && let Ok(db) = Database::open_default()
         {
-            let _ = db.set_setting(
-                "classify_private",
-                if self.classify_private { "1" } else { "0" },
-            );
+            let _ = db.set_setting("ai_enabled", if self.ai_enabled { "1" } else { "0" });
         }
         // Private pull requests become (or stop being) candidates: ask again on the next sync.
         self.queue_judgments();
@@ -554,11 +553,10 @@ impl App {
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
     pub fn queue_judgments(&mut self) {
-        let Some(mut cfg) = self.judge.clone() else {
+        let Some(cfg) = self.judge.clone() else {
             return;
         };
-        cfg.include_private = self.classify_private;
-        if self.judge_off || self.preview || self.judge_worker.is_pending() {
+        if !self.ai_enabled || self.judge_off || self.preview || self.judge_worker.is_pending() {
             return;
         }
         let (draft, open, now) = (
@@ -3349,10 +3347,21 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .gap(10.0)
         .child(text("AI").font(k.ty.ui_medium).color(c.text_base))
         .child(
-            text("Sorts review requests aimed at you by reading the description and changed file paths. Without a key, only rules sort.")
+            text("When on, the description and changed file paths of every PR that asks for your review, private repositories included, are sent to the model at this URL. Off, only rules sort.")
+                .wrap()
                 .font(k.ty.small)
                 .color(c.text_faint),
         )
+        .child(setup_row(
+            k,
+            "Use AI sorting",
+            Switch::new(s.ai_enabled)
+                .label("Use AI sorting")
+                .hide_label()
+                .on_toggle(|s: &mut App| s.toggle_ai())
+                .build(k)
+                .key("option-ai-enabled"),
+        ))
         .child(ai_field(
             "API URL",
             TextInput::new(&s.ai_url)
@@ -3383,16 +3392,6 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 .on_edit(|s: &mut App| &mut s.ai_key)
                 .build(k)
                 .key("option-ai-key"),
-        ))
-        .child(setup_row(
-            k,
-            "Send private repositories to the AI",
-            Switch::new(s.classify_private)
-                .label("Send private repositories to the AI")
-                .hide_label()
-                .on_toggle(|s: &mut App| s.toggle_classify_private())
-                .build(k)
-                .key("option-classify-private"),
         ));
 
     let doc = col()
@@ -3651,6 +3650,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
 
 fn seed_preview(s: &mut App) {
     s.loading = false;
+    s.ai_enabled = true;
     s.sync_status = SyncStatus::Connected {
         username: "octocat".to_string(),
     };
@@ -4180,6 +4180,7 @@ mod tests {
         huge.additions = 600;
         assert_eq!(section_name(&state, &huge).as_deref(), Some("Big reviews"));
         // The model's answers apply, in the order of the sections.
+        state.ai_enabled = true;
         state.judgments.insert(
             pr.id.clone(),
             said(&[("trivial", 0.9), ("urgent", 0.02), ("risky", 0.02)], "m"),
@@ -4223,6 +4224,7 @@ mod tests {
     fn rules_alone_ignore_the_models_answers_but_keep_the_rules_own() {
         let mut state = init();
         state.preview = true;
+        state.ai_enabled = true;
         let mut review = github::demo_prs()
             .into_iter()
             .find(|p| p.number == 904)

@@ -79,10 +79,6 @@ pub struct JudgeConfig {
     /// What a million input tokens cost, for the spending cap, when the endpoint does not say.
     #[serde(default)]
     pub input_usd_per_million: f64,
-    /// Send text from private repositories too. Off: they are never sent. Set from the app's
-    /// "private repositories" setting, not from this file.
-    #[serde(skip)]
-    pub include_private: bool,
     /// The most pull requests one sync sends to the model.
     #[serde(default = "default_max_per_sync")]
     pub max_per_sync: usize,
@@ -138,7 +134,6 @@ impl JudgeConfig {
             provider: default_provider(),
             decisions_url: None,
             input_usd_per_million: 0.0,
-            include_private: false,
             max_per_sync: default_max_per_sync(),
             max_spend_usd: default_max_spend(),
         });
@@ -179,7 +174,6 @@ impl JudgeConfig {
             provider: default_provider(),
             decisions_url: None,
             input_usd_per_million: 0.0,
-            include_private: false,
             max_per_sync: default_max_per_sync(),
             max_spend_usd: default_max_spend(),
         });
@@ -219,11 +213,9 @@ impl JudgeConfig {
 
 /// Whether a pull request is worth asking about at all. Mine, drafts, team requests and ones only
 /// watched need no judgment about how to review them.
-pub fn is_candidate(pr: &PullRequest, attention: PrAttention, cfg: &JudgeConfig) -> bool {
+pub fn is_candidate(pr: &PullRequest, attention: PrAttention) -> bool {
     // Only requests that name you: the Inbox is about those and your own pull requests.
-    attention == PrAttention::IncomingAssigned
-        && !pr.is_draft
-        && (cfg.include_private || !pr.private_repo)
+    attention == PrAttention::IncomingAssigned && !pr.is_draft
 }
 
 /// What cheap rules already know. A hit costs nothing and is final.
@@ -684,7 +676,7 @@ pub fn plan(
     }
     let key = questions_key(questions);
     for pr in prs {
-        if !is_candidate(pr, attention(pr), cfg) {
+        if !is_candidate(pr, attention(pr)) {
             continue;
         }
         let fp = fingerprint(pr, &key);
@@ -891,7 +883,6 @@ mod tests {
             provider: "chat".into(),
             decisions_url: None,
             input_usd_per_million: 0.0,
-            include_private: false,
             max_per_sync: max,
             max_spend_usd: 1.0,
         }
@@ -909,7 +900,6 @@ mod tests {
             p.idle_hours = n;
             prs.push(p);
         }
-        prs[3].private_repo = true; // never leaves the machine
         prs[4].author = "renovate".into(); // a rule answers
         let mut cache = HashMap::new();
         cache.insert(
