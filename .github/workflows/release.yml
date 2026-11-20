@@ -1,27 +1,54 @@
-# Pushing a tag vX.Y.Z releases the Exact app (exact/) as GitHub release vX.Y.Z, which installed copies update to
-# within the hour (scripts/install-web.sh, scripts/install-mac.sh):
+# Every push to main releases the Exact app (exact/) as a GitHub release, which installed copies update to within the
+# hour (scripts/install-web.sh, scripts/install-mac.sh):
 #
 #   meat-proxy-web-vX.Y.Z.tar.gz   the web app to run on your own computer (scripts/package.sh web)
 #   install-web.sh                 its installer
 #   meat-proxy-macos.zip           the ad-hoc signed Mac app (scripts/package.sh mac)
 #   install-mac.sh                 its installer
 #
-# The OAuth app is the repository's OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET secrets (GitHub refuses secret names starting GITHUB_): the one whose callback is
-# http://127.0.0.1/, which both parts sign in through.
+# The version is exact/package.json's while it has no release, else the next patch after the newest release: raise
+# the version there for a minor or major release. A push that changes only docs or screenshots releases nothing.
+#
+# The OAuth app is the repository's OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET secrets (GitHub refuses secret names
+# starting GITHUB_): the one whose callback is http://127.0.0.1/, which both parts sign in through.
 name: Release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    branches: [main]
+    paths-ignore: ["**.md", "snapshots/**"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# One run at a time, so two pushes never take the same version.
 concurrency:
   group: release
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: next
+        run: |
+          base=$(node -p 'require("./exact/package.json").version')
+          newest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          # The higher of the two; a release of it already made means the next patch.
+          top=$(printf '%s\n%s\n' "$base" "${newest:-0.0.0}" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          if git rev-parse -q --verify "refs/tags/v$top" >/dev/null; then
+            top=$(echo "$top" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')
+          fi
+          echo "tag=v$top" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$top"
+
   package:
+    needs: version
     strategy:
       matrix:
         include:
@@ -47,7 +74,7 @@ jobs:
             ~/.cache/exact
           key: exact-${{ matrix.part }}-${{ runner.os }}-${{ hashFiles('exact/exact-rev') }}
       - run: sh scripts/setup.sh ${{ matrix.part }}
-      - run: scripts/package.sh ${{ matrix.part }} "$GITHUB_REF_NAME" out
+      - run: scripts/package.sh ${{ matrix.part }} "${{ needs.version.outputs.tag }}" out
         env:
           GITHUB_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
           GITHUB_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
@@ -57,13 +84,15 @@ jobs:
           path: out/
 
   release:
-    needs: package
+    needs: [version, package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: out
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+      # The tag is created at the commit that was built.
+      - run: gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
         env:
+          TAG: ${{ needs.version.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
