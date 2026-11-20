@@ -28,7 +28,7 @@ higher version.
 
 ## Inbox sections (experimental)
 
-The Inbox tab is a list of sections, and the list is configuration: **Settings → Inbox sections → Edit** opens `~/.config/meat-proxy/sections.json`, filled with the defaults. A pull request goes to the first section whose conditions all hold, so the order is the priority and the default order on screen. Dragging only reorders the screen; the button next to "Sorted by …" puts it back. `hide` takes pull requests out of the Inbox tab (they stay under Theirs and All), and **Settings → Show outside contributors in the Inbox** is the simple flag for the most common case.
+The Inbox tab is a list of sections, and the list is configuration: **Settings → Inbox sections → Customize** opens an editor for it. A pull request goes to the first section whose conditions all hold, so the order is the priority and the default order on screen. Dragging only reorders the screen; the button next to "Sorted by …" puts it back. A **hide** rule takes pull requests out of the Inbox tab (they stay under Theirs and All), and **Settings → Show outside contributors in the Inbox** is the simple switch for the most common case. The editor stores what you build in `~/.config/meat-proxy/sections.json`, which looks like this and can also be edited by hand:
 
 ```json
 {
@@ -42,7 +42,7 @@ The Inbox tab is a list of sections, and the list is configuration: **Settings �
 }
 ```
 
-A condition is a word, and `!` negates it: `asked:me`, `asked:team`, `asked:any`, `is:approved`, `is:changes-requested`, `is:unreviewed`, `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=600`, `repo:org/*`, `author:name*`, `label:security`, `title:hotfix`, `any`, or the id of a question. A mistake is named in Settings and the defaults stay in use. Changes apply at the next sync.
+A condition is a word, and `!` negates it: `asked:me`, `asked:team`, `asked:any`, `is:approved`, `is:changes-requested`, `is:unreviewed`, `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=600`, `repo:org/*`, `author:name*`, `label:security`, `title:hotfix`, `any`, or the id of a question. A mistake in a hand-edited file is named in Settings and the defaults stay in use; the editor never saves an invalid layout.
 
 A **question** is answered by a language model with a probability read from its token log-probabilities, so a section that names it is sorted by AI (a brain marks it). The model is asked only the questions the sections use, only about review requests sent to you, and only when a cheap rule (bots, dependency bumps, one-line changes) does not already know. Answers are cached until the text or the questions change, private repositories are never sent, each sync sends at most 30, and the app stops after $0.25 in one run. "Sorted by rules" ignores the model entirely.
 

@@ -6,6 +6,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch
 
 mod avatars;
 mod db;
+mod editor;
 mod github;
 mod judge;
 mod model;
@@ -97,6 +98,8 @@ pub struct App {
     pub smart_sort: Option<bool>,
     /// The Inbox sections, from `sections.json` or the defaults.
     pub layout: sections::Layout,
+    /// The Inbox sections editor, while it is open.
+    pub sections_editor: Option<editor::SectionsEditor>,
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
     pub judgments: std::collections::HashMap<String, judge::Judgment>,
@@ -172,6 +175,7 @@ fn init() -> App {
         judge: None,
         smart_sort: None,
         layout: sections::Layout::default(),
+        sections_editor: None,
         hide_external: false,
         judgments: std::collections::HashMap::new(),
         judge_worker: Latest::default(),
@@ -370,22 +374,6 @@ impl App {
         {
             let _ = db.set_setting("hide_external", if self.hide_external { "1" } else { "0" });
         }
-    }
-
-    /// Open `sections.json` for editing, writing the defaults into it first when it is not there.
-    pub fn edit_sections(&mut self) {
-        let Some(path) = sections::path() else { return };
-        if !path.exists() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            if let Err(error) = std::fs::write(&path, sections::default_json()) {
-                self.status_banner = Some(format!("Could not write {}. {error}", path.display()));
-                return;
-            }
-        }
-        notify::open_in_editor(&path, self.allow_os_side_effects);
-        self.status_banner = Some("Edit sections.json, then sync to apply it.".into());
     }
 
     /// Back to the built-in sections: the file is removed.
@@ -2799,10 +2787,10 @@ fn sections_row(s: &App, k: &Kit) -> El {
         format!("{} default sections", s.layout.sections.len())
     };
     let mut actions = row().center_y().gap(6.0).child(
-        Button::new("Edit")
+        Button::new("Customize")
             .variant(ButtonVariant::Outline)
             .control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.edit_sections())
+            .on_press(|s: &mut App| s.open_sections_editor())
             .build(k)
             .key("edit-sections"),
     );
@@ -2878,6 +2866,30 @@ fn settings_content(s: &App, k: &Kit) -> El {
         _ => 3,
     };
 
+    let notifications_row = setup_row(
+        k,
+        "Show notifications",
+        row().center_y().gap(10.0).child(
+            Switch::new(s.native_notifications)
+                .label("Show notifications")
+                .hide_label()
+                .on_toggle(|s: &mut App| {
+                    s.native_notifications = !s.native_notifications;
+                    if s.native_notifications {
+                        s.send_welcome_notification();
+                    }
+                    if let Ok(db) = Database::open_default() {
+                        let _ = db.set_setting(
+                            "native_notifications",
+                            if s.native_notifications { "1" } else { "0" },
+                        );
+                    }
+                    s.next_fast_poll_at = 0.0;
+                })
+                .build(k),
+        ),
+    );
+
     let thresholds_section = col()
         .w_full()
         .gap(10.0)
@@ -2886,7 +2898,11 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 .w_full()
                 .center_y()
                 .justify_between()
-                .child(text("Reminders").font(k.ty.ui_medium).color(c.text_base))
+                .child(
+                    text("Notifications")
+                        .font(k.ty.ui_medium)
+                        .color(c.text_base),
+                )
                 .child(
                     Button::new("Open setup")
                         .variant(ButtonVariant::Ghost)
@@ -2901,6 +2917,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         .key("rerun-onboarding-btn"),
                 ),
         )
+        .child(notifications_row)
         .child(
             row()
                 .w_full()
@@ -3023,9 +3040,18 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            text("Also include pull requests matching")
-                .font(k.ty.body)
-                .color(c.text_base),
+            col()
+                .gap(2.0)
+                .child(
+                    text("Extra GitHub searches")
+                        .font(k.ty.body)
+                        .color(c.text_base),
+                )
+                .child(
+                    text("Add pull requests you are not involved in, such as every PR in a repo. They show under Theirs and All.")
+                        .font(k.ty.small)
+                        .color(c.text_faint),
+                ),
         )
         .child(rules_list)
         .child(add_rule_bar);
@@ -3036,31 +3062,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .max_w(740.0)
         .pb(16.0)
         .gap(12.0)
-        .child(
-            panel(k).child(default_filter_row(s, k)).child(setup_row(
-                k,
-                "macOS notifications",
-                row().center_y().gap(10.0).child(
-                    Switch::new(s.native_notifications)
-                        .label("macOS notifications")
-                        .hide_label()
-                        .on_toggle(|s: &mut App| {
-                            s.native_notifications = !s.native_notifications;
-                            if s.native_notifications {
-                                s.send_welcome_notification();
-                            }
-                            if let Ok(db) = Database::open_default() {
-                                let _ = db.set_setting(
-                                    "native_notifications",
-                                    if s.native_notifications { "1" } else { "0" },
-                                );
-                            }
-                            s.next_fast_poll_at = 0.0;
-                        })
-                        .build(k),
-                ),
-            )),
-        )
+        .child(panel(k).child(default_filter_row(s, k)))
         .child(
             panel(k)
                 .child(
@@ -3270,7 +3272,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .fill(k.c.bg_base)
         .child(top_bar(s, &k))
         .child(body.grow(1.0).min_h(0.0));
-    if s.settings_open && s.page == Page::Inbox {
+    if s.sections_editor.is_some() && s.page == Page::Inbox {
+        root.child(editor::sections_editor_modal(s, &k))
+    } else if s.settings_open && s.page == Page::Inbox {
         root.child(settings_modal(s, &k))
     } else if s.add_repo_open && s.page == Page::Inbox {
         root.child(repositories_modal(s, &k))
@@ -3282,6 +3286,10 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
     if ev.key == rune::Key::Escape && s.merge_armed.is_some() {
         s.merge_armed = None;
+        return true;
+    }
+    if ev.key == rune::Key::Escape && s.sections_editor.is_some() {
+        s.close_sections_editor();
         return true;
     }
     if ev.key == rune::Key::Escape && s.add_repo_open {
@@ -3529,6 +3537,14 @@ fn main() {
             s.page = Page::Inbox;
             s.group_order = vec![0, 2, 8, 9, 10, 1, 3, 7, 4, 5, 6];
         }),
+        ("sections-editor", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.open_sections_editor();
+            if let Some(e) = s.sections_editor.as_mut() {
+                e.selected = editor::Selected::Section(3);
+            }
+        }),
         // A moment into two pull requests arriving: the tint is still fading.
         ("arriving", |s| {
             seed_preview(s);
@@ -3728,13 +3744,19 @@ mod tests {
         // The order of sections.json is the order on screen: ready to merge leads, then do first.
         assert_eq!(state.layout.sections[0].name, "Merge these");
         assert_eq!(state.group_rank(0), 0, "ready to merge leads");
-        assert_eq!(state.group_rank(1), 1, "then do first");
+        assert_eq!(state.group_rank(1), 1, "then the next section in the file");
         // Groups 0, 3 and 6 are on screen; drag the last to the top.
         state.drop_group(&[0, 3, 6], 2, 0);
-        assert_eq!(state.group_order, [6, 0, 1, 2, 3, 4, 5, 7, 8, 9]);
+        assert_eq!(
+            state.group_order,
+            [6, 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13]
+        );
         // Drag the first to the bottom of what is shown: it lands after group 3.
         state.drop_group(&[6, 0, 3], 0, 2);
-        assert_eq!(state.group_order, [0, 1, 2, 3, 6, 4, 5, 7, 8, 9]);
+        assert_eq!(
+            state.group_order,
+            [0, 1, 2, 3, 6, 4, 5, 7, 8, 9, 10, 11, 12, 13]
+        );
         // Reordering is undone by the reset, which is only on offer while the order differs.
         assert!(!state.group_order_is_default());
         state.reset_group_order();
@@ -3845,14 +3867,14 @@ mod tests {
             section_name(&state, &review).as_deref(),
             Some("Review these")
         );
-        // A rule needs no model: a bot's bump is approved at will either way, saved or not.
+        // A rule needs no model: a bot's bump has its own section either way, saved or not.
         let mut bump = review.clone();
         bump.id = "acme/cli#950".into();
         bump.author = "dependabot".into();
         bump.title = "Bump serde from 1.0.1 to 1.0.2".into();
         assert_eq!(
             section_name(&state, &bump).as_deref(),
-            Some("Approve at will")
+            Some("Dependency bumps")
         );
         // With no key and no saved answers there is nothing to sort by except rules.
         let mut bare = init();
@@ -3909,6 +3931,45 @@ mod tests {
         state.apply_snapshot(snap);
         assert_eq!(state.group_order, [0]);
         assert!(state.collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn the_sections_editor_edits_a_draft_and_keeps_it_when_valid() {
+        let mut state = init();
+        state.preview = true;
+        state.open_sections_editor();
+        let before = state.layout.fingerprint.clone();
+        {
+            let e = state.sections_editor.as_mut().unwrap();
+            // A new section, with a condition added the way the palette adds it.
+            e.sections.push(editor::EditSection {
+                name: TextEdit::new("Money"),
+                when: vec!["asked:any".into()],
+            });
+            e.selected = editor::Selected::Section(e.sections.len() - 1);
+            e.kind = 2;
+            e.negate = true;
+            e.value = TextEdit::new("saleor/*");
+            e.add_valued_condition_for_test();
+            assert_eq!(
+                e.sections.last().unwrap().when,
+                ["asked:any", "!repo:saleor/*"]
+            );
+            // It moves up, and a draft that cannot work says why and does not close.
+            let last = e.sections.len() - 1;
+            e.sections.swap(last, last - 1);
+            e.sections[0].name = TextEdit::new("");
+        }
+        assert!(state.sections_editor.as_ref().unwrap().check().is_err());
+        assert!(
+            !state.close_sections_editor(),
+            "an invalid draft stays open"
+        );
+        state.sections_editor.as_mut().unwrap().sections[0].name = TextEdit::new("Ready");
+        assert!(state.close_sections_editor());
+        assert_ne!(state.layout.fingerprint, before);
+        assert_eq!(state.layout.sections[0].name, "Ready");
+        assert!(state.layout.sections.iter().any(|s| s.name == "Money"));
     }
 
     #[test]

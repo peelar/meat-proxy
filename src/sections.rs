@@ -41,8 +41,12 @@ const DEFAULT_JSON: &str = r#"{
   ],
   "sections": [
     { "name": "Merge these", "when": ["is:approved"] },
+    { "name": "Hotfixes", "when": ["asked:any", "title:hotfix"] },
+    { "name": "Security", "when": ["asked:any", "title:security"] },
     { "name": "Do first", "when": ["asked:any", "urgent"] },
     { "name": "Read carefully", "when": ["asked:any", "risky"] },
+    { "name": "Dependency bumps", "when": ["asked:any", "bot"] },
+    { "name": "Docs", "when": ["asked:any", "title:docs"] },
     { "name": "Approve at will", "when": ["asked:any", "trivial"] },
     { "name": "Big reviews", "when": ["asked:any", "lines>=600"] },
     { "name": "Review these", "when": ["asked:me"] },
@@ -114,6 +118,8 @@ pub struct Cond {
 pub struct Section {
     pub name: String,
     when: Vec<Cond>,
+    /// The conditions as written, for the editor.
+    pub words: Vec<String>,
 }
 
 impl Section {
@@ -138,6 +144,8 @@ pub struct Layout {
     pub questions: Vec<Question>,
     pub sections: Vec<Section>,
     hide: Vec<Vec<Cond>>,
+    /// The `hide` entries as written, for the editor.
+    pub hide_words: Vec<Vec<String>>,
     /// Changes whenever the sections do, so a saved screen order made for other ones is dropped.
     pub fingerprint: String,
     /// The file the layout came from, or None for the defaults.
@@ -185,10 +193,6 @@ pub fn path() -> Option<PathBuf> {
     }
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".config/meat-proxy/sections.json"))
-}
-
-pub fn default_json() -> &'static str {
-    DEFAULT_JSON
 }
 
 impl Layout {
@@ -254,17 +258,17 @@ impl Layout {
             sections.push(Section {
                 name: raw.name,
                 when,
+                words,
             });
         }
         if sections.len() > 200 {
             return Err("at most 200 sections".into());
         }
-        let hide = raw
-            .hide
-            .into_iter()
-            .map(|terms| {
-                terms
-                    .into_vec()
+        let hide_words: Vec<Vec<String>> = raw.hide.into_iter().map(Terms::into_vec).collect();
+        let hide = hide_words
+            .iter()
+            .map(|words| {
+                words
                     .iter()
                     .map(|w| parse_cond(w, &ids))
                     .collect::<Result<Vec<_>, _>>()
@@ -275,10 +279,31 @@ impl Layout {
             questions,
             sections,
             hide,
+            hide_words,
             fingerprint: format!("{:016x}", fnv(&key)),
             custom: false,
             error: None,
         })
+    }
+
+    /// The layout as the file stores it.
+    pub fn to_json(&self) -> String {
+        let questions: Vec<_> = self
+            .questions
+            .iter()
+            .map(|q| serde_json::json!({ "id": q.id, "at": q.at, "ask": q.ask }))
+            .collect();
+        let sections: Vec<_> = self
+            .sections
+            .iter()
+            .map(|s| serde_json::json!({ "name": s.name, "when": s.words }))
+            .collect();
+        let json = serde_json::json!({
+            "questions": questions,
+            "sections": sections,
+            "hide": self.hide_words,
+        });
+        serde_json::to_string_pretty(&json).unwrap_or_default()
     }
 
     /// The first section the pull request belongs to: the order is the priority.
@@ -371,6 +396,53 @@ impl Layout {
         };
         yes != cond.not
     }
+}
+
+/// A condition in words a person would use.
+pub fn describe(word: &str) -> String {
+    let word = word.trim();
+    let (not, rest) = match word.strip_prefix('!') {
+        Some(rest) => ("not ", rest.trim()),
+        None => ("", word),
+    };
+    let lower = rest.to_ascii_lowercase();
+    let plain = match lower.as_str() {
+        "any" => "anything".to_owned(),
+        "asked:me" => "asked of you by name".to_owned(),
+        "asked:team" => "asked of your team".to_owned(),
+        "asked:any" => "asked of you".to_owned(),
+        "is:approved" => "your PR is approved".to_owned(),
+        "is:changes-requested" => "changes requested on yours".to_owned(),
+        "is:unreviewed" => "yours waits for a reviewer".to_owned(),
+        "is:stale-draft" => "your draft went stale".to_owned(),
+        "mine" => "yours".to_owned(),
+        "theirs" => "someone else's".to_owned(),
+        "external" => "outside contributor".to_owned(),
+        "bot" => "a bot".to_owned(),
+        "draft" => "a draft".to_owned(),
+        _ => {
+            if let Some(n) = lower.strip_prefix("lines>=") {
+                format!("{n} or more lines")
+            } else if let Some(n) = lower.strip_prefix("lines>") {
+                format!("more than {n} lines")
+            } else if let Some(n) = lower.strip_prefix("lines<=") {
+                format!("{n} lines or fewer")
+            } else if let Some(n) = lower.strip_prefix("lines<") {
+                format!("under {n} lines")
+            } else if let Some((kind, value)) = rest.split_once(':') {
+                match kind.to_ascii_lowercase().as_str() {
+                    "repo" => format!("repo {value}"),
+                    "author" => format!("by {value}"),
+                    "label" => format!("labeled {value}"),
+                    "title" => format!("title has \"{value}\""),
+                    _ => rest.to_owned(),
+                }
+            } else {
+                rest.to_owned()
+            }
+        }
+    };
+    format!("{not}{plain}")
 }
 
 pub fn is_bot(author: &str) -> bool {
@@ -511,10 +583,15 @@ mod tests {
     #[test]
     fn the_defaults_parse_and_ask_three_questions() {
         let layout = Layout::default();
-        assert_eq!(layout.sections.len(), 10);
+        assert_eq!(layout.sections.len(), 14);
         assert_eq!(layout.sections[0].name, "Merge these");
         assert_eq!(layout.needed_questions().len(), 3);
-        assert!(layout.sections[1].uses_model() && !layout.sections[0].uses_model());
+        assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());
+        // What the editor writes reads back the same.
+        let again = Layout::parse(&layout.to_json()).unwrap();
+        assert_eq!(again.fingerprint, layout.fingerprint);
+        assert_eq!(describe("!lines>=600"), "not 600 or more lines");
+        assert_eq!(describe("title:hotfix"), "title has \"hotfix\"");
     }
 
     #[test]
