@@ -1654,7 +1654,8 @@ const BRAIN: rune::Icon = rune::Icon {
 
 /// The color of anything a model decided, so it reads as one thing apart from the rules.
 fn model_ink(k: &Kit) -> Color {
-    oklch(if k.dark { 0.8 } else { 0.5 }, 0.12, 295.0)
+    // Quiet on purpose: a hint of violet, close to the muted text, so it never competes with a status.
+    oklch(if k.dark { 0.66 } else { 0.64 }, 0.045, 295.0)
 }
 
 const GRIP: rune::Icon = rune::Icon {
