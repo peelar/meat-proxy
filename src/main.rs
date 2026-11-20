@@ -114,6 +114,8 @@ pub struct App {
     /// Whether the decision model may be asked at all. Off until chosen: turning it on sends the
     /// description and changed file paths of review requests, private repositories included.
     pub ai_enabled: bool,
+    /// The experimental AI feature is visible at all (`MEAT_PROXY_AI=1`).
+    pub ai_feature: bool,
     pub ai_url: TextEdit,
     pub ai_model: TextEdit,
     pub ai_key: TextEdit,
@@ -202,6 +204,7 @@ fn init() -> App {
         hide_external: false,
         show_team_reviews: false,
         ai_enabled: false,
+        ai_feature: judge::feature_enabled(),
         ai_url: TextEdit::new(judge::DECISIONS_URL),
         ai_model: TextEdit::new(judge::DECISIONS_MODEL),
         ai_key: TextEdit::new(""),
@@ -370,7 +373,8 @@ impl App {
 
     /// Whether a model has anything to say here: a key is set, or verdicts were saved earlier.
     pub fn smart_available(&self) -> bool {
-        self.ai_enabled
+        self.ai_feature
+            && self.ai_enabled
             && (self.judge.is_some() || !self.judgments.is_empty())
             && !self.layout.needed_questions().is_empty()
     }
@@ -556,7 +560,12 @@ impl App {
         let Some(cfg) = self.judge.clone() else {
             return;
         };
-        if !self.ai_enabled || self.judge_off || self.preview || self.judge_worker.is_pending() {
+        if !self.ai_feature
+            || !self.ai_enabled
+            || self.judge_off
+            || self.preview
+            || self.judge_worker.is_pending()
+        {
             return;
         }
         let (draft, open, now) = (
@@ -1238,7 +1247,7 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.boot_worker.set_waker(waker.clone());
     s.sync_worker.set_waker(waker.clone());
     s.judge_worker.set_waker(waker.clone());
-    if !s.preview && s.allow_os_side_effects {
+    if s.ai_feature && !s.preview && s.allow_os_side_effects {
         let raw = judge::JudgeConfig::load_raw();
         s.judge = raw.clone().filter(judge::JudgeConfig::usable);
         let shown = raw.unwrap_or_else(judge::JudgeConfig::starting_point);
@@ -1701,7 +1710,7 @@ fn sort_control(s: &App, k: &Kit) -> El {
     let ai = s.smart_active();
     let available = s.smart_available();
     let tip = if !available {
-        "Sorted by rules. Add a model API key in ~/.config/meat-proxy/judge.json to sort with AI."
+        "Sorted by rules. Turn on AI sorting in Settings to sort with a model."
     } else if ai {
         "Sorted by alien intelligence: a model reads each review request. Click to sort by rules alone, with nothing sent to a model."
     } else {
@@ -1745,7 +1754,11 @@ fn sort_control(s: &App, k: &Kit) -> El {
         .on_press(|s: &mut App| s.reset_group_order())
         .build(k)
         .key("reset-group-order");
-    row().center_y().gap(2.0).child(toggle).child(reset)
+    row()
+        .center_y()
+        .gap(2.0)
+        .children(s.ai_feature.then_some(toggle))
+        .child(reset)
 }
 
 fn inbox_tools(s: &App, k: &Kit) -> El {
@@ -3459,7 +3472,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         ),
                 )),
         )
-        .child(panel(k).child(ai_section))
+        .children(s.ai_feature.then(|| panel(k).child(ai_section)))
         .child(panel(k).child(thresholds_section));
 
     col()
@@ -3653,6 +3666,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
 
 fn seed_preview(s: &mut App) {
     s.loading = false;
+    s.ai_feature = true;
     s.ai_enabled = true;
     s.sync_status = SyncStatus::Connected {
         username: "octocat".to_string(),
@@ -4184,6 +4198,7 @@ mod tests {
         huge.additions = 600;
         assert_eq!(section_name(&state, &huge).as_deref(), Some("Big reviews"));
         // The model's answers apply, in the order of the sections.
+        state.ai_feature = true;
         state.ai_enabled = true;
         state.judgments.insert(
             pr.id.clone(),
@@ -4227,6 +4242,7 @@ mod tests {
     fn rules_alone_ignore_the_models_answers_but_keep_the_rules_own() {
         let mut state = init();
         state.preview = true;
+        state.ai_feature = true;
         state.ai_enabled = true;
         let mut review = github::demo_prs()
             .into_iter()
@@ -4255,6 +4271,9 @@ mod tests {
             section_name(&state, &bump).as_deref(),
             Some("Approve at will")
         );
+        // Behind the flag: with it off nothing is asked and the answers saved earlier are ignored.
+        state.ai_feature = false;
+        assert!(!state.smart_available() && !state.smart_active());
         // With no key and no saved answers there is nothing to sort by except rules.
         let mut bare = init();
         bare.preview = true;

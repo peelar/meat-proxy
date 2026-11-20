@@ -103,6 +103,11 @@ fn default_max_spend() -> f64 {
     0.25
 }
 
+/// The AI feature ships hidden while it is tried out: set `MEAT_PROXY_AI=1` to see it.
+pub fn feature_enabled() -> bool {
+    std::env::var("MEAT_PROXY_AI").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+}
+
 impl JudgeConfig {
     /// `~/.config/meat-proxy/judge.json`, overridden by `MEAT_PROXY_JUDGE_URL`, `_KEY` and `_MODEL`.
     /// Without a key there is nothing to ask, and the inbox runs on rules alone.
