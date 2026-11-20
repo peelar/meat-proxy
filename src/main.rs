@@ -34,7 +34,6 @@ fn current_epoch_hour() -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Onboarding,
-    Preferences,
     Inbox,
 }
 
@@ -889,6 +888,15 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 if s.rank_refresh_pending {
                     s.refresh_ranks();
                 }
+                // The first time GitHub answers, setup is done: the defaults stand, the repositories
+                // are the ones the pull requests came from, and discovery fills in how busy each is.
+                if !s.onboarded
+                    && s.page == Page::Onboarding
+                    && matches!(s.sync_status, SyncStatus::Connected { .. })
+                {
+                    s.complete_onboarding();
+                    s.trigger_discovery();
+                }
                 if s.onboarded {
                     deliver_events(s, events);
                     if let Ok(db) = Database::open_default() {
@@ -1067,8 +1075,7 @@ fn top_bar(s: &App, k: &Kit) -> El {
         el()
     };
     let context = match s.page {
-        Page::Onboarding => "Setup  /  1 of 2".to_owned(),
-        Page::Preferences => "Setup  /  2 of 2".to_owned(),
+        Page::Onboarding => "Setup".to_owned(),
         _ => s.sync_label(),
     };
     let sync_status = row()
@@ -1081,14 +1088,9 @@ fn top_bar(s: &App, k: &Kit) -> El {
     let context = if matches!(s.page, Page::Inbox) {
         sync_status
     } else {
-        row().center_y().child(
-            text(match s.page {
-                Page::Onboarding => "Setup  /  1 of 2",
-                _ => "Setup  /  2 of 2",
-            })
-            .font(k.ty.mono)
-            .color(c.text_muted),
-        )
+        row()
+            .center_y()
+            .child(text("Setup").font(k.ty.mono).color(c.text_muted))
     };
     let keycap = if let Some(image) = &s.logo {
         el().size(22.0, 22.0).pixels(image.pixels())
@@ -1201,36 +1203,27 @@ fn inbox_tools(s: &App, k: &Kit) -> El {
 
 fn onboarding_page_view(s: &App, k: &Kit) -> El {
     let c = &k.c;
-    let preferences = s.page == Page::Preferences;
     let connected = match &s.sync_status {
         SyncStatus::Connected { username } => Some(username),
         _ => None,
     };
     let mut doc = col()
-        .key(if preferences {
-            "setup-preferences"
-        } else {
-            "setup-github"
-        })
+        .key("setup-github")
         .w_full()
         .max_w(640.0)
         .py(32.0)
         .gap(16.0)
         .child(
-            text(if preferences {
-                "Set up your inbox"
-            } else {
-                "Connect GitHub"
-            })
-            .font(TextStyle::new(31.0, 660.0))
-            .color(c.text_base),
+            text("Connect GitHub")
+                .font(TextStyle::new(31.0, 660.0))
+                .color(c.text_base),
         );
 
     if let Some(message) = &s.status_banner {
         doc = doc.child(text(message.clone()).font(k.ty.small).color(c.text_muted));
     }
 
-    if !preferences {
+    {
         let status = if let Some(username) = connected {
             format!("Signed in as @{username} through GitHub CLI.")
         } else if s.loading
@@ -1265,10 +1258,7 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
                 row().child(
                     Button::new("Continue")
                         .variant(ButtonVariant::Contrast)
-                        .on_press(|s: &mut App| {
-                            s.status_banner = None;
-                            s.page = Page::Preferences;
-                        })
+                        .on_press(|s: &mut App| s.complete_onboarding())
                         .build(k)
                         .key("onboard-continue"),
                 ),
@@ -1299,49 +1289,10 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
                     .font(k.ty.small).color(c.text_muted))
                 .child(text(reason.clone()).wrap().font(k.ty.small).color(c.text_faint));
         }
-    } else {
-        let open_hours = [24, 48, 72, 120];
-        let draft_hours = [48, 72, 120, 168];
-        let choices = panel(k)
-            .child(default_filter_row(s, k))
-            .child(setup_row(
-                k,
-                "Open PR reminder",
-                SegmentedControl::new(
-                    &["1d", "2d", "3d", "5d"],
-                    open_hours.iter().position(|&h| h == s.open_stale_hours),
-                )
-                .label("Open PR reminder")
-                .width(Some(168.0))
-                .on_pick(move |s: &mut App, idx, _| s.open_stale_hours = open_hours[idx])
-                .build(k),
-            ))
-            .child(setup_row(
-                k,
-                "Draft reminder",
-                SegmentedControl::new(
-                    &["2d", "3d", "5d", "7d"],
-                    draft_hours.iter().position(|&h| h == s.draft_stale_hours),
-                )
-                .label("Draft reminder")
-                .width(Some(168.0))
-                .on_pick(move |s: &mut App, idx, _| s.draft_stale_hours = draft_hours[idx])
-                .build(k),
-            ))
-            .child(setup_row(
-                k,
-                "macOS notifications",
-                Switch::new(s.native_notifications)
-                    .label("macOS notifications")
-                    .hide_label()
-                    .on_toggle(|s: &mut App| s.native_notifications = !s.native_notifications)
-                    .build(k),
-            ));
-        doc = doc.child(choices).child(repository_manager(s, k));
     }
 
     // The scroll sits on a column: a row clips its children to its own height and never overflows.
-    let mut page = col().w_full().h_full().min_h(0.0).child(
+    col().w_full().h_full().min_h(0.0).child(
         col()
             .w_full()
             .scroll(ScrollSpec {
@@ -1350,32 +1301,7 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
             .grow(1.0)
             .min_h(0.0)
             .child(row().w_full().px(28.0).justify_center().child(doc)),
-    );
-    if preferences {
-        page = page.child(el().w_full().h(1.0).fill(c.border_weak)).child(
-            row().w_full().px(28.0).py(12.0).justify_center().child(
-                row()
-                    .w_full()
-                    .max_w(640.0)
-                    .justify_between()
-                    .center_y()
-                    .child(
-                        Button::new("Back")
-                            .variant(ButtonVariant::Ghost)
-                            .on_press(|s: &mut App| s.page = Page::Onboarding)
-                            .build(k),
-                    )
-                    .child(
-                        Button::new("Confirm and open inbox")
-                            .variant(ButtonVariant::Contrast)
-                            .on_press(|s: &mut App| s.complete_onboarding())
-                            .build(k)
-                            .key("confirm-onboarding-btn"),
-                    ),
-            ),
-        );
-    }
-    page
+    )
 }
 
 fn setup_row(k: &Kit, label: &str, control: El) -> El {
@@ -1394,132 +1320,6 @@ fn icon_action(glyph: &'static rune::Icon, label: &str) -> rune_kit::IconButton 
         .control_size(ControlSize::Small)
         .label(label.to_owned())
         .help(label.to_owned())
-}
-
-fn repository_manager(s: &App, k: &Kit) -> El {
-    let c = &k.c;
-    let mut section = col().w_full().gap(REPO_ROW_GAP).child(
-        row()
-            .w_full()
-            .center_y()
-            .justify_between()
-            .child(text("Repositories").font(k.ty.ui_medium).color(c.text_base))
-            .child(
-                icon_action(
-                    &PLUS,
-                    if s.add_repo_open {
-                        "Close add repository"
-                    } else {
-                        "Add repository"
-                    },
-                )
-                .on_press(|s: &mut App| {
-                    s.add_repo_open = !s.add_repo_open;
-                    if s.add_repo_open && s.discovery.is_none() {
-                        s.trigger_discovery();
-                    }
-                })
-                .build(k)
-                .key("add-repo-toggle"),
-            ),
-    );
-    if s.add_repo_open {
-        section = section.child(add_repository_panel(s, k, true));
-    }
-
-    let ordered = s.ordered_repos();
-    let visible: Vec<_> = ordered.iter().enumerate().collect();
-    if visible.is_empty() {
-        section = section.child(
-            text("No repositories yet. Add one with +.")
-                .font(k.ty.body)
-                .color(c.text_muted),
-        );
-    }
-    let count = visible.len();
-    let order: Vec<String> = visible.iter().map(|(_, r)| r.name.clone()).collect();
-    for (position, &(_, repo)) in visible.iter().enumerate() {
-        let remove = repo.name.clone();
-        let order = order.clone();
-        let lifted = s.repo_reorder.dragging() == Some(position);
-        let grip = row()
-            .key(format!("repo-grip-{}", repo.name))
-            .role("button")
-            .label(format!("Drag to reorder {}", repo.name))
-            .size(20.0, 20.0)
-            .center()
-            .cursor(if lifted {
-                rune::Cursor::Grabbing
-            } else {
-                rune::Cursor::Grab
-            })
-            .on_drag(
-                move |s: &mut App, d: &mut rune::Drag, tx: &mut Tx| match d.phase {
-                    rune::Phase::Down => {}
-                    rune::Phase::Move => {
-                        tx.animated();
-                        s.repo_reorder.follow(
-                            position,
-                            count,
-                            d.dy,
-                            REPO_ROW_HEIGHT + REPO_ROW_GAP,
-                        );
-                    }
-                    rune::Phase::Up => {
-                        if let Some((from, to)) = s.repo_reorder.end(d.cancelled()) {
-                            s.drop_repo(&order, from, to);
-                        }
-                    }
-                },
-            )
-            .child(rune::icon(&GRIP, 14.0).color(c.text_faint).a11y_hidden());
-        let mut line = row()
-            .key(format!("onboard-repo-{}", repo.name))
-            .w_full()
-            .h(REPO_ROW_HEIGHT)
-            .gap(8.0)
-            .center_y()
-            .offset(0.0, s.repo_reorder.shift(position))
-            .child(grip)
-            .child(
-                row()
-                    .grow(1.0)
-                    .child(text(repo.name.clone()).font(k.ty.body).color(c.text_base)),
-            )
-            .child(if s.confirm_remove.as_deref() == Some(repo.name.as_str()) {
-                row()
-                    .center_y()
-                    .gap(4.0)
-                    .child(
-                        Button::new("Remove")
-                            .variant(ButtonVariant::Danger)
-                            .control_size(ControlSize::Small)
-                            .on_press(move |s: &mut App| s.remove_repo(&remove))
-                            .build(k)
-                            .key(format!("confirm-remove-{}", repo.name)),
-                    )
-                    .child(
-                        Button::new("Cancel")
-                            .variant(ButtonVariant::Ghost)
-                            .control_size(ControlSize::Small)
-                            .on_press(|s: &mut App| s.confirm_remove = None)
-                            .build(k),
-                    )
-            } else {
-                icon_action(&TRASH, &format!("Remove {}", repo.name))
-                    .on_press(move |s: &mut App| s.confirm_remove = Some(remove.clone()))
-                    .build(k)
-                    .key(format!("remove-repo-{}", repo.name))
-            });
-        if lifted {
-            line = line
-                .raise()
-                .offset_motion(rune::Anim::INSTANT)
-                .fill(c.layer_01);
-        }
-        section = section.child(line);
-    }
-    section
 }
 
 fn add_repository_panel(s: &App, k: &Kit, framed: bool) -> El {
@@ -1737,8 +1537,6 @@ const SECTION_GAP: f32 = 16.0;
 /// Header plus its 1px rule and the section border.
 const HEADER_HEIGHT: f32 = 40.0;
 const SECTION_HEIGHT: f32 = HEADER_HEIGHT + 3.0;
-const REPO_ROW_HEIGHT: f32 = 32.0;
-const REPO_ROW_GAP: f32 = 4.0;
 
 const PIN: rune::Icon = rune::Icon {
     name: "pin",
@@ -2979,7 +2777,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     k.c.layer_04 = oklch(if k.dark { 0.36 } else { 0.86 }, 0.004, 175.0);
 
     let body = match s.page {
-        Page::Onboarding | Page::Preferences => onboarding_page_view(s, &k),
+        Page::Onboarding => onboarding_page_view(s, &k),
         Page::Inbox => document_inbox_view(s, &k),
     };
 
@@ -3044,10 +2842,6 @@ fn main() {
             };
         }),
         ("signed-in", seed_preview),
-        ("preferences", |s| {
-            seed_preview(s);
-            s.page = Page::Preferences;
-        }),
         ("inbox", |s| {
             seed_preview(s);
             s.page = Page::Inbox;
@@ -3181,7 +2975,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_on_onboarding_and_confirms_into_flat_document_inbox() {
+    fn starts_on_onboarding_and_opens_the_inbox_once_connected() {
         let mut state = init();
         state.allow_os_side_effects = false;
         state.preview = true;
@@ -3196,8 +2990,8 @@ mod tests {
         let mut rt = Runtime::new(state, view, (920.0, 680.0), Env::new(true, 2.0));
         rt.frame(0.0);
         assert!(rt.find("onboard-run-gh-auth").is_some());
-        assert!(rt.find("confirm-onboarding-btn").is_none());
 
+        // Connected: one press finishes setup with the defaults. There is no second step.
         seed_preview(&mut rt.state);
         rt.update(|_, _| {});
         rt.frame(1.0 / 60.0);
@@ -3205,15 +2999,13 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(2.0 / 60.0);
-        assert_eq!(rt.state.page, Page::Preferences);
-        rt.state.default_filter = InboxFilter::Inbox;
-
-        let (x, y) = rt.find("confirm-onboarding-btn").unwrap();
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        rt.frame(3.0 / 60.0);
         assert_eq!(rt.state.page, Page::Inbox);
         assert_eq!(rt.state.filter, InboxFilter::Inbox);
+        assert_eq!(
+            (rt.state.open_stale_hours, rt.state.draft_stale_hours),
+            (48, 72)
+        );
+        assert!(rt.state.native_notifications);
         assert!(rt.find("pr-row-acme/engine#418").is_some());
     }
 

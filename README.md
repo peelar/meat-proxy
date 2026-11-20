@@ -21,7 +21,7 @@ curl -fsSL https://github.com/peelar/meat-proxy/releases/latest/download/install
 
 It puts meat-proxy in `~/Applications` and keeps it at the latest release: a launchd agent checks every hour and
 replaces the app while it is closed. `sh -s -- --uninstall` after the same command removes it. On first launch,
-connect your GitHub CLI account and choose your inbox filters and notification preferences.
+connect your GitHub CLI account; the inbox opens with sensible defaults, which Settings changes.
 
 Every push to `main` publishes a release (`.github/workflows/release.yml`): the next patch, unless `Cargo.toml` names a
 higher version.

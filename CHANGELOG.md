@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Setup is one step: once the GitHub CLI is connected, the inbox opens with the defaults and finds your repositories itself. Everything it asked on the second screen is in Settings.
+- Settings shows the app version beside its title.
+
 ## 0.2.1
 
 - Settings: the custom searches ("Also include pull requests matching") sit in the Pull requests section. The two rules an early version seeded are removed; the built-in searches already cover them.
