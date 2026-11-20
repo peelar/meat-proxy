@@ -531,6 +531,7 @@ impl Database {
                 body: String::new(),
                 labels: Vec::new(),
                 private_repo: false,
+                files: Vec::new(),
             })
         })?;
         let mut out = Vec::new();

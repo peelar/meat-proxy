@@ -362,6 +362,9 @@ pub struct PullRequest {
     /// The repository is private: its text does not go to a model unless the config allows it.
     #[serde(skip)]
     pub private_repo: bool,
+    /// Paths of the changed files (the first few dozen), for the decision model; not stored.
+    #[serde(skip)]
+    pub files: Vec<String>,
 }
 
 /// Hours as a short span: 5h, 3d, 6mo, 2y.
@@ -833,6 +836,7 @@ mod tests {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         }
     }
 

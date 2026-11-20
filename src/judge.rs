@@ -25,9 +25,10 @@ use std::process::{Command, Stdio};
 const DEFAULT_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 const BODY_CHARS: usize = 1400;
+const FILES_CHARS: usize = 1600;
 const PARALLEL_CALLS: usize = 4;
 /// Raise it when the questions or the rules change, so verdicts made under the old ones are redone.
-const PROMPT_VERSION: &str = "2";
+const PROMPT_VERSION: &str = "3";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Judgment {
@@ -172,7 +173,9 @@ pub fn rule_judgment(pr: &PullRequest) -> Option<Judgment> {
         || title.starts_with("typo");
     let tiny = pr.additions + pr.deletions <= 2;
     let bot = crate::sections::is_bot(&pr.author);
-    (bot || routine || tiny).then(|| Judgment {
+    let inert =
+        !pr.files.is_empty() && pr.files.len() < 40 && pr.files.iter().all(|f| inert_path(f));
+    (bot || routine || tiny || inert).then(|| Judgment {
         answers: HashMap::from([
             (
                 "trivial".to_owned(),
@@ -184,6 +187,24 @@ pub fn rule_judgment(pr: &PullRequest) -> Option<Judgment> {
         by: "rules".into(),
         fingerprint: String::new(),
     })
+}
+
+/// Paths that never change behavior: docs, lockfiles, snapshots, translations, changesets.
+fn inert_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    lower.starts_with("docs/")
+        || lower.starts_with(".changeset/")
+        || lower.contains("/locale/")
+        || lower.contains("/locales/")
+        || lower.contains("/__snapshots__/")
+        || name.ends_with(".md")
+        || name.ends_with(".mdx")
+        || name.ends_with(".snap")
+        || name.ends_with(".lock")
+        || name.ends_with("-lock.json")
+        || name.ends_with("-lock.yaml")
+        || name == "license"
 }
 
 /// A key for the questions in use: asking different ones makes old answers stale.
@@ -210,6 +231,7 @@ pub fn fingerprint(pr: &PullRequest, questions_key: &str) -> String {
     feed(pr.author.as_bytes());
     feed(clip(&pr.body, BODY_CHARS).as_bytes());
     feed(pr.labels.join(",").as_bytes());
+    feed(pr.files.join(",").as_bytes());
     feed(&pr.additions.to_le_bytes());
     feed(&pr.deletions.to_le_bytes());
     format!("{hash:016x}")
@@ -250,8 +272,24 @@ fn facts(pr: &PullRequest) -> String {
         pr.labels.join(", ")
     };
     let body = tidy(&pr.body);
+    let files = if pr.files.is_empty() {
+        "unknown".to_owned()
+    } else {
+        let mut list = String::new();
+        for path in &pr.files {
+            if list.len() + path.len() > FILES_CHARS {
+                list.push_str(" …");
+                break;
+            }
+            if !list.is_empty() {
+                list.push('\n');
+            }
+            list.push_str(path);
+        }
+        format!("\n{list}")
+    };
     format!(
-        "Pull request in {repo}\nTitle: {title}\nAuthor: {author}{external}\nLabels: {labels}\nSize: +{add} -{del}\nBranch: {branch}\nDescription:\n{body}",
+        "Pull request in {repo}\nTitle: {title}\nAuthor: {author}{external}\nLabels: {labels}\nSize: +{add} -{del}\nBranch: {branch}\nFiles changed (paths only):{files}\nDescription:\n{body}",
         repo = pr.repo,
         title = pr.title,
         author = pr.author,
@@ -634,6 +672,19 @@ mod tests {
             { "token": " N", "logprob": no.ln() },
             { "token": "maybe", "logprob": -9.0 },
         ]})
+    }
+
+    #[test]
+    fn docs_only_changes_settle_without_a_model() {
+        let mut docs = pr("Rework the intro");
+        docs.files = vec![
+            "docs/intro.md".into(),
+            ".changeset/a.md".into(),
+            "pnpm-lock.yaml".into(),
+        ];
+        assert!(rule_judgment(&docs).is_some());
+        docs.files.push("src/auth/login.ts".into());
+        assert!(rule_judgment(&docs).is_none());
     }
 
     #[test]

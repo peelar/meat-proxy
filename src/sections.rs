@@ -16,9 +16,9 @@ use std::collections::HashMap;
 
 const DEFAULT_JSON: &str = r#"{
   "questions": [
-    { "id": "trivial", "at": 0.75, "ask": "Is it a typo, docs, formatting, a rename, a dependency bump, a translation or generated code, safe to skim without reading the diff?" },
+    { "id": "trivial", "at": 0.75, "ask": "Judging by the files and description, is it a typo, docs, tests only, formatting, a rename, a dependency bump, a translation or generated code, safe to skim without reading the diff?" },
     { "id": "urgent", "at": 0.6, "ask": "Does the title or description itself state time pressure: a deadline, a customer or release waiting on it, an outage or production incident, or the words urgent, asap, hotfix or blocker? An ordinary bug fix, feature or improvement is NOT urgent." },
-    { "id": "risky", "at": 0.6, "ask": "Is the main change itself in authentication, authorization, payments or money, data migrations, security, or deploy and infrastructure config? Judge the change, not words mentioned in passing." }
+    { "id": "risky", "at": 0.6, "ask": "Do the changed file paths or the description show the main change is in authentication, authorization, payments or money, data migrations, security, or deploy and infrastructure config (CI, Dockerfiles, terraform)? Judge the change, not words mentioned in passing." }
   ],
   "sections": [
     { "name": "Merge these", "when": ["is:approved"] },

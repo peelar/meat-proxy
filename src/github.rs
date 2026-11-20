@@ -314,6 +314,7 @@ const PR_FIELDS: &str = r#"
       authorAssociation
       bodyText
       labels(first: 6) { nodes { name } }
+      files(first: 40) { nodes { path } }
       state
       mergeable
       mergeStateStatus
@@ -828,6 +829,15 @@ fn parse_graphql_pr(
             })
             .unwrap_or_default(),
         private_repo: node["repository"]["isPrivate"].as_bool().unwrap_or(false),
+        files: node["files"]["nodes"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|f| f["path"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -964,6 +974,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         PullRequest {
             id: "acme/engine#412".to_string(),
@@ -996,6 +1007,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         PullRequest {
             id: "acme/engine#397".to_string(),
@@ -1028,6 +1040,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         PullRequest {
             id: "acme/engine#421".to_string(),
@@ -1060,6 +1073,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -1093,6 +1107,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         PullRequest {
             id: "acme/cli#889".to_string(),
@@ -1125,6 +1140,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         PullRequest {
             id: "acme/cli#908".to_string(),
@@ -1157,6 +1173,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         // --- acme/inbox (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -1191,6 +1208,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
         PullRequest {
             id: "acme/inbox#19".to_string(),
@@ -1224,6 +1242,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             body: String::new(),
             labels: Vec::new(),
             private_repo: false,
+            files: Vec::new(),
         },
     ];
     for pr in &mut prs {
