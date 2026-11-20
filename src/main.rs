@@ -99,6 +99,8 @@ pub struct App {
     pub layout: sections::Layout,
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
+    /// List requests made of a team you are in, not of you by name, in the Inbox too.
+    pub show_team_reviews: bool,
     pub judgments: std::collections::HashMap<String, judge::Judgment>,
     pub judge_worker: Latest<judge::Batch>,
     /// Spent on the model in this run of the app, against the config's cap.
@@ -173,6 +175,7 @@ fn init() -> App {
         smart_sort: None,
         layout: sections::Layout::default(),
         hide_external: false,
+        show_team_reviews: false,
         judgments: std::collections::HashMap::new(),
         judge_worker: Latest::default(),
         judge_spent: 0.0,
@@ -285,6 +288,7 @@ impl App {
         self.judgments = snap.judgments;
         self.smart_sort = snap.smart_sort;
         self.hide_external = snap.hide_external;
+        self.show_team_reviews = snap.show_team_reviews;
         self.drop_removed_prs();
         if self.onboarded {
             self.page = Page::Inbox;
@@ -363,6 +367,18 @@ impl App {
         (0..self.layout.sections.len() as u8).collect()
     }
 
+    pub fn toggle_show_team_reviews(&mut self) {
+        self.show_team_reviews = !self.show_team_reviews;
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting(
+                "show_team_reviews",
+                if self.show_team_reviews { "1" } else { "0" },
+            );
+        }
+    }
+
     pub fn toggle_hide_external(&mut self) {
         self.hide_external = !self.hide_external;
         if !self.preview
@@ -394,16 +410,24 @@ impl App {
         Some((at as u8, self.layout.sections[at].name.as_str()))
     }
 
-    /// Whether the switch in Settings keeps this one out of the Inbox tab: outside contributors.
-    fn hidden_from_inbox(&self, pr: &PullRequest) -> bool {
-        self.hide_external && pr.external
+    /// Whether the switches in Settings keep this one out of the Inbox tab: outside contributors,
+    /// and requests made of a team rather than of you.
+    fn hidden_from_inbox(&self, pr: &PullRequest, now: u64) -> bool {
+        (self.hide_external && pr.external)
+            || (!self.show_team_reviews
+                && pr.attention(self.draft_stale_hours, self.open_stale_hours, now)
+                    == PrAttention::IncomingViaTeam)
+    }
+
+    /// What the Inbox is about, whatever is typed in the search box.
+    fn needs_you(&self, pr: &PullRequest, now: u64) -> bool {
+        InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
+            && !self.hidden_from_inbox(pr, now)
     }
 
     /// Whether the Inbox tab lists it: it asks something of you, and nothing hides it.
     fn in_inbox(&self, pr: &PullRequest, now: u64) -> bool {
-        InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
-            && !self.hidden_from_inbox(pr)
-            && self.matches_search(pr)
+        self.needs_you(pr, now) && self.matches_search(pr)
     }
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
@@ -2207,18 +2231,8 @@ fn document_inbox_view(s: &App, k: &Kit) -> El {
         .max_w(960.0)
         .py(24.0)
         .gap(16.0);
-    let attention = s
-        .prs
-        .iter()
-        .filter(|p| {
-            p.attention(
-                s.draft_stale_hours,
-                s.open_stale_hours,
-                current_epoch_hour(),
-            )
-            .requires_action()
-        })
-        .count();
+    let now = current_epoch_hour();
+    let attention = s.prs.iter().filter(|p| s.needs_you(p, now)).count();
     doc = doc
         .child(
             row()
@@ -2976,6 +2990,16 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 )
                 .child(setup_row(
                     k,
+                    "Show team review requests in the Inbox",
+                    Switch::new(s.show_team_reviews)
+                        .label("Show team review requests in the Inbox")
+                        .hide_label()
+                        .on_toggle(|s: &mut App| s.toggle_show_team_reviews())
+                        .build(k)
+                        .key("option-show-team-reviews"),
+                ))
+                .child(setup_row(
+                    k,
                     "Show outside contributors in the Inbox",
                     Switch::new(!s.hide_external)
                         .label("Show outside contributors in the Inbox")
@@ -3633,16 +3657,10 @@ mod tests {
         assert_eq!(state.group_rank(1), 1, "then the next section in the file");
         // Groups 0, 3 and 6 are on screen; drag the last to the top.
         state.drop_group(&[0, 3, 6], 2, 0);
-        assert_eq!(
-            state.group_order,
-            [6, 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13]
-        );
+        assert_eq!(state.group_order, [6, 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]);
         // Drag the first to the bottom of what is shown: it lands after group 3.
         state.drop_group(&[6, 0, 3], 0, 2);
-        assert_eq!(
-            state.group_order,
-            [0, 1, 2, 3, 6, 4, 5, 7, 8, 9, 10, 11, 12, 13]
-        );
+        assert_eq!(state.group_order, [0, 1, 2, 3, 6, 4, 5, 7, 8, 9, 10, 11]);
         // Reordering is undone by the reset, which is only on offer while the order differs.
         assert!(!state.group_order_is_default());
         state.reset_group_order();
@@ -3753,14 +3771,14 @@ mod tests {
             section_name(&state, &review).as_deref(),
             Some("Review these")
         );
-        // A rule needs no model: a bot's bump has its own section either way, saved or not.
+        // A rule needs no model: a bot's bump is approved at will either way, saved or not.
         let mut bump = review.clone();
         bump.id = "acme/cli#950".into();
         bump.author = "dependabot".into();
         bump.title = "Bump serde from 1.0.1 to 1.0.2".into();
         assert_eq!(
             section_name(&state, &bump).as_deref(),
-            Some("Dependency bumps")
+            Some("Approve at will")
         );
         // With no key and no saved answers there is nothing to sort by except rules.
         let mut bare = init();

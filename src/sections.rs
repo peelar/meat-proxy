@@ -22,14 +22,12 @@ const DEFAULT_JSON: &str = r#"{
   ],
   "sections": [
     { "name": "Merge these", "when": ["is:approved"] },
-    { "name": "Hotfixes", "when": ["asked:any", "title:hotfix"] },
-    { "name": "Security", "when": ["asked:any", "title:security"] },
-    { "name": "Do first", "when": ["asked:any", "urgent"] },
-    { "name": "Read carefully", "when": ["asked:any", "risky"] },
-    { "name": "Dependency bumps", "when": ["asked:any", "bot"] },
-    { "name": "Docs", "when": ["asked:any", "title:docs"] },
-    { "name": "Approve at will", "when": ["asked:any", "trivial"] },
-    { "name": "Big reviews", "when": ["asked:any", "lines>=600"] },
+    { "name": "Hotfixes", "when": ["asked:me", "title:hotfix"] },
+    { "name": "Security", "when": ["asked:me", "title:security"] },
+    { "name": "Do first", "when": ["asked:me", "urgent"] },
+    { "name": "Read carefully", "when": ["asked:me", "risky"] },
+    { "name": "Approve at will", "when": ["asked:me", "trivial"] },
+    { "name": "Big reviews", "when": ["asked:me", "lines>=600"] },
     { "name": "Review these", "when": ["asked:me"] },
     { "name": "Address feedback", "when": ["is:changes-requested"] },
     { "name": "Team reviews", "when": ["asked:team"] },
@@ -415,7 +413,7 @@ mod tests {
     #[test]
     fn the_defaults_parse_and_ask_three_questions() {
         let layout = Layout::default();
-        assert_eq!(layout.sections.len(), 14);
+        assert_eq!(layout.sections.len(), 12);
         assert_eq!(layout.sections[0].name, "Merge these");
         assert_eq!(layout.needed_questions().len(), 3);
         assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());

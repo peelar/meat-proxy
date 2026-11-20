@@ -115,13 +115,12 @@ impl JudgeConfig {
     }
 }
 
-/// Whether a pull request is worth asking about at all. Mine, drafts, and ones only watched need
-/// no judgment about how to review them.
+/// Whether a pull request is worth asking about at all. Mine, drafts, team requests and ones only
+/// watched need no judgment about how to review them.
 pub fn is_candidate(pr: &PullRequest, attention: PrAttention, cfg: &JudgeConfig) -> bool {
-    matches!(
-        attention,
-        PrAttention::IncomingAssigned | PrAttention::IncomingViaTeam
-    ) && !pr.is_draft
+    // Only requests that name you: the Inbox is about those and your own pull requests.
+    attention == PrAttention::IncomingAssigned
+        && !pr.is_draft
         && (cfg.include_private || !pr.private_repo)
 }
 

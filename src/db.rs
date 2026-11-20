@@ -29,6 +29,7 @@ pub struct AppSnapshot {
     pub smart_sort: Option<bool>,
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
+    pub show_team_reviews: bool,
     /// Which sections the saved group order was made for.
     pub layout_key: Option<String>,
 }
@@ -269,6 +270,9 @@ impl Database {
             judgments: self.load_judgments()?,
             smart_sort: self.get_setting("smart_sort")?.map(|v| v == "1"),
             hide_external: self.get_setting("hide_external")?.is_some_and(|v| v == "1"),
+            show_team_reviews: self
+                .get_setting("show_team_reviews")?
+                .is_some_and(|v| v == "1"),
             layout_key: self.get_setting("inbox_layout")?,
         })
     }
