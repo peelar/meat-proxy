@@ -30,6 +30,8 @@ pub struct AppSnapshot {
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
     pub show_team_reviews: bool,
+    /// Pull requests the user moved to Ignored.
+    pub ignored: std::collections::HashSet<String>,
     /// Which sections the saved group order was made for.
     pub layout_key: Option<String>,
 }
@@ -185,6 +187,12 @@ impl Database {
             }
             tx.commit()?;
         }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ignored_prs (
+                pr_id TEXT PRIMARY KEY,
+                ignored_at INTEGER NOT NULL
+            );",
+        )?;
         // Judgments keep one answer per question, so questions can be added in the config. The
         // earlier fixed columns are dropped: the cache is cheap to fill again.
         let fixed_columns: bool = self.conn.query_row(
@@ -285,7 +293,27 @@ impl Database {
                 .get_setting("show_team_reviews")?
                 .is_some_and(|v| v == "1"),
             layout_key: self.get_setting("inbox_layout")?,
+            ignored: self.load_ignored()?,
         })
+    }
+
+    pub fn load_ignored(&self) -> Result<std::collections::HashSet<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT pr_id FROM ignored_prs")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    pub fn set_ignored(&self, pr_id: &str, ignored: bool) -> Result<(), rusqlite::Error> {
+        if ignored {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO ignored_prs (pr_id, ignored_at) VALUES (?1, ?2)",
+                params![pr_id, chrono::Utc::now().timestamp()],
+            )?;
+        } else {
+            self.conn
+                .execute("DELETE FROM ignored_prs WHERE pr_id = ?1", params![pr_id])?;
+        }
+        Ok(())
     }
 
     pub fn load_judgments(

@@ -32,6 +32,9 @@ const ARRIVAL_GLOW_SECS: f32 = 2.6;
 /// Gap between rows arriving together, so a batch cascades.
 const ARRIVAL_STAGGER_SECS: f32 = 0.07;
 
+/// The section ignored pull requests move to, always last and folded until opened.
+const IGNORED_GROUP: u8 = 255;
+
 fn current_epoch_hour() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64 / 3600
 }
@@ -101,6 +104,9 @@ pub struct App {
     pub hide_external: bool,
     /// List requests made of a team you are in, not of you by name, in the Inbox too.
     pub show_team_reviews: bool,
+    /// Pull requests moved to the Ignored section, and whether that section is open.
+    pub ignored: std::collections::HashSet<String>,
+    pub ignored_open: bool,
     pub judgments: std::collections::HashMap<String, judge::Judgment>,
     pub judge_worker: Latest<judge::Batch>,
     /// Spent on the model in this run of the app, against the config's cap.
@@ -176,6 +182,8 @@ fn init() -> App {
         layout: sections::Layout::default(),
         hide_external: false,
         show_team_reviews: false,
+        ignored: std::collections::HashSet::new(),
+        ignored_open: false,
         judgments: std::collections::HashMap::new(),
         judge_worker: Latest::default(),
         judge_spent: 0.0,
@@ -289,6 +297,7 @@ impl App {
         self.smart_sort = snap.smart_sort;
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
+        self.ignored = snap.ignored;
         self.drop_removed_prs();
         if self.onboarded {
             self.page = Page::Inbox;
@@ -367,6 +376,31 @@ impl App {
         (0..self.layout.sections.len() as u8).collect()
     }
 
+    /// Move a pull request to Ignored, or back.
+    pub fn toggle_ignore(&mut self, pr_id: &str) {
+        let now_ignored = !self.ignored.contains(pr_id);
+        if now_ignored {
+            self.ignored.insert(pr_id.to_owned());
+        } else {
+            self.ignored.remove(pr_id);
+        }
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_ignored(pr_id, now_ignored);
+        }
+    }
+
+    /// A notification about something the user ignored is not worth showing.
+    fn is_ignored_url(&self, url: &str) -> bool {
+        url.strip_prefix("https://github.com/")
+            .and_then(|rest| rest.split_once("/pull/"))
+            .is_some_and(|(repo, number)| {
+                let number = number.split(['/', '#', '?']).next().unwrap_or_default();
+                self.ignored.contains(&format!("{repo}#{number}"))
+            })
+    }
+
     pub fn toggle_show_team_reviews(&mut self) {
         self.show_team_reviews = !self.show_team_reviews;
         if !self.preview
@@ -401,6 +435,9 @@ impl App {
     /// The section a pull request belongs to: the first whose conditions all hold. None when it
     /// belongs to none, which keeps it out of the Inbox.
     fn action_group_of(&self, pr: &PullRequest, attention: PrAttention) -> Option<(u8, &str)> {
+        if self.ignored.contains(&pr.id) {
+            return Some((IGNORED_GROUP, "Ignored"));
+        }
         let answers = self.answers_for(pr);
         let at = self.layout.section_of(&sections::Subject {
             pr,
@@ -421,13 +458,23 @@ impl App {
 
     /// What the Inbox is about, whatever is typed in the search box.
     fn needs_you(&self, pr: &PullRequest, now: u64) -> bool {
-        InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
+        !self.ignored.contains(&pr.id)
+            && InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
             && !self.hidden_from_inbox(pr, now)
     }
 
     /// Whether the Inbox tab lists it: it asks something of you, and nothing hides it.
     fn in_inbox(&self, pr: &PullRequest, now: u64) -> bool {
-        self.needs_you(pr, now) && self.matches_search(pr)
+        // An ignored pull request is listed, in its own section, while it would still be there.
+        let listed = self.needs_you(pr, now)
+            || (self.ignored.contains(&pr.id)
+                && InboxFilter::Inbox.matches(
+                    pr,
+                    self.draft_stale_hours,
+                    self.open_stale_hours,
+                    now,
+                ));
+        listed && self.matches_search(pr)
     }
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
@@ -635,6 +682,8 @@ impl App {
             .collect();
         groups.sort_unstable();
         groups.dedup();
+        // Ignored folds by its own rule and does not count toward "everything is folded".
+        groups.retain(|g| *g != IGNORED_GROUP);
         groups
     }
 
@@ -1135,6 +1184,10 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     s.trigger_discovery();
                 }
                 s.queue_judgments();
+                let events: Vec<_> = events
+                    .into_iter()
+                    .filter(|e| !s.is_ignored_url(&e.pr_url))
+                    .collect();
                 if s.onboarded {
                     deliver_events(s, events);
                     if let Ok(db) = Database::open_default() {
@@ -1181,6 +1234,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                             .starts_with(&format!("https://github.com/{}/", r.name))
                 })
             })
+            .filter(|e| !s.is_ignored_url(&e.pr_url))
             .collect();
         if deliver_events(s, events) && !s.sync_worker.is_pending() {
             s.trigger_sync();
@@ -1827,6 +1881,18 @@ const PLUS: rune::Icon = rune::Icon {
     body: r#"<path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/>"#,
 };
 
+/// Ignore a pull request: an eye with a slash through it. Stop ignoring: the eye.
+const EYE_OFF: rune::Icon = rune::Icon {
+    name: "ignore",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M1.6 8s2.3-4.2 6.4-4.2S14.4 8 14.4 8s-2.3 4.2-6.4 4.2S1.6 8 1.6 8Z"/><circle fill="none" stroke="currentColor" stroke-width="1.3" cx="8" cy="8" r="1.9"/><path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M2.8 13.2L13.2 2.8"/>"#,
+};
+const EYE: rune::Icon = rune::Icon {
+    name: "stop-ignoring",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M1.6 8s2.3-4.2 6.4-4.2S14.4 8 14.4 8s-2.3 4.2-6.4 4.2S1.6 8 1.6 8Z"/><circle fill="none" stroke="currentColor" stroke-width="1.3" cx="8" cy="8" r="1.9"/>"#,
+};
+
 const TRASH: rune::Icon = rune::Icon {
     name: "remove",
     view: 16.0,
@@ -1953,6 +2019,29 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
     let pr_url_open = pr.url.clone();
 
     let mut right_side = row().center_y().gap(2.0);
+    if s.filter == InboxFilter::Inbox && s.page == Page::Inbox {
+        let ignored = s.ignored.contains(&pr.id);
+        let id = pr.id.clone();
+        let button = header_action(
+            k,
+            if ignored { &EYE } else { &EYE_OFF },
+            if ignored {
+                "Stop ignoring"
+            } else {
+                "Ignore: move it to Ignored"
+            },
+            format!("ignore-{}", pr.id),
+            270.0,
+            ignored,
+        )
+        .on_press(move |s: &mut App| s.toggle_ignore(&id));
+        // It shows while the row is hovered, and always in the Ignored section.
+        right_side = right_side.child(if ignored {
+            button
+        } else {
+            button.group_opacity(0.0, 1.0)
+        });
+    }
     if pr.ownership == Ownership::Mine && !pr.is_draft && s.page == Page::Inbox {
         right_side = right_side.child(merge_control(s, k, pr));
     }
@@ -2610,8 +2699,13 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
             displayed.push(g);
         }
     }
-    let order: Vec<u8> = displayed.iter().map(|(p, _)| *p).collect();
-    let group_count = displayed.len();
+    // Ignored sits at the bottom and is not dragged, so it is left out of the drag order.
+    let order: Vec<u8> = displayed
+        .iter()
+        .map(|(p, _)| *p)
+        .filter(|p| *p != IGNORED_GROUP)
+        .collect();
+    let group_count = order.len();
     let dragging = s.group_reorder.dragging().is_some();
     for (index, (position, heading)) in displayed.iter().copied().enumerate() {
         let in_group = items
@@ -2619,7 +2713,12 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
             .filter(|pr| group(pr).is_some_and(|(id, _)| id == position))
             .count();
         let lifted = s.group_reorder.dragging() == Some(index);
-        let folded = dragging || s.collapsed_groups.contains(&position);
+        let is_ignored = position == IGNORED_GROUP;
+        let folded = if is_ignored {
+            !s.ignored_open
+        } else {
+            dragging || s.collapsed_groups.contains(&position)
+        };
         let drop_order = order.clone();
         let grip = row()
             .key(format!("group-grip-{position}"))
@@ -2668,13 +2767,17 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                             0.12,
                             rune::Easing::cubic(0.2, 0.0, 0.0, 1.0),
                         ));
-                        s.toggle_collapse_group(position)
+                        if position == IGNORED_GROUP {
+                            s.ignored_open = !s.ignored_open;
+                        } else {
+                            s.toggle_collapse_group(position);
+                        }
                     })
                     .child(
                         row()
                             .center_y()
                             .gap(8.0)
-                            .child(grip)
+                            .child(if is_ignored { el().size(20.0, 20.0) } else { grip })
                             .child(
                                 text(heading)
                                     .font(TextStyle::new(13.0, 650.0))
@@ -3460,6 +3563,19 @@ fn main() {
             s.page = Page::Inbox;
             s.group_order = vec![0, 2, 8, 9, 10, 1, 3, 7, 4, 5, 6];
         }),
+        ("ignored", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.ignored.insert("acme/engine#920".into());
+            s.ignored.insert("acme/engine#925".into());
+        }),
+        ("ignored-open", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.ignored.insert("acme/engine#920".into());
+            s.ignored.insert("acme/cli#910".into());
+            s.ignored_open = true;
+        }),
         // A moment into two pull requests arriving: the tint is still fading.
         ("arriving", |s| {
             seed_preview(s);
@@ -3834,6 +3950,36 @@ mod tests {
         state.apply_snapshot(snap);
         assert_eq!(state.group_order, [0]);
         assert!(state.collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn an_ignored_pull_request_moves_to_its_own_section_and_stops_counting() {
+        let mut state = init();
+        state.preview = true;
+        state.prs = github::demo_prs();
+        let now = current_epoch_hour();
+        let pr = state.prs.iter().find(|p| p.number == 920).unwrap().clone();
+        let counted = |s: &App| s.prs.iter().filter(|p| s.needs_you(p, now)).count();
+        let before = counted(&state);
+        assert_eq!(section_name(&state, &pr).as_deref(), Some("Review these"));
+        state.toggle_ignore(&pr.id);
+        // It is still listed, but under Ignored, last, and no longer counts as needing you.
+        assert_eq!(section_name(&state, &pr).as_deref(), Some("Ignored"));
+        assert!(state.in_inbox(&pr, now) && !state.needs_you(&pr, now));
+        assert_eq!(counted(&state), before - 1);
+        assert!(!state.visible_groups().contains(&IGNORED_GROUP));
+        assert!(state.group_rank(IGNORED_GROUP) > state.group_rank(11));
+        // A notification about it is not worth showing; about another it is.
+        assert!(state.is_ignored_url("https://github.com/acme/engine/pull/920"));
+        assert!(!state.is_ignored_url("https://github.com/acme/engine/pull/921"));
+        // Stop ignoring puts it back, and the choice survives a restart.
+        state.toggle_ignore(&pr.id);
+        assert_eq!(section_name(&state, &pr).as_deref(), Some("Review these"));
+        let db = Database::open_in_memory().unwrap();
+        db.set_ignored("a/b#1", true).unwrap();
+        db.set_ignored("a/b#2", true).unwrap();
+        db.set_ignored("a/b#1", false).unwrap();
+        assert_eq!(db.load_snapshot().unwrap().ignored.len(), 1);
     }
 
     #[test]
