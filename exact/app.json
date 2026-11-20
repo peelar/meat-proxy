@@ -20,7 +20,7 @@
   "env": [
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
-    "GITHUB_TOKEN_URL",
+    "GITHUB_TOKEN_ORIGIN",
     {
       "name": "GITHUB_API",
       "launch": true
