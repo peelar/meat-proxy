@@ -4,6 +4,20 @@ use crate::model::{
     IncomingReason, NotificationEvent, NotificationKind, Ownership, PrAttention, PullRequest,
 };
 
+/// A short system sound, for moments worth a little celebration.
+pub fn play_sound(name: &str, allow_os: bool) {
+    if !allow_os {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = format!("/System/Library/Sounds/{name}.aiff");
+        std::thread::spawn(move || {
+            let _ = Command::new("afplay").arg(path).status();
+        });
+    }
+}
+
 pub fn dispatch_system_notification(ev: &NotificationEvent, allow_os_post: bool) {
     post(&ev.id, &ev.title, &ev.body, Some(&ev.pr_url), allow_os_post);
 }

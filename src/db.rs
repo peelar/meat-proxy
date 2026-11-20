@@ -1,9 +1,10 @@
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
+use crate::github::SyncOptions;
 use crate::model::{
     CiStatus, InboxFilter, IncomingReason, NotificationEvent, NotificationKind, Ownership,
-    PullRequest, RepoConfig, RepoOrderingMode, ReviewState, WatchRule,
+    PullRequest, RepoConfig, ReviewState, WatchRule,
 };
 
 #[derive(Clone, Debug)]
@@ -12,13 +13,16 @@ pub struct AppSnapshot {
     pub repos: Vec<RepoConfig>,
     pub rules: Vec<WatchRule>,
     pub notifications: Vec<NotificationEvent>,
-    pub ordering_mode: RepoOrderingMode,
     pub draft_stale_hours: u64,
     pub open_stale_hours: u64,
     pub onboarded: bool,
     pub default_filter: InboxFilter,
     pub native_notifications: bool,
+    pub sync_options: SyncOptions,
+    pub group_order: Vec<u8>,
+    pub collapsed_groups: Vec<u8>,
     pub last_notif_modified: Option<String>,
+    pub organization: String,
 }
 
 pub fn default_db_path() -> PathBuf {
@@ -95,10 +99,11 @@ impl Database {
                 name TEXT PRIMARY KEY,
                 manual_rank INTEGER NOT NULL,
                 pinned INTEGER NOT NULL DEFAULT 0,
-                watch_all_open_prs INTEGER NOT NULL DEFAULT 0,
                 my_pr_volume INTEGER NOT NULL DEFAULT 0,
                 assigned_review_volume INTEGER NOT NULL DEFAULT 0,
-                collapsed INTEGER NOT NULL DEFAULT 0
+                collapsed INTEGER NOT NULL DEFAULT 0,
+                removed INTEGER NOT NULL DEFAULT 0,
+                activity INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS rules (
@@ -136,14 +141,33 @@ impl Database {
             }
             tx.commit()?;
         }
+        let has_removed: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repos') WHERE name='removed')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_removed {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let already_done: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repos') WHERE name='removed')",
+                [],
+                |r| r.get(0),
+            )?;
+            if !already_done {
+                tx.execute_batch(
+                    "ALTER TABLE repos ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE repos ADD COLUMN activity INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+            tx.commit()?;
+        }
         Ok(())
     }
 
     pub fn load_snapshot(&self) -> Result<AppSnapshot, rusqlite::Error> {
-        let ordering_mode = match self.get_setting("ordering_mode")?.as_deref() {
-            Some("custom") => RepoOrderingMode::Custom,
-            _ => RepoOrderingMode::Smart,
-        };
         let draft_stale_hours = self
             .get_setting("draft_stale_hours")?
             .and_then(|v| v.parse::<u64>().ok())
@@ -157,10 +181,8 @@ impl Database {
             .map(|v| v == "1")
             .unwrap_or(false);
         let default_filter = self
-            .get_setting("default_filter")?
-            .and_then(|value| value.parse().ok())
-            .map(InboxFilter::from_index)
-            .unwrap_or(InboxFilter::All);
+            .get_setting("default_tab")?
+            .map_or(InboxFilter::Inbox, |name| InboxFilter::from_name(&name));
         let native_notifications =
             self.get_setting("native_notifications")?.as_deref() != Some("0");
         let last_notif_modified = self.get_setting("last_notif_modified")?;
@@ -178,12 +200,11 @@ impl Database {
                     name: pr.repo.clone(),
                     manual_rank: rank,
                     pinned: false,
-                    watch_all_open_prs: false,
-                    my_pr_volume: u32::from(pr.ownership == Ownership::Mine),
-                    assigned_review_volume: u32::from(
-                        pr.incoming_reason == IncomingReason::AssignedOrReviewRequested,
-                    ),
+                    my_pr_volume: 0,
+                    assigned_review_volume: 0,
                     collapsed: false,
+                    removed: false,
+                    activity: 0,
                 };
                 let _ = self.upsert_repo(&cfg);
                 repos.push(cfg);
@@ -195,14 +216,36 @@ impl Database {
             repos,
             rules,
             notifications,
-            ordering_mode,
             draft_stale_hours,
             open_stale_hours,
             onboarded,
             default_filter,
             native_notifications,
+            group_order: self.number_list("inbox_group_order")?,
+            collapsed_groups: self.number_list("inbox_collapsed_groups")?,
+            sync_options: SyncOptions {
+                hide_archived: self.flag("hide_archived")?,
+                max_age_days: self
+                    .get_setting("max_age_days")?
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::github::DEFAULT_MAX_AGE_DAYS),
+            },
             last_notif_modified,
+            organization: self.get_setting("organization")?.unwrap_or_default(),
         })
+    }
+
+    /// Small numbers saved as `1,2,3`.
+    fn number_list(&self, key: &str) -> Result<Vec<u8>, rusqlite::Error> {
+        Ok(self
+            .get_setting(key)?
+            .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+            .unwrap_or_default())
+    }
+
+    /// A yes/no choice that is on unless the user switched it off.
+    fn flag(&self, key: &str) -> Result<bool, rusqlite::Error> {
+        Ok(self.get_setting(key)?.as_deref() != Some("0"))
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
@@ -268,6 +311,9 @@ impl Database {
                 snoozed_until_hour: row.get::<_, i64>(16)? as u64,
                 additions: row.get::<_, i64>(17)? as u32,
                 deletions: row.get::<_, i64>(18)? as u32,
+                // Merge state is fetched fresh on every sync, never stored.
+                merge_readiness: Default::default(),
+                merge_method: Default::default(),
             })
         })?;
         let mut out = Vec::new();
@@ -347,8 +393,8 @@ impl Database {
 
     pub fn load_repos(&self) -> Result<Vec<RepoConfig>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, manual_rank, pinned, watch_all_open_prs,
-                    my_pr_volume, assigned_review_volume, collapsed
+            "SELECT name, manual_rank, pinned,
+                    my_pr_volume, assigned_review_volume, collapsed, removed, activity
              FROM repos
              ORDER BY manual_rank ASC",
         )?;
@@ -357,10 +403,11 @@ impl Database {
                 name: row.get(0)?,
                 manual_rank: row.get::<_, i64>(1)? as usize,
                 pinned: row.get::<_, i64>(2)? != 0,
-                watch_all_open_prs: row.get::<_, i64>(3)? != 0,
-                my_pr_volume: row.get::<_, i64>(4)? as u32,
-                assigned_review_volume: row.get::<_, i64>(5)? as u32,
-                collapsed: row.get::<_, i64>(6)? != 0,
+                my_pr_volume: row.get::<_, i64>(3)? as u32,
+                assigned_review_volume: row.get::<_, i64>(4)? as u32,
+                collapsed: row.get::<_, i64>(5)? != 0,
+                removed: row.get::<_, i64>(6)? != 0,
+                activity: row.get::<_, i64>(7)? as u32,
             })
         })?;
         let mut out = Vec::new();
@@ -373,24 +420,26 @@ impl Database {
     pub fn upsert_repo(&self, repo: &RepoConfig) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO repos (
-                name, manual_rank, pinned, watch_all_open_prs,
-                my_pr_volume, assigned_review_volume, collapsed
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                name, manual_rank, pinned,
+                my_pr_volume, assigned_review_volume, collapsed, removed, activity
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(name) DO UPDATE SET
                 manual_rank = excluded.manual_rank,
                 pinned = excluded.pinned,
-                watch_all_open_prs = excluded.watch_all_open_prs,
                 my_pr_volume = excluded.my_pr_volume,
                 assigned_review_volume = excluded.assigned_review_volume,
-                collapsed = excluded.collapsed",
+                collapsed = excluded.collapsed,
+                removed = excluded.removed,
+                activity = excluded.activity",
             params![
                 repo.name,
                 repo.manual_rank as i64,
                 i64::from(repo.pinned),
-                i64::from(repo.watch_all_open_prs),
                 i64::from(repo.my_pr_volume),
                 i64::from(repo.assigned_review_volume),
                 i64::from(repo.collapsed),
+                i64::from(repo.removed),
+                i64::from(repo.activity),
             ],
         )?;
         Ok(())

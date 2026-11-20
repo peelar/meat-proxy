@@ -1,8 +1,8 @@
 use std::process::Command;
 
 use crate::model::{
-    CiStatus, IncomingReason, NotificationEvent, NotificationKind, Ownership, PullRequest,
-    RepoConfig, ReviewState, WatchRule,
+    CiStatus, IncomingReason, MergeMethod, MergeReadiness, NotificationEvent, NotificationKind,
+    Ownership, PullRequest, RepoConfig, ReviewState, WatchRule,
 };
 
 #[derive(Clone, Debug)]
@@ -19,6 +19,7 @@ pub struct SyncOutput {
 }
 
 pub const DEFAULT_POLL_INTERVAL: u64 = 60;
+const RECENT_PR_HOURS: u64 = 30 * 24;
 
 pub struct NotificationPoll {
     pub modified: Option<String>,
@@ -109,7 +110,7 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
         events.push(NotificationEvent {
             id: format!("assign-{repo}#{number}"),
             title: if reason == "review_requested" {
-                format!("Review requested on {repo}#{number}")
+                format!("{repo}#{number} is waiting for your thumb")
             } else {
                 format!("Assigned to {repo}#{number}")
             },
@@ -131,6 +132,170 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
     })
 }
 
+/// A repository the user has recently worked in, found through their GitHub contributions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredRepo {
+    pub name: String,
+    pub prs_90d: u32,
+    pub reviews_90d: u32,
+    pub prs_30d: u32,
+    pub reviews_30d: u32,
+}
+
+impl DiscoveredRepo {
+    /// Recent work weighs more than older work; reviews count a little less than authored PRs.
+    pub fn activity(&self) -> u32 {
+        let recent = self.prs_30d * 3 + self.reviews_30d * 2;
+        let quarter = self.prs_90d + self.reviews_90d / 2;
+        recent + quarter
+    }
+
+    pub fn owner(&self) -> &str {
+        self.name.split('/').next().unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Discovery {
+    /// Organizations the signed-in account belongs to.
+    pub organizations: Vec<String>,
+    /// Most active first.
+    pub repos: Vec<DiscoveredRepo>,
+}
+
+fn utc_days_ago(days: u64) -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .saturating_sub(days * 86_400);
+    let days_since_epoch = (secs / 86_400) as i64;
+    // Civil-from-days (Howard Hinnant).
+    let z = days_since_epoch + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+}
+
+/// One request for the account's organizations and where it opened or reviewed PRs lately.
+pub fn discover_repos() -> Result<Discovery, String> {
+    let window = |alias: &str, days: u64| {
+        format!(
+            "{alias}: contributionsCollection(from: \"{}\") {{
+               pullRequestContributionsByRepository(maxRepositories: 50) {{
+                 repository {{ nameWithOwner isArchived }} contributions(first: 1) {{ totalCount }}
+               }}
+               pullRequestReviewContributionsByRepository(maxRepositories: 50) {{
+                 repository {{ nameWithOwner isArchived }} contributions(first: 1) {{ totalCount }}
+               }}
+             }}",
+            utc_days_ago(days)
+        )
+    };
+    let query = format!(
+        "query {{ viewer {{ organizations(first: 50) {{ nodes {{ login }} }} {} {} }} }}",
+        window("d90", 90),
+        window("d30", 30)
+    );
+    let data = fetch_graphql(&query)?;
+    let viewer = &data["viewer"];
+
+    let mut repos: Vec<DiscoveredRepo> = Vec::new();
+    for (alias, days30) in [("d90", false), ("d30", true)] {
+        for (key, is_review) in [
+            ("pullRequestContributionsByRepository", false),
+            ("pullRequestReviewContributionsByRepository", true),
+        ] {
+            let Some(items) = viewer[alias][key].as_array() else {
+                continue;
+            };
+            for item in items {
+                if item["repository"]["isArchived"].as_bool() == Some(true) {
+                    continue;
+                }
+                let Some(name) = item["repository"]["nameWithOwner"].as_str() else {
+                    continue;
+                };
+                let count = item["contributions"]["totalCount"].as_u64().unwrap_or(0) as u32;
+                let idx = repos
+                    .iter()
+                    .position(|r| r.name == name)
+                    .unwrap_or_else(|| {
+                        repos.push(DiscoveredRepo {
+                            name: name.to_owned(),
+                            prs_90d: 0,
+                            reviews_90d: 0,
+                            prs_30d: 0,
+                            reviews_30d: 0,
+                        });
+                        repos.len() - 1
+                    });
+                let repo = &mut repos[idx];
+                match (days30, is_review) {
+                    (false, false) => repo.prs_90d = count,
+                    (false, true) => repo.reviews_90d = count,
+                    (true, false) => repo.prs_30d = count,
+                    (true, true) => repo.reviews_30d = count,
+                }
+            }
+        }
+    }
+    repos.sort_by(|a, b| {
+        b.activity()
+            .cmp(&a.activity())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let organizations = viewer["organizations"]["nodes"]
+        .as_array()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n["login"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Discovery {
+        organizations,
+        repos,
+    })
+}
+
+/// Confirms a repository exists and is readable; returns its canonical `owner/name`.
+pub fn verify_repo(input: &str) -> Result<String, String> {
+    let name = input
+        .trim()
+        .trim_start_matches("https://github.com/")
+        .trim_matches('/');
+    let mut parts = name.split('/');
+    let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err("Use the owner/name form, like saleor/saleor.".to_string());
+    };
+    if owner.is_empty() || repo.is_empty() {
+        return Err("Use the owner/name form, like saleor/saleor.".to_string());
+    }
+    let out = gh_command()
+        .args([
+            "api",
+            "--hostname",
+            "github.com",
+            &format!("repos/{owner}/{repo}"),
+            "--jq",
+            ".full_name",
+        ])
+        .output()
+        .map_err(|e| format!("Could not run gh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("GitHub can't find {owner}/{repo}."));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
 const PR_FIELDS: &str = r#"
     fragment PrFields on PullRequest {
       id
@@ -146,7 +311,10 @@ const PR_FIELDS: &str = r#"
       additions
       deletions
       author { login }
-      repository { nameWithOwner defaultBranchRef { name } }
+      state
+      mergeable
+      mergeStateStatus
+      repository { nameWithOwner isArchived viewerDefaultMergeMethod defaultBranchRef { name } }
       reviewDecision
       reviewRequests(first: 6) {
         nodes {
@@ -179,114 +347,164 @@ struct Search {
     query: String,
     reason: IncomingReason,
     label: Option<String>,
+    /// Keep only PRs in repositories the user tracks.
+    tracked_only: bool,
 }
 
-pub fn fetch_live(repos: &[RepoConfig], rules: &[WatchRule]) -> Result<SyncOutput, String> {
+/// Repositories at least this active get all of their fresh PRs, not just the ones involving the user.
+const BUSY_REPO_ACTIVITY: u32 = 30;
+const BUSY_REPO_LIMIT: usize = 3;
+const FRESH_PR_DAYS: u64 = 7;
+
+/// Which pull requests the sync brings in. Every choice has a default and a switch in Settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncOptions {
+    /// Skip PRs in archived repositories.
+    pub hide_archived: bool,
+    /// Skip PRs with no activity for this many days. 0 keeps everything.
+    pub max_age_days: u32,
+}
+
+pub const DEFAULT_MAX_AGE_DAYS: u32 = 30;
+
+impl Default for SyncOptions {
+    fn default() -> Self {
+        SyncOptions {
+            hide_archived: true,
+            max_age_days: DEFAULT_MAX_AGE_DAYS,
+        }
+    }
+}
+
+pub fn fetch_live(
+    repos: &[RepoConfig],
+    rules: &[WatchRule],
+    options: SyncOptions,
+) -> Result<SyncOutput, String> {
     let incoming = IncomingReason::AssignedOrReviewRequested;
     let mut searches = vec![
         Search {
             query: "is:pr is:open author:@me".into(),
             reason: IncomingReason::NotIncoming,
             label: None,
+            tracked_only: false,
         },
         Search {
             query: "is:pr is:open -author:@me -is:draft review-requested:@me".into(),
             reason: incoming,
             label: Some("Review Requested".into()),
+            tracked_only: false,
         },
         Search {
             query: "is:pr is:open -author:@me -is:draft assignee:@me".into(),
             reason: incoming,
             label: Some("Assigned".into()),
+            tracked_only: false,
         },
     ];
-    searches.extend(
-        repos
-            .iter()
-            .filter(|repo| repo.watch_all_open_prs)
-            .map(|repo| Search {
-                query: format!("is:pr is:open -is:draft -author:@me repo:{}", repo.name),
-                reason: IncomingReason::SubscribedRule,
-                label: Some("Watched Repo".into()),
-            }),
-    );
+    {
+        // Others' PRs the user has already commented on, reviewed or been mentioned in.
+        searches.push(Search {
+            query: "is:pr is:open -author:@me -is:draft involves:@me".into(),
+            reason: IncomingReason::SubscribedRule,
+            label: Some("Involved".into()),
+            tracked_only: true,
+        });
+    }
+    // In the repositories the user is busiest in, anything recently active is worth seeing.
+    let fresh_since = &utc_days_ago(FRESH_PR_DAYS)[..10];
+    let mut busy: Vec<_> = repos
+        .iter()
+        .filter(|repo| !repo.removed && repo.activity >= BUSY_REPO_ACTIVITY)
+        .collect();
+    busy.sort_by(|a, b| b.activity.cmp(&a.activity));
+    searches.extend(busy.into_iter().take(BUSY_REPO_LIMIT).map(|repo| Search {
+        query: format!(
+            "is:pr is:open -is:draft -author:@me repo:{} updated:>={fresh_since}",
+            repo.name
+        ),
+        reason: IncomingReason::SubscribedRule,
+        label: Some("Active repo".into()),
+        tracked_only: false,
+    }));
     searches.extend(rules.iter().filter(|rule| rule.enabled).map(|rule| Search {
         query: rule.to_github_search_query(),
         reason: IncomingReason::SubscribedRule,
         label: Some(rule.name.clone()),
+        tracked_only: false,
     }));
+
+    // Each search runs on its own thread; GitHub's cost grows with the PRs returned, so they
+    // overlap instead of queueing.
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = searches
+            .iter()
+            .map(|search| scope.spawn(move || fetch_search(search, options)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("A GitHub search stopped unexpectedly".to_string()))
+            })
+            .collect()
+    });
 
     let mut viewer = String::new();
     let mut prs = Vec::<PullRequest>::new();
-    // Bound each request so several large search results and their review/check data can coexist.
-    for batch in searches.chunks(3) {
-        let mut pending: Vec<_> = batch
-            .iter()
-            .map(|search| (search, None::<String>))
-            .collect();
-        while !pending.is_empty() {
-            let mut query = String::from("query { viewer { login }");
-            for (i, (search, cursor)) in pending.iter().enumerate() {
-                let term = serde_json::to_string(&search.query).expect("serialize search");
-                let cursor = serde_json::to_string(cursor).expect("serialize cursor");
-                query.push_str(&format!(
-                    " s{i}: search(query: {term}, type: ISSUE, first: 12, after: {cursor})                      {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }}"
-                ));
-            }
-            query.push('}');
-            query.push_str(PR_FIELDS);
-
-            let data = fetch_graphql(&query)?;
-            viewer = data["viewer"]["login"]
+    for (search, result) in searches.iter().zip(results) {
+        let (login, nodes) = result?;
+        viewer = login;
+        for node in &nodes {
+            let mine = node["author"]["login"]
                 .as_str()
-                .ok_or_else(|| "GitHub did not return the signed-in account".to_string())?
-                .to_owned();
-
-            let mut next = Vec::new();
-            for (i, (search, previous_cursor)) in pending.into_iter().enumerate() {
-                let page = &data[format!("s{i}")];
-                let nodes = page["nodes"]
-                    .as_array()
-                    .ok_or_else(|| "GitHub did not return search results".to_string())?;
-                for node in nodes {
-                    let mine = node["author"]["login"]
-                        .as_str()
-                        .is_some_and(|login| login.eq_ignore_ascii_case(&viewer));
-                    let ownership = if mine {
-                        Ownership::Mine
-                    } else {
-                        Ownership::Theirs
-                    };
-                    let reason = if mine {
-                        IncomingReason::NotIncoming
-                    } else {
-                        search.reason
-                    };
-                    let Some(pr) =
-                        parse_graphql_pr(node, ownership, reason, search.label.as_deref())
-                    else {
-                        continue;
-                    };
-                    if let Some(existing) = prs.iter_mut().find(|p| p.id == pr.id) {
-                        if reason == incoming {
-                            existing.incoming_reason = incoming;
-                        }
-                        if existing.matched_rule.is_none() {
-                            existing.matched_rule = pr.matched_rule;
-                        }
-                    } else {
-                        prs.push(pr);
-                    }
-                }
-                if page["pageInfo"]["hasNextPage"].as_bool() == Some(true) {
-                    let cursor = page["pageInfo"]["endCursor"]
-                        .as_str()
-                        .filter(|cursor| Some(*cursor) != previous_cursor.as_deref())
-                        .ok_or_else(|| "GitHub returned an invalid search cursor".to_string())?;
-                    next.push((search, Some(cursor.to_owned())));
-                }
+                .is_some_and(|login| login.eq_ignore_ascii_case(&viewer));
+            let ownership = if mine {
+                Ownership::Mine
+            } else {
+                Ownership::Theirs
+            };
+            let mut reason = if mine {
+                IncomingReason::NotIncoming
+            } else {
+                search.reason
+            };
+            // A review requested only through a team you belong to matters less than
+            // one addressed to you by name.
+            if reason == incoming
+                && search.label.as_deref() == Some("Review Requested")
+                && !requested_by_name(node, &viewer)
+            {
+                reason = IncomingReason::TeamReviewRequested;
             }
-            pending = next;
+            let Some(pr) = parse_graphql_pr(
+                node,
+                ownership,
+                reason,
+                search.label.as_deref(),
+                options.hide_archived,
+            ) else {
+                continue;
+            };
+            if options.max_age_days > 0 && pr.idle_hours >= u64::from(options.max_age_days) * 24 {
+                continue;
+            }
+            if search.tracked_only && !repos.iter().any(|r| !r.removed && r.name == pr.repo) {
+                continue;
+            }
+            if let Some(existing) = prs.iter_mut().find(|p| p.id == pr.id) {
+                if reason == incoming
+                    || (reason == IncomingReason::TeamReviewRequested
+                        && existing.incoming_reason == IncomingReason::SubscribedRule)
+                {
+                    existing.incoming_reason = reason;
+                }
+                if existing.matched_rule.is_none() {
+                    existing.matched_rule = pr.matched_rule;
+                }
+            } else {
+                prs.push(pr);
+            }
         }
     }
 
@@ -294,6 +512,74 @@ pub fn fetch_live(repos: &[RepoConfig], rules: &[WatchRule]) -> Result<SyncOutpu
         status: SyncStatus::Connected { username: viewer },
         prs,
     })
+}
+
+/// Whether the PR's review requests include `login` itself, not just a team they are in.
+fn requested_by_name(node: &serde_json::Value, login: &str) -> bool {
+    node["reviewRequests"]["nodes"]
+        .as_array()
+        .is_some_and(|nodes| {
+            nodes.iter().any(|n| {
+                n["requestedReviewer"]["login"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(login))
+            })
+        })
+}
+
+const PAGE_SIZE: u32 = 30;
+
+/// Every page of one search, with the signed-in account's login.
+fn fetch_search(
+    search: &Search,
+    options: SyncOptions,
+) -> Result<(String, Vec<serde_json::Value>), String> {
+    // Archived repositories and old PRs are skipped server-side, which keeps the sync light.
+    let archived = if options.hide_archived {
+        " archived:false"
+    } else {
+        ""
+    };
+    let recent = if options.max_age_days > 0 {
+        format!(
+            " updated:>={}",
+            &utc_days_ago(u64::from(options.max_age_days))[..10]
+        )
+    } else {
+        String::new()
+    };
+    let term = serde_json::to_string(&format!("{}{archived}{recent}", search.query))
+        .expect("serialize search");
+
+    let mut nodes = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let after = serde_json::to_string(&cursor).expect("serialize cursor");
+        let query = format!(
+            "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {PAGE_SIZE}, after: {after}) {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }} }}{PR_FIELDS}"
+        );
+        let data = fetch_graphql(&query)?;
+        let viewer = data["viewer"]["login"]
+            .as_str()
+            .ok_or_else(|| "GitHub did not return the signed-in account".to_string())?
+            .to_owned();
+        let page = &data["s0"];
+        nodes.extend(
+            page["nodes"]
+                .as_array()
+                .ok_or_else(|| "GitHub did not return search results".to_string())?
+                .iter()
+                .cloned(),
+        );
+        if page["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+            return Ok((viewer, nodes));
+        }
+        let next = page["pageInfo"]["endCursor"]
+            .as_str()
+            .filter(|next| Some(*next) != cursor.as_deref())
+            .ok_or_else(|| "GitHub returned an invalid search cursor".to_string())?;
+        cursor = Some(next.to_owned());
+    }
 }
 
 fn fetch_graphql(query: &str) -> Result<serde_json::Value, String> {
@@ -335,7 +621,16 @@ fn parse_graphql_pr(
     ownership: Ownership,
     reason: IncomingReason,
     rule_label: Option<&str>,
+    hide_archived: bool,
 ) -> Option<PullRequest> {
+    // Search results can lag behind: a PR merged a moment ago may still be listed as open.
+    if node["state"].as_str().is_some_and(|state| state != "OPEN") {
+        return None;
+    }
+    // Nothing happens in an archived repository anymore.
+    if hide_archived && node["repository"]["isArchived"].as_bool() == Some(true) {
+        return None;
+    }
     let number = node.get("number")?.as_u64()?;
     let title = node.get("title")?.as_str()?.to_string();
     let url = node.get("url")?.as_str()?.to_string();
@@ -466,7 +761,34 @@ fn parse_graphql_pr(
         snoozed_until_hour: 0,
         additions,
         deletions,
+        merge_readiness: MergeReadiness::from_github(
+            node["mergeable"].as_str().unwrap_or_default(),
+            node["mergeStateStatus"].as_str().unwrap_or_default(),
+        ),
+        merge_method: MergeMethod::from_github(
+            node["repository"]["viewerDefaultMergeMethod"]
+                .as_str()
+                .unwrap_or_default(),
+        ),
     })
+}
+
+/// Merges the PR with `gh`, the way the repository prefers.
+pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
+    let out = gh_command()
+        .args(["pr", "merge", url, method.flag()])
+        .output()
+        .map_err(|e| format!("Could not run gh: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("GitHub would not merge this pull request")
+        .trim()
+        .to_owned())
 }
 
 fn estimate_hours_since_iso8601(iso: &str) -> u64 {
@@ -495,16 +817,19 @@ pub fn infer_repos_from_prs(prs: &[PullRequest], existing: &[RepoConfig]) -> Vec
                     name: pr.repo.clone(),
                     manual_rank: rank,
                     pinned: false,
-                    watch_all_open_prs: false,
                     my_pr_volume: 0,
                     assigned_review_volume: 0,
                     collapsed: false,
+                    removed: false,
+                    activity: 0,
                 });
                 rank
             });
-        out[idx].my_pr_volume += u32::from(pr.ownership == Ownership::Mine);
+        // Abandoned PRs say nothing about where the work is happening now.
+        let recent = pr.idle_hours < RECENT_PR_HOURS;
+        out[idx].my_pr_volume += u32::from(recent && pr.ownership == Ownership::Mine);
         out[idx].assigned_review_volume +=
-            u32::from(pr.incoming_reason == IncomingReason::AssignedOrReviewRequested);
+            u32::from(recent && pr.incoming_reason == IncomingReason::AssignedOrReviewRequested);
     }
     out
 }
@@ -535,6 +860,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 142,
             deletions: 38,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         PullRequest {
             id: "anomalyco/rune#412".to_string(),
@@ -558,6 +885,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 89,
             deletions: 14,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         PullRequest {
             id: "anomalyco/rune#397".to_string(),
@@ -581,6 +910,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 412,
             deletions: 19,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         PullRequest {
             id: "anomalyco/rune#421".to_string(),
@@ -604,6 +935,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 64,
             deletions: 29,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         // --- anomalyco/opencode (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -628,6 +961,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 275,
             deletions: 84,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         PullRequest {
             id: "anomalyco/opencode#889".to_string(),
@@ -651,6 +986,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 53,
             deletions: 12,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         PullRequest {
             id: "anomalyco/opencode#908".to_string(),
@@ -674,6 +1011,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 118,
             deletions: 7,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         // --- peelar/meat-proxy (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -699,6 +1038,8 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 310,
             deletions: 44,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
         PullRequest {
             id: "peelar/meat-proxy#19".to_string(),
@@ -723,6 +1064,68 @@ pub fn demo_prs() -> Vec<PullRequest> {
             snoozed_until_hour: 0,
             additions: 195,
             deletions: 0,
+            merge_readiness: MergeReadiness::Unknown,
+            merge_method: MergeMethod::Squash,
         },
     ]
+}
+
+#[cfg(test)]
+mod live_tests {
+    #[test]
+    #[ignore = "needs a signed-in gh"]
+    fn discovers_repos_with_real_gh() {
+        let found = super::discover_repos().expect("discovery");
+        for r in found.repos.iter().take(10) {
+            println!("{} {} {:?}", r.name, r.activity(), r);
+        }
+        println!("{:?}", found.organizations);
+        assert!(!found.repos.is_empty());
+        assert_eq!(
+            super::verify_repo("saleor/saleor").unwrap(),
+            "saleor/saleor"
+        );
+        assert!(super::verify_repo("saleor/does-not-exist-xyz").is_err());
+        assert!(super::verify_repo("nonsense").is_err());
+    }
+}
+
+#[cfg(test)]
+mod live_sync_tests {
+    use crate::model::RepoConfig;
+
+    #[test]
+    #[ignore = "needs a signed-in gh"]
+    fn sync_with_busy_and_involved_searches() {
+        let found = super::discover_repos().expect("discovery");
+        let repos: Vec<RepoConfig> = found
+            .repos
+            .iter()
+            .enumerate()
+            .map(|(rank, r)| RepoConfig {
+                name: r.name.clone(),
+                manual_rank: rank,
+                pinned: false,
+                my_pr_volume: 0,
+                assigned_review_volume: 0,
+                collapsed: false,
+                removed: false,
+                activity: r.activity(),
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let out = super::fetch_live(&repos, &[], super::SyncOptions::default()).expect("sync");
+        println!("{} PRs in {:?}", out.prs.len(), started.elapsed());
+        for pr in out
+            .prs
+            .iter()
+            .filter(|p| p.ownership == crate::model::Ownership::Mine)
+            .take(12)
+        {
+            println!(
+                "{} draft={} {:?} {:?}",
+                pr.id, pr.is_draft, pr.merge_readiness, pr.merge_method
+            );
+        }
+    }
 }
