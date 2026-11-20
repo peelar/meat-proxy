@@ -1,26 +1,21 @@
 //! Judgments: yes/no questions a language model answers about a pull request, with probabilities.
 //!
-//! The model never writes text. It is asked three questions in one call and answers `Y N N`; the
-//! probabilities come from the token log-probabilities at each answer, so "92% trivial" is the
-//! model's own odds, not a guess dressed up as a number. Everything else (merge readiness, who
-//! the author is, how long it has waited) stays in code: the model only answers what needs reading.
+//! The model never writes text. It is asked the questions the sections need in one call and
+//! answers `Y N N`; the probabilities come from the token log-probabilities at each answer, so
+//! "92% trivial" is the model's own odds, not a guess dressed up as a number. Everything else
+//! (merge readiness, who the author is, how long it has waited) stays in code: the model only
+//! answers what needs reading. Which questions exist, and what a "yes" does, is in `sections`.
 //!
 //! A model costs money and time, so it is the last resort. A pull request goes to it only when
 //! it asks something of the user, lives in a repository whose text may leave the machine, has
 //! changed since it was last judged, and no cheap rule already knows the answer.
 
 use crate::model::{PrAttention, PullRequest};
+use crate::sections::Question;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
-
-/// A trivial change: a typo, docs, a dependency bump. Worth a skim, not a read.
-pub const TRIVIAL_AT: f32 = 0.75;
-/// Time pressure or something blocked on it.
-pub const URGENT_AT: f32 = 0.6;
-/// Touches auth, payments, migrations, security or infrastructure.
-pub const RISKY_AT: f32 = 0.6;
 
 const DEFAULT_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
@@ -31,32 +26,26 @@ const PROMPT_VERSION: &str = "2";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Judgment {
-    pub trivial: f32,
-    pub urgent: f32,
-    pub risky: f32,
+    /// The probability of yes for each question, by question id.
+    pub answers: HashMap<String, f32>,
     /// "rules" when a cheap rule decided, else the model's name.
     pub by: String,
-    /// What the pull request looked like when it was judged; a change means judging again.
+    /// What the pull request and the questions looked like when it was judged; a change means
+    /// judging again.
     pub fingerprint: String,
 }
 
 impl Judgment {
-    pub fn is_urgent(&self) -> bool {
-        self.urgent >= URGENT_AT
-    }
-    pub fn is_risky(&self) -> bool {
-        self.risky >= RISKY_AT
-    }
-    /// Worth skimming instead of reading: trivial, and nothing says to slow down.
-    pub fn is_skim(&self) -> bool {
-        self.trivial >= TRIVIAL_AT && !self.is_urgent() && !self.is_risky()
-    }
     pub fn summary(&self) -> String {
+        let mut answers: Vec<_> = self.answers.iter().collect();
+        answers.sort_by(|a, b| a.0.cmp(b.0));
+        let odds: Vec<String> = answers
+            .iter()
+            .map(|(id, p)| format!("{id} {:.0}%", **p * 100.0))
+            .collect();
         format!(
-            "Alien intelligence says: urgent {:.0}%  ·  risky {:.0}%  ·  trivial {:.0}%  ·  {}",
-            self.urgent * 100.0,
-            self.risky * 100.0,
-            self.trivial * 100.0,
+            "Alien intelligence says: {}  ·  {}",
+            odds.join("  ·  "),
             self.by
         )
     }
@@ -137,21 +126,17 @@ pub fn is_candidate(pr: &PullRequest, attention: PrAttention, cfg: &JudgeConfig)
 }
 
 /// What cheap rules already know. A hit costs nothing and is final.
-pub fn shortcut(pr: &PullRequest) -> Option<Judgment> {
+pub fn shortcut(pr: &PullRequest, questions_key: &str) -> Option<Judgment> {
     rule_judgment(pr).map(|j| Judgment {
-        fingerprint: fingerprint(pr),
+        fingerprint: fingerprint(pr, questions_key),
         ..j
     })
 }
 
 /// The same verdict without the fingerprint, cheap enough to compute whenever a list is drawn:
-/// it is what the inbox sorts by when no model is involved.
+/// it is what the inbox sorts by when no model is involved. Bots, routine titles and one-line
+/// changes are trivial; a question nobody answered counts as no.
 pub fn rule_judgment(pr: &PullRequest) -> Option<Judgment> {
-    let author = pr.author.to_ascii_lowercase();
-    let bot = author.ends_with("[bot]")
-        || author.contains("dependabot")
-        || author.contains("renovate")
-        || author == "github-actions";
     let title = pr.title.to_ascii_lowercase();
     let routine = title.starts_with("bump ")
         || title.starts_with("chore(deps")
@@ -159,17 +144,32 @@ pub fn rule_judgment(pr: &PullRequest) -> Option<Judgment> {
         || title.starts_with("docs(")
         || title.starts_with("typo");
     let tiny = pr.additions + pr.deletions <= 2;
+    let bot = crate::sections::is_bot(&pr.author);
     (bot || routine || tiny).then(|| Judgment {
-        trivial: if bot || routine { 0.95 } else { 0.85 },
-        urgent: 0.03,
-        risky: 0.05,
+        answers: HashMap::from([
+            (
+                "trivial".to_owned(),
+                if bot || routine { 0.95 } else { 0.85 },
+            ),
+            ("urgent".to_owned(), 0.03),
+            ("risky".to_owned(), 0.05),
+        ]),
         by: "rules".into(),
         fingerprint: String::new(),
     })
 }
 
-/// What a judgment depends on: the text and the size, not the comments or the clock.
-pub fn fingerprint(pr: &PullRequest) -> String {
+/// A key for the questions in use: asking different ones makes old answers stale.
+pub fn questions_key(questions: &[Question]) -> String {
+    let mut text = String::from(PROMPT_VERSION);
+    for q in questions {
+        text.push_str(&format!("|{}:{}", q.id, q.ask));
+    }
+    format!("{:016x}", crate::sections::fnv(&text))
+}
+
+/// What a judgment depends on: the text, the size and the questions, not the comments or the clock.
+pub fn fingerprint(pr: &PullRequest, questions_key: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut feed = |bytes: &[u8]| {
         for byte in bytes.iter().chain(&[0u8]) {
@@ -177,7 +177,7 @@ pub fn fingerprint(pr: &PullRequest) -> String {
             hash = hash.wrapping_mul(0x100000001b3);
         }
     };
-    feed(PROMPT_VERSION.as_bytes());
+    feed(questions_key.as_bytes());
     feed(pr.repo.as_bytes());
     feed(pr.title.as_bytes());
     feed(pr.author.as_bytes());
@@ -215,20 +215,21 @@ fn tidy(body: &str) -> String {
     clip(&lines.join("\n"), BODY_CHARS)
 }
 
-fn prompt(pr: &PullRequest) -> String {
+fn prompt(pr: &PullRequest, questions: &[Question]) -> String {
     let labels = if pr.labels.is_empty() {
         "none".to_owned()
     } else {
         pr.labels.join(", ")
     };
     let body = tidy(&pr.body);
+    let asked: String = questions
+        .iter()
+        .enumerate()
+        .map(|(n, q)| format!("{}. {}: {}\n", n + 1, q.id, q.ask))
+        .collect();
     format!(
         "Pull request in {repo}\nTitle: {title}\nAuthor: {author}{external}\nLabels: {labels}\nSize: +{add} -{del}\nBranch: {branch}\nDescription:\n{body}\n\n\
-         Answer three yes/no questions about this pull request, in this order, as three letters Y or N separated by spaces. Nothing else. Most pull requests are routine, so answer N unless the text clearly says otherwise.\n\
-         1. Trivial: is it a typo, docs, formatting, a rename, a dependency bump, a translation or generated code, safe to skim without reading the diff?\n\
-         2. Urgent: does the title or description itself state time pressure: a deadline, a customer or release waiting on it, an outage or production incident, or the words urgent, asap, hotfix or blocker? An ordinary bug fix, feature or improvement is NOT urgent.\n\
-         3. Risky: is the main change itself in authentication, authorization, payments or money, data migrations, security, or deploy and infrastructure config? Judge the change, not words mentioned in passing.\n\n\
-         Examples. \"bump lodash from 4.17.20 to 4.17.21\" is Y N N. \"Hotfix: checkout crashes for all customers, blocks the release\" is N Y N. \"Add refund idempotency keys to the payment flow\" is N N Y. \"Add retry to the webhook sender\" is N N N.",
+         Answer {n} yes/no question{s} about this pull request, in this order, as {n} letter{s} Y or N separated by spaces. Nothing else. Most pull requests are routine, so answer N unless the text clearly says otherwise.\n{asked}",
         repo = pr.repo,
         title = pr.title,
         author = pr.author,
@@ -241,6 +242,8 @@ fn prompt(pr: &PullRequest) -> String {
         del = pr.deletions,
         branch = pr.head_ref,
         body = if body.is_empty() { "(none)" } else { &body },
+        n = questions.len(),
+        s = if questions.len() == 1 { "" } else { "s" },
     )
 }
 
@@ -252,10 +255,13 @@ pub struct Usage {
     pub cost_usd: f64,
 }
 
-/// The probability of Y at each of the first three answers, from the token log-probabilities.
+/// The probability of Y at each of the first `count` answers, from the token log-probabilities.
 /// A provider that sends none gets the letters themselves, held at 92% so they cannot claim
 /// more certainty than a yes or a no deserves.
-pub fn parse_answers(response: &serde_json::Value) -> Result<([f32; 3], Usage), String> {
+pub fn parse_answers(
+    response: &serde_json::Value,
+    count: usize,
+) -> Result<(Vec<f32>, Usage), String> {
     let choice = &response["choices"][0];
     let usage = Usage {
         prompt_tokens: response["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
@@ -293,7 +299,7 @@ pub fn parse_answers(response: &serde_json::Value) -> Result<([f32; 3], Usage), 
             });
         }
     }
-    if odds.len() < 3 {
+    if odds.len() < count {
         let content = choice["message"]["content"].as_str().unwrap_or_default();
         odds = content
             .chars()
@@ -304,12 +310,14 @@ pub fn parse_answers(response: &serde_json::Value) -> Result<([f32; 3], Usage), 
             })
             .collect();
     }
-    match odds.as_slice() {
-        [a, b, c, ..] => Ok(([*a, *b, *c], usage)),
-        _ => Err(format!(
-            "the model did not answer Y or N three times: {}",
+    if odds.len() >= count {
+        odds.truncate(count);
+        Ok((odds, usage))
+    } else {
+        Err(format!(
+            "the model did not answer Y or N {count} times: {}",
             choice["message"]["content"]
-        )),
+        ))
     }
 }
 
@@ -369,30 +377,32 @@ fn post_chat(cfg: &JudgeConfig, request: &serde_json::Value) -> Result<serde_jso
     Ok(json)
 }
 
-/// Ask the model about one pull request.
-pub fn ask(cfg: &JudgeConfig, pr: &PullRequest) -> Result<(Judgment, Usage), String> {
+/// Ask the model the questions about one pull request.
+pub fn ask(
+    cfg: &JudgeConfig,
+    questions: &[Question],
+    pr: &PullRequest,
+) -> Result<(Judgment, Usage), String> {
     let request = serde_json::json!({
         "model": cfg.model,
         "temperature": 0,
-        "max_tokens": 8,
+        "max_tokens": 4 * questions.len().max(1) + 4,
         "logprobs": true,
         "top_logprobs": 8,
         // OpenRouter would otherwise route to a provider that drops the log-probabilities.
         "provider": { "require_parameters": true },
         "messages": [
-            { "role": "system", "content": "You triage pull requests for a busy reviewer. Reply with exactly three letters, Y or N, separated by spaces." },
-            { "role": "user", "content": prompt(pr) },
+            { "role": "system", "content": "You triage pull requests for a busy reviewer. Reply with only the letters Y or N, separated by spaces, one per question." },
+            { "role": "user", "content": prompt(pr, questions) },
         ],
     });
     let response = post_chat(cfg, &request)?;
-    let (odds, usage) = parse_answers(&response)?;
+    let (odds, usage) = parse_answers(&response, questions.len())?;
     Ok((
         Judgment {
-            trivial: odds[0],
-            urgent: odds[1],
-            risky: odds[2],
+            answers: questions.iter().map(|q| q.id.clone()).zip(odds).collect(),
             by: cfg.model.clone(),
-            fingerprint: fingerprint(pr),
+            fingerprint: fingerprint(pr, &questions_key(questions)),
         },
         usage,
     ))
@@ -412,7 +422,12 @@ pub struct Batch {
 
 /// Judge pull requests a few at a time, stopping early on an error that would repeat or when the
 /// spending cap is reached.
-pub fn run_batch(cfg: &JudgeConfig, prs: Vec<PullRequest>, spent_before: f64) -> Batch {
+pub fn run_batch(
+    cfg: &JudgeConfig,
+    questions: &[Question],
+    prs: Vec<PullRequest>,
+    spent_before: f64,
+) -> Batch {
     let mut batch = Batch::default();
     for chunk in prs.chunks(PARALLEL_CALLS) {
         if batch.fatal || spent_before + batch.usage.cost_usd >= cfg.max_spend_usd {
@@ -421,7 +436,7 @@ pub fn run_batch(cfg: &JudgeConfig, prs: Vec<PullRequest>, spent_before: f64) ->
         let results: Vec<_> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
-                .map(|pr| scope.spawn(move || (pr.id.clone(), ask(cfg, pr))))
+                .map(|pr| scope.spawn(move || (pr.id.clone(), ask(cfg, questions, pr))))
                 .collect();
             handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
@@ -452,20 +467,29 @@ pub fn plan(
     attention: impl Fn(&PullRequest) -> PrAttention,
     cache: &HashMap<String, Judgment>,
     cfg: &JudgeConfig,
+    questions: &[Question],
 ) -> Plan {
     let mut plan = Plan::default();
+    // No section depends on a question: there is nothing to ask.
+    if questions.is_empty() {
+        return plan;
+    }
+    let key = questions_key(questions);
     for pr in prs {
         if !is_candidate(pr, attention(pr), cfg) {
             continue;
         }
-        let fp = fingerprint(pr);
-        // A verdict stands while the text is the same and it came from the model in use (or a rule).
-        if cache
-            .get(&pr.id)
-            .is_some_and(|j| j.fingerprint == fp && (j.by == "rules" || j.by == cfg.model))
-        {
+        let fp = fingerprint(pr, &key);
+        // A verdict stands while the text and the questions are the same and it came from a rule
+        // or from the model in use with an answer to every question.
+        if cache.get(&pr.id).is_some_and(|j| {
+            j.fingerprint == fp
+                && (j.by == "rules"
+                    || (j.by == cfg.model
+                        && questions.iter().all(|q| j.answers.contains_key(&q.id))))
+        }) {
             plan.cached += 1;
-        } else if let Some(judgment) = shortcut(pr) {
+        } else if let Some(judgment) = shortcut(pr, &key) {
             plan.settled.push((pr.id.clone(), judgment));
         } else {
             plan.to_ask.push(pr.clone());
@@ -489,6 +513,7 @@ pub struct Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sections::Layout;
     use serde_json::json;
 
     fn pr(title: &str) -> PullRequest {
@@ -500,6 +525,10 @@ mod tests {
         pr.is_draft = false;
         pr.private_repo = false;
         pr
+    }
+
+    fn defaults() -> Vec<Question> {
+        Layout::default().needed_questions()
     }
 
     fn token(letter: &str, yes: f64, no: f64) -> serde_json::Value {
@@ -518,56 +547,83 @@ mod tests {
             ]}}],
             "usage": { "prompt_tokens": 300, "completion_tokens": 5, "cost": 0.0001 },
         });
-        let ([trivial, urgent, risky], usage) = parse_answers(&response).unwrap();
-        assert!((trivial - 0.9).abs() < 1e-3, "{trivial}");
-        assert!((urgent - 0.25).abs() < 1e-3, "{urgent}");
-        assert!(risky < 0.02, "{risky}");
+        let (odds, usage) = parse_answers(&response, 3).unwrap();
+        assert!((odds[0] - 0.9).abs() < 1e-3, "{odds:?}");
+        assert!((odds[1] - 0.25).abs() < 1e-3);
+        assert!(odds[2] < 0.02);
         assert_eq!(usage.prompt_tokens, 300);
+        // Two questions ask for two answers, whatever else the model wrote.
+        assert_eq!(parse_answers(&response, 2).unwrap().0.len(), 2);
+        assert!(parse_answers(&response, 4).is_err());
     }
 
     #[test]
     fn without_logprobs_the_letters_are_held_back_from_certainty() {
         let response = json!({ "choices": [{ "message": { "content": "Y N Y" } }] });
-        let ([a, b, c], _) = parse_answers(&response).unwrap();
-        assert_eq!((a, b, c), (0.92, 0.08, 0.92));
+        let (odds, _) = parse_answers(&response, 3).unwrap();
+        assert_eq!(odds, [0.92, 0.08, 0.92]);
         let junk = json!({ "choices": [{ "message": { "content": "I think so" } }] });
-        assert!(parse_answers(&junk).is_err());
+        assert!(parse_answers(&junk, 3).is_err());
+    }
+
+    #[test]
+    fn the_prompt_lists_exactly_the_questions_asked() {
+        let questions = vec![Question {
+            id: "payments".into(),
+            ask: "Does it change how money moves?".into(),
+            at: 0.6,
+        }];
+        let text = prompt(&pr("Refund flow"), &questions);
+        assert!(text.contains("1. payments: Does it change how money moves?"));
+        assert!(text.contains("Answer 1 yes/no question "));
+        assert!(!text.contains("urgent"));
     }
 
     #[test]
     fn rules_answer_bots_and_tiny_changes_without_a_call() {
         let mut bot = pr("Update lockfile");
         bot.author = "dependabot".into();
-        assert!(shortcut(&bot).is_some_and(|j| j.is_skim() && j.by == "rules"));
+        let j = shortcut(&bot, "k").unwrap();
+        assert!(j.answers["trivial"] > 0.9 && j.by == "rules");
         let mut tiny = pr("Fix label");
         tiny.additions = 1;
         tiny.deletions = 1;
-        assert!(shortcut(&tiny).is_some());
-        assert!(shortcut(&pr("Rework checkout payment flow")).is_none());
+        assert!(shortcut(&tiny, "k").is_some());
+        assert!(shortcut(&pr("Rework checkout payment flow"), "k").is_none());
     }
 
     #[test]
-    fn the_fingerprint_tracks_the_text_and_not_the_clock() {
+    fn the_fingerprint_tracks_the_text_and_the_questions_and_not_the_clock() {
         let a = pr("Add webhook retries");
         let mut later = a.clone();
         later.idle_hours += 50;
         later.reviewers.push("someone".into());
-        assert_eq!(fingerprint(&a), fingerprint(&later));
+        assert_eq!(fingerprint(&a, "k"), fingerprint(&later, "k"));
         let mut edited = a.clone();
         edited.body.push_str(" Urgent: blocks the release.");
-        assert_ne!(fingerprint(&a), fingerprint(&edited));
+        assert_ne!(fingerprint(&a, "k"), fingerprint(&edited, "k"));
+        assert_ne!(
+            fingerprint(&a, "k"),
+            fingerprint(&a, "another set of questions")
+        );
     }
 
-    #[test]
-    fn only_what_needs_a_model_is_sent() {
-        let cfg = JudgeConfig {
+    fn cfg(max: usize) -> JudgeConfig {
+        JudgeConfig {
             base_url: String::new(),
             api_key: "k".into(),
             model: "m".into(),
             include_private: false,
-            max_per_sync: 2,
+            max_per_sync: max,
             max_spend_usd: 1.0,
-        };
+        }
+    }
+
+    #[test]
+    fn only_what_needs_a_model_is_sent() {
+        let questions = defaults();
+        let key = questions_key(&questions);
+        let cfg = cfg(2);
         let mut prs = Vec::new();
         for n in 0..5u64 {
             let mut p = pr(&format!("Change number {n}"));
@@ -581,34 +637,47 @@ mod tests {
         cache.insert(
             prs[0].id.clone(),
             Judgment {
-                trivial: 0.1,
-                urgent: 0.1,
-                risky: 0.1,
+                answers: questions.iter().map(|q| (q.id.clone(), 0.1)).collect(),
                 by: "m".into(),
-                fingerprint: fingerprint(&prs[0]),
+                fingerprint: fingerprint(&prs[0], &key),
             },
         );
-        let plan = plan(&prs, |_| PrAttention::IncomingAssigned, &cache, &cfg);
+        let attention = |_: &PullRequest| PrAttention::IncomingAssigned;
+        let plan = plan(&prs, attention, &cache, &cfg, &questions);
         assert_eq!(plan.cached, 1);
+        assert_eq!(plan.settled.len(), 1);
+        let asked: Vec<_> = plan.to_ask.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(asked, ["o/r#1", "o/r#2"], "newest first, capped");
+        // A new model, or a question added since, redoes the verdict.
         let other = JudgeConfig {
             model: "another/model".into(),
             ..cfg.clone()
         };
         assert_eq!(
-            super::plan(&prs, |_| PrAttention::IncomingAssigned, &cache, &other).cached,
-            0,
-            "a new model redoes the verdicts"
+            super::plan(&prs, attention, &cache, &other, &questions).cached,
+            0
         );
-        assert_eq!(plan.settled.len(), 1);
-        let asked: Vec<_> = plan.to_ask.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(asked, ["o/r#1", "o/r#2"], "newest first, capped");
-        assert_eq!(plan.deferred, 0);
-        let none = plan_for_watched(&prs, &cfg);
-        assert!(none.to_ask.is_empty() && none.settled.is_empty());
-    }
-
-    fn plan_for_watched(prs: &[PullRequest], cfg: &JudgeConfig) -> Plan {
-        plan(prs, |_| PrAttention::IncomingWatched, &HashMap::new(), cfg)
+        let mut more = questions.clone();
+        more.push(Question {
+            id: "payments".into(),
+            ask: "Money?".into(),
+            at: 0.6,
+        });
+        assert_eq!(super::plan(&prs, attention, &cache, &cfg, &more).cached, 0);
+        // Pull requests that are only watched, and layouts that ask nothing, send nothing.
+        let watched = super::plan(
+            &prs,
+            |_| PrAttention::IncomingWatched,
+            &HashMap::new(),
+            &cfg,
+            &questions,
+        );
+        assert!(watched.to_ask.is_empty() && watched.settled.is_empty());
+        assert!(
+            super::plan(&prs, attention, &HashMap::new(), &cfg, &[])
+                .to_ask
+                .is_empty()
+        );
     }
 
     #[test]

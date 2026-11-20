@@ -27,6 +27,10 @@ pub struct AppSnapshot {
     pub judgments: std::collections::HashMap<String, Judgment>,
     /// The user's choice of AI or rules for sorting, if they made one.
     pub smart_sort: Option<bool>,
+    /// Hide outside contributors' pull requests from the Inbox tab.
+    pub hide_external: bool,
+    /// Which sections the saved group order was made for.
+    pub layout_key: Option<String>,
 }
 
 pub fn default_db_path() -> PathBuf {
@@ -119,15 +123,6 @@ impl Database {
                 enabled INTEGER NOT NULL DEFAULT 1
             );
 
-            CREATE TABLE IF NOT EXISTS judgments (
-                pr_id TEXT PRIMARY KEY,
-                fingerprint TEXT NOT NULL,
-                trivial REAL NOT NULL,
-                urgent REAL NOT NULL,
-                risky REAL NOT NULL,
-                judged_by TEXT NOT NULL,
-                judged_at INTEGER NOT NULL
-            );
 
             CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY,
@@ -178,12 +173,25 @@ impl Database {
             }
             tx.commit()?;
         }
-        // The Inbox groups changed: an order saved for the old set would bury the new ones.
-        if self.get_setting("inbox_group_version")?.as_deref() != Some("3") {
-            self.conn
-                .execute("DELETE FROM settings WHERE key = 'inbox_group_order'", [])?;
-            self.set_setting("inbox_group_version", "3")?;
+        // Judgments keep one answer per question, so questions can be added in the config. The
+        // earlier fixed columns are dropped: the cache is cheap to fill again.
+        let fixed_columns: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('judgments') WHERE name='trivial')",
+            [],
+            |r| r.get(0),
+        )?;
+        if fixed_columns {
+            self.conn.execute("DROP TABLE judgments", [])?;
         }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS judgments (
+                pr_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                answers TEXT NOT NULL,
+                judged_by TEXT NOT NULL,
+                judged_at INTEGER NOT NULL
+            );",
+        )?;
         // Rules an early version seeded: one repeats the built-in searches, the other watched a
         // repository this app has no reason to know about.
         self.conn.execute(
@@ -260,24 +268,25 @@ impl Database {
             organization: self.get_setting("organization")?.unwrap_or_default(),
             judgments: self.load_judgments()?,
             smart_sort: self.get_setting("smart_sort")?.map(|v| v == "1"),
+            hide_external: self.get_setting("hide_external")?.is_some_and(|v| v == "1"),
+            layout_key: self.get_setting("inbox_layout")?,
         })
     }
 
     pub fn load_judgments(
         &self,
     ) -> Result<std::collections::HashMap<String, Judgment>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT pr_id, fingerprint, trivial, urgent, risky, judged_by FROM judgments",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pr_id, fingerprint, answers, judged_by FROM judgments")?;
         let rows = stmt.query_map([], |row| {
+            let answers: String = row.get(2)?;
             Ok((
                 row.get::<_, String>(0)?,
                 Judgment {
                     fingerprint: row.get(1)?,
-                    trivial: row.get::<_, f64>(2)? as f32,
-                    urgent: row.get::<_, f64>(3)? as f32,
-                    risky: row.get::<_, f64>(4)? as f32,
-                    by: row.get(5)?,
+                    answers: serde_json::from_str(&answers).unwrap_or_default(),
+                    by: row.get(3)?,
                 },
             ))
         })?;
@@ -294,11 +303,17 @@ impl Database {
         let now = chrono::Utc::now().timestamp();
         for (id, j) in judged {
             tx.execute(
-                "INSERT INTO judgments (pr_id, fingerprint, trivial, urgent, risky, judged_by, judged_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(pr_id) DO UPDATE SET fingerprint = ?2, trivial = ?3, urgent = ?4,
-                   risky = ?5, judged_by = ?6, judged_at = ?7",
-                params![id, j.fingerprint, f64::from(j.trivial), f64::from(j.urgent), f64::from(j.risky), j.by, now],
+                "INSERT INTO judgments (pr_id, fingerprint, answers, judged_by, judged_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(pr_id) DO UPDATE SET fingerprint = ?2, answers = ?3,
+                   judged_by = ?4, judged_at = ?5",
+                params![
+                    id,
+                    j.fingerprint,
+                    serde_json::to_string(&j.answers).unwrap_or_default(),
+                    j.by,
+                    now
+                ],
             )?;
         }
         let keep: std::collections::HashSet<&String> = live_ids.iter().collect();

@@ -11,6 +11,7 @@ mod judge;
 mod model;
 mod notify;
 mod reorder;
+mod sections;
 mod stacks;
 
 use db::Database;
@@ -30,23 +31,6 @@ const ARRIVAL_SLIDE_SECS: f32 = 0.45;
 const ARRIVAL_GLOW_SECS: f32 = 2.6;
 /// Gap between rows arriving together, so a batch cascades.
 const ARRIVAL_STAGGER_SECS: f32 = 0.07;
-
-/// Ready to merge first (it is one press), then what to do and read, then the rest, until the
-/// user drags groups elsewhere. Rules and AI sorting share it.
-const DEFAULT_GROUP_ORDER: [u8; 11] = [2, 8, 9, 0, 10, 1, 3, 7, 4, 5, 6];
-/// Review requests are split by how to review them. The model decides these three (the brain
-/// marks them); size is a plain rule.
-const DO_FIRST: (u8, &str) = (8, "Do first");
-const READ_CAREFULLY: (u8, &str) = (9, "Read carefully");
-const APPROVE_AT_WILL: (u8, &str) = (7, "Approve at will");
-const BIG_REVIEWS: (u8, &str) = (10, "Big reviews");
-/// A review this large wants time set aside, whatever it says.
-const BIG_PR_LINES: u32 = 600;
-
-/// Whether a model, not a rule, decides what belongs in this group.
-fn model_group(group: u8) -> bool {
-    matches!(group, 7..=9)
-}
 
 fn current_epoch_hour() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64 / 3600
@@ -111,6 +95,10 @@ pub struct App {
     pub judge: Option<judge::JudgeConfig>,
     /// Sort with the model's verdicts (true) or by rules alone (false); unset follows what exists.
     pub smart_sort: Option<bool>,
+    /// The Inbox sections, from `sections.json` or the defaults.
+    pub layout: sections::Layout,
+    /// Hide outside contributors' pull requests from the Inbox tab.
+    pub hide_external: bool,
     pub judgments: std::collections::HashMap<String, judge::Judgment>,
     pub judge_worker: Latest<judge::Batch>,
     /// Spent on the model in this run of the app, against the config's cap.
@@ -157,7 +145,7 @@ fn init() -> App {
         merge_worker: Latest::default(),
         last_synced: None,
         sync_label_shown: String::new(),
-        group_order: DEFAULT_GROUP_ORDER.to_vec(),
+        group_order: (0..sections::Layout::default().sections.len() as u8).collect(),
         collapsed_groups: Vec::new(),
         group_reorder: reorder::Reorder::new(),
         max_age_input: TextEdit::new(&github::DEFAULT_MAX_AGE_DAYS.to_string()),
@@ -183,6 +171,8 @@ fn init() -> App {
         sync_worker: Latest::default(),
         judge: None,
         smart_sort: None,
+        layout: sections::Layout::default(),
+        hide_external: false,
         judgments: std::collections::HashMap::new(),
         judge_worker: Latest::default(),
         judge_spent: 0.0,
@@ -270,14 +260,31 @@ impl App {
         self.filter = snap.default_filter;
         self.native_notifications = snap.native_notifications;
         self.sync_options = snap.sync_options;
-        self.group_order = snap.group_order;
-        self.collapsed_groups = snap.collapsed_groups;
+        // A saved order and fold state belong to the sections they were made for.
+        let same_layout = snap.layout_key.as_deref() == Some(self.layout.fingerprint.as_str());
+        self.group_order = if same_layout {
+            snap.group_order
+        } else {
+            Vec::new()
+        };
+        self.collapsed_groups = if same_layout {
+            snap.collapsed_groups
+        } else {
+            Vec::new()
+        };
+        if !same_layout
+            && !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting("inbox_layout", &self.layout.fingerprint);
+        }
         self.normalize_group_order();
         self.max_age_input = TextEdit::new(&self.sync_options.max_age_days.to_string());
         self.last_notif_modified = snap.last_notif_modified;
         self.organization = TextEdit::new(&snap.organization);
         self.judgments = snap.judgments;
         self.smart_sort = snap.smart_sort;
+        self.hide_external = snap.hide_external;
         self.drop_removed_prs();
         if self.onboarded {
             self.page = Page::Inbox;
@@ -317,7 +324,8 @@ impl App {
 
     /// Whether a model has anything to say here: a key is set, or verdicts were saved earlier.
     pub fn smart_available(&self) -> bool {
-        self.judge.is_some() || !self.judgments.is_empty()
+        (self.judge.is_some() || !self.judgments.is_empty())
+            && !self.layout.needed_questions().is_empty()
     }
 
     /// Sorting with the model's verdicts. The user's choice wins; without one, the model is used
@@ -339,51 +347,120 @@ impl App {
         }
     }
 
-    /// The verdict the sorting uses: with AI, the model's or a rule's; with rules alone, only what
-    /// a rule can say (bots, tiny changes), whether or not it was saved.
-    fn verdict(&self, pr: &PullRequest) -> Option<judge::Judgment> {
+    /// What the sorting goes by: with AI, the model's answers or a rule's; with rules alone, only
+    /// what a rule can say (bots, tiny changes), whether or not it was saved.
+    fn answers_for(&self, pr: &PullRequest) -> std::collections::HashMap<String, f32> {
         match self.judgment(pr) {
-            Some(j) if self.smart_active() || j.by == "rules" => Some(j.clone()),
-            _ => judge::rule_judgment(pr),
+            Some(j) if self.smart_active() || j.by == "rules" => j.answers.clone(),
+            _ => judge::rule_judgment(pr)
+                .map(|j| j.answers)
+                .unwrap_or_default(),
         }
+    }
+
+    /// The default order of the sections on screen: the order of `sections.json`.
+    fn default_group_order(&self) -> Vec<u8> {
+        (0..self.layout.sections.len() as u8).collect()
+    }
+
+    pub fn toggle_hide_external(&mut self) {
+        self.hide_external = !self.hide_external;
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting("hide_external", if self.hide_external { "1" } else { "0" });
+        }
+    }
+
+    /// Open `sections.json` for editing, writing the defaults into it first when it is not there.
+    pub fn edit_sections(&mut self) {
+        let Some(path) = sections::path() else { return };
+        if !path.exists() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(error) = std::fs::write(&path, sections::default_json()) {
+                self.status_banner = Some(format!("Could not write {}. {error}", path.display()));
+                return;
+            }
+        }
+        notify::open_in_editor(&path, self.allow_os_side_effects);
+        self.status_banner = Some("Edit sections.json, then sync to apply it.".into());
+    }
+
+    /// Back to the built-in sections: the file is removed.
+    pub fn reset_sections(&mut self) {
+        if let Some(path) = sections::path() {
+            let _ = std::fs::remove_file(path);
+        }
+        self.reload_layout();
+        self.status_banner = None;
     }
 
     pub fn group_order_is_default(&self) -> bool {
-        self.group_order == DEFAULT_GROUP_ORDER
+        self.group_order == self.default_group_order()
     }
 
-    /// Put the Inbox groups back in the order the app picked.
+    /// Put the Inbox groups back in the order of the configuration.
     pub fn reset_group_order(&mut self) {
-        self.group_order = DEFAULT_GROUP_ORDER.to_vec();
+        self.group_order = self.default_group_order();
         self.persist_groups();
     }
 
-    /// The Inbox group of a pull request: what it asks of you. A review request is split by how
-    /// to review it: urgent ones first, risky ones to read carefully, huge ones to schedule, and
-    /// trivial ones (however long) to approve at will. Without a judgment it stays where its request put it.
-    fn action_group_of(&self, pr: &PullRequest, attention: PrAttention) -> (u8, &'static str) {
-        let group = attention.action_group();
-        if !matches!(group.0, 0 | 3) {
-            return group;
-        }
-        let judgment = self.verdict(pr);
-        if judgment.as_ref().is_some_and(judge::Judgment::is_urgent) {
-            DO_FIRST
-        } else if judgment.as_ref().is_some_and(judge::Judgment::is_risky) {
-            READ_CAREFULLY
-        } else if judgment.as_ref().is_some_and(judge::Judgment::is_skim) {
-            APPROVE_AT_WILL
-        } else if pr.additions + pr.deletions >= BIG_PR_LINES {
-            BIG_REVIEWS
-        } else {
-            group
-        }
+    /// The section a pull request belongs to: the first whose conditions all hold. None when it
+    /// belongs to none, which keeps it out of the Inbox.
+    fn action_group_of(&self, pr: &PullRequest, attention: PrAttention) -> Option<(u8, &str)> {
+        let answers = self.answers_for(pr);
+        let at = self.layout.section_of(&sections::Subject {
+            pr,
+            attention,
+            answers: &answers,
+        })?;
+        Some((at as u8, self.layout.sections[at].name.as_str()))
     }
 
-    fn is_urgent(&self, pr: &PullRequest) -> bool {
-        self.verdict(pr)
-            .as_ref()
-            .is_some_and(judge::Judgment::is_urgent)
+    /// Whether the configuration, or the flag in Settings, keeps this one out of the Inbox tab.
+    fn hidden_from_inbox(&self, pr: &PullRequest, attention: PrAttention) -> bool {
+        if self.hide_external && pr.external {
+            return true;
+        }
+        let answers = self.answers_for(pr);
+        self.layout.hides(&sections::Subject {
+            pr,
+            attention,
+            answers: &answers,
+        })
+    }
+
+    /// Whether the Inbox tab lists it: it asks something of you, and nothing hides it.
+    fn in_inbox(&self, pr: &PullRequest, now: u64) -> bool {
+        InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
+            && !self.hidden_from_inbox(
+                pr,
+                pr.attention(self.draft_stale_hours, self.open_stale_hours, now),
+            )
+            && self.matches_search(pr)
+    }
+
+    /// Read `sections.json` again; a changed layout drops the saved screen order, which was made
+    /// for the old one.
+    pub fn reload_layout(&mut self) {
+        let layout = sections::Layout::load();
+        if layout.fingerprint == self.layout.fingerprint && layout.error == self.layout.error {
+            return;
+        }
+        let changed = layout.fingerprint != self.layout.fingerprint;
+        self.layout = layout;
+        if changed {
+            self.collapsed_groups.clear();
+            self.group_order = self.default_group_order();
+            if !self.preview
+                && let Ok(db) = Database::open_default()
+            {
+                let _ = db.set_setting("inbox_layout", &self.layout.fingerprint);
+            }
+            self.persist_groups();
+        }
     }
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
@@ -399,11 +476,14 @@ impl App {
             self.open_stale_hours,
             current_epoch_hour(),
         );
+        // Only the questions the sections use are asked; with none, no model is called at all.
+        let questions = self.layout.needed_questions();
         let plan = judge::plan(
             &self.prs,
             |pr| pr.attention(draft, open, now),
             &self.judgments,
             &cfg,
+            &questions,
         );
         let settled = plan.settled;
         if !settled.is_empty() {
@@ -413,8 +493,9 @@ impl App {
             return;
         }
         let spent = self.judge_spent;
-        self.judge_worker
-            .request(plan.to_ask, move |prs| judge::run_batch(&cfg, prs, spent));
+        self.judge_worker.request(plan.to_ask, move |prs| {
+            judge::run_batch(&cfg, &questions, prs, spent)
+        });
     }
 
     fn store_judgments(&mut self, judged: Vec<(String, judge::Judgment)>) {
@@ -471,8 +552,9 @@ impl App {
     /// Keeps the saved order a full list of the known groups.
     fn normalize_group_order(&mut self) {
         let mut order: Vec<u8> = Vec::new();
-        for g in self.group_order.iter().chain(DEFAULT_GROUP_ORDER.iter()) {
-            if DEFAULT_GROUP_ORDER.contains(g) && !order.contains(g) {
+        let default = self.default_group_order();
+        for g in self.group_order.iter().chain(default.iter()) {
+            if default.contains(g) && !order.contains(g) {
                 order.push(*g);
             }
         }
@@ -575,16 +657,13 @@ impl App {
         let mut groups: Vec<u8> = self
             .prs
             .iter()
-            .filter(|pr| {
-                InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
-                    && self.matches_search(pr)
-            })
-            .map(|pr| {
+            .filter(|pr| self.in_inbox(pr, now))
+            .filter_map(|pr| {
                 self.action_group_of(
                     pr,
                     pr.attention(self.draft_stale_hours, self.open_stale_hours, now),
                 )
-                .0
+                .map(|(id, _)| id)
             })
             .collect();
         groups.sort_unstable();
@@ -711,7 +790,6 @@ impl App {
         list.sort_by(|a, b| {
             a.external
                 .cmp(&b.external)
-                .then_with(|| self.is_urgent(b).cmp(&self.is_urgent(a)))
                 .then_with(|| a.idle_hours.cmp(&b.idle_hours))
                 .then_with(|| b.number.cmp(&a.number))
         });
@@ -722,6 +800,7 @@ impl App {
         if self.loading || self.preview {
             return;
         }
+        self.reload_layout();
         let repos = self.repos.clone();
         let rules = self.rules.clone();
         let options = self.sync_options;
@@ -959,6 +1038,10 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.judge_worker.set_waker(waker.clone());
     if !s.preview && s.allow_os_side_effects {
         s.judge = judge::JudgeConfig::load();
+    }
+    if !s.preview {
+        s.layout = sections::Layout::load();
+        s.group_order = s.default_group_order();
     }
     s.auth_worker.set_waker(waker.clone());
     s.fast_notif_worker.set_waker(waker.clone());
@@ -1931,31 +2014,31 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .child(text(pr.age_label()).font(k.ty.small).color(c.text_muted))
         .child(el().size(1.0, 10.0).fill(c.border_base))
         .child(text(status).font(k.ty.small_medium).color(tone));
-    // A brain marks what the model judged; a rule's verdict needs none. The group already says
-    // what it means in the Inbox, so the word only appears where there are no such groups.
-    if let Some(judgment) = s.judgment(pr).filter(|j| {
-        s.smart_active() && j.by != "rules" && (j.is_urgent() || j.is_risky() || j.is_skim())
-    }) {
-        let word = if s.filter == InboxFilter::Inbox {
-            None
-        } else if judgment.is_urgent() {
-            Some("urgent")
-        } else if judgment.is_risky() {
-            Some("read carefully")
-        } else if judgment.is_skim() {
-            Some("trivial")
-        } else {
-            None
-        };
-        let mut mark = row()
-            .center_y()
-            .gap(4.0)
-            .help(judgment.summary())
-            .child(rune::icon(&BRAIN, 12.0).color(model_ink(k)));
-        if let Some(word) = word {
-            mark = mark.child(text(word).font(k.ty.small).color(model_ink(k)));
+    // A brain marks what the model judged; a rule's verdict needs none. In the Inbox the section
+    // already says what it means, so the questions that came out yes are named only elsewhere.
+    if s.smart_active()
+        && let Some(judgment) = s.judgment(pr).filter(|j| j.by != "rules")
+    {
+        let fired = s.layout.fired(&judgment.answers);
+        let in_model_section = s
+            .action_group_of(pr, att)
+            .and_then(|(id, _)| s.layout.sections.get(usize::from(id)))
+            .is_some_and(sections::Section::uses_model);
+        if !fired.is_empty() && (in_model_section || s.filter != InboxFilter::Inbox) {
+            let mut mark = row()
+                .center_y()
+                .gap(4.0)
+                .help(judgment.summary())
+                .child(rune::icon(&BRAIN, 12.0).color(model_ink(k)));
+            if s.filter != InboxFilter::Inbox {
+                mark = mark.child(
+                    text(fired.join(", ").replace(['-', '_'], " "))
+                        .font(k.ty.small)
+                        .color(model_ink(k)),
+                );
+            }
+            metadata = metadata.child(mark);
         }
-        metadata = metadata.child(mark);
     }
     if let Some(parent) = item.parent {
         metadata = metadata.child(
@@ -2513,25 +2596,20 @@ const INBOX_LIMIT: usize = 100;
 fn flat_inbox(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let now = current_epoch_hour();
-    let mut items: Vec<&PullRequest> = s
-        .prs
-        .iter()
-        .filter(|pr| {
-            InboxFilter::Inbox.matches(pr, s.draft_stale_hours, s.open_stale_hours, now)
-                && s.matches_search(pr)
-        })
-        .collect();
+    let mut items: Vec<&PullRequest> = s.prs.iter().filter(|pr| s.in_inbox(pr, now)).collect();
     let group = |pr: &PullRequest| {
         s.action_group_of(
             pr,
             pr.attention(s.draft_stale_hours, s.open_stale_hours, now),
         )
     };
+    // A pull request no section claims is not listed.
+    items.retain(|pr| group(pr).is_some());
     items.sort_by(|a, b| {
-        s.group_rank(group(a).0)
-            .cmp(&s.group_rank(group(b).0))
+        let rank = |pr: &PullRequest| group(pr).map_or(usize::MAX, |(id, _)| s.group_rank(id));
+        rank(a)
+            .cmp(&rank(b))
             .then_with(|| a.external.cmp(&b.external))
-            .then_with(|| s.is_urgent(b).cmp(&s.is_urgent(a)))
             .then_with(|| a.idle_hours.cmp(&b.idle_hours))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -2567,10 +2645,11 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
     // One section per kind of action, like a repository section: drag to reorder, click to fold.
     let mut section = col().key("flat-inbox").w_full().gap(SECTION_GAP);
     let shown_items = &items[..shown];
-    let mut displayed: Vec<(u8, &'static str)> = Vec::new();
+    let mut displayed: Vec<(u8, &str)> = Vec::new();
     for pr in shown_items {
-        let g = group(pr);
-        if !displayed.iter().any(|(p, _)| *p == g.0) {
+        if let Some(g) = group(pr)
+            && !displayed.iter().any(|(p, _)| *p == g.0)
+        {
             displayed.push(g);
         }
     }
@@ -2578,7 +2657,10 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
     let group_count = displayed.len();
     let dragging = s.group_reorder.dragging().is_some();
     for (index, (position, heading)) in displayed.iter().copied().enumerate() {
-        let in_group = items.iter().filter(|pr| group(pr).0 == position).count();
+        let in_group = items
+            .iter()
+            .filter(|pr| group(pr).is_some_and(|(id, _)| id == position))
+            .count();
         let lifted = s.group_reorder.dragging() == Some(index);
         let folded = dragging || s.collapsed_groups.contains(&position);
         let drop_order = order.clone();
@@ -2646,7 +2728,9 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
                                     .font(k.ty.small)
                                     .color(c.text_faint),
                             )
-                            .child(if model_group(position) && s.smart_active() {
+                            .child(if s.smart_active()
+                                && s.layout.sections.get(usize::from(position)).is_some_and(sections::Section::uses_model)
+                            {
                                 rune::icon(&BRAIN, 13.0)
                                     .color(model_ink(k))
                                     .help("Sorted by alien intelligence: a model read each title and description")
@@ -2670,7 +2754,7 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
         if !folded {
             for (idx, pr) in shown_items
                 .iter()
-                .filter(|pr| group(pr).0 == position)
+                .filter(|pr| group(pr).is_some_and(|(id, _)| id == position))
                 .enumerate()
             {
                 if idx > 0 {
@@ -2706,6 +2790,52 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
 }
 
 /// A switch for one choice about which pull requests the sync brings in.
+/// Where the Inbox sections come from, with a way to edit them or go back to the defaults.
+fn sections_row(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let status = if s.layout.custom {
+        format!("{} sections from sections.json", s.layout.sections.len())
+    } else {
+        format!("{} default sections", s.layout.sections.len())
+    };
+    let mut actions = row().center_y().gap(6.0).child(
+        Button::new("Edit")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.edit_sections())
+            .build(k)
+            .key("edit-sections"),
+    );
+    if s.layout.custom || s.layout.error.is_some() {
+        actions = actions.child(
+            Button::new("Reset")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.reset_sections())
+                .build(k)
+                .key("reset-sections"),
+        );
+    }
+    let mut block = col().w_full().gap(8.0).child(setup_row(
+        k,
+        "Inbox sections",
+        row()
+            .center_y()
+            .gap(10.0)
+            .child(text(status).font(k.ty.small).color(c.text_faint))
+            .child(actions),
+    ));
+    if let Some(error) = &s.layout.error {
+        block = block.child(
+            text(format!("sections.json is not used: {error}"))
+                .wrap()
+                .font(k.ty.small)
+                .color(c.danger.fg),
+        );
+    }
+    block
+}
+
 fn sync_option_row(
     k: &Kit,
     label: &'static str,
@@ -2938,6 +3068,16 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         .font(k.ty.ui_medium)
                         .color(c.text_base),
                 )
+                .child(setup_row(
+                    k,
+                    "Show outside contributors in the Inbox",
+                    Switch::new(!s.hide_external)
+                        .label("Show outside contributors in the Inbox")
+                        .hide_label()
+                        .on_toggle(|s: &mut App| s.toggle_hide_external())
+                        .build(k)
+                        .key("option-hide-external"),
+                ))
                 .child(sync_option_row(
                     k,
                     "Show archived repositories",
@@ -2967,6 +3107,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 ))
                 .child(rules_section),
         )
+        .child(panel(k).child(sections_row(s, k)))
         .child(panel(k).child(thresholds_section));
 
     col()
@@ -3178,9 +3319,10 @@ fn seed_preview(s: &mut App) {
         s.judgments.insert(
             id.to_owned(),
             judge::Judgment {
-                trivial,
-                urgent,
-                risky,
+                answers: [("trivial", trivial), ("urgent", urgent), ("risky", risky)]
+                    .into_iter()
+                    .map(|(q, p)| (q.to_owned(), p))
+                    .collect(),
                 by: by.into(),
                 fingerprint: String::new(),
             },
@@ -3196,6 +3338,20 @@ fn judge_eval() {
         return;
     };
     cfg.max_per_sync = 100;
+    let layout = sections::Layout::load();
+    if let Some(error) = &layout.error {
+        println!("sections.json is not used: {error}");
+    }
+    let questions = layout.needed_questions();
+    println!(
+        "{} sections; questions asked: {}",
+        layout.sections.len(),
+        questions
+            .iter()
+            .map(|q| q.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let snap = match Database::open_default().and_then(|db| db.load_snapshot()) {
         Ok(snap) => snap,
         Err(error) => return eprintln!("Could not read the saved data: {error}"),
@@ -3216,7 +3372,7 @@ fn judge_eval() {
     let attention =
         |pr: &PullRequest| pr.attention(snap.draft_stale_hours, snap.open_stale_hours, now);
     let mut cache = std::collections::HashMap::new();
-    let plan = judge::plan(&out.prs, attention, &cache, &cfg);
+    let plan = judge::plan(&out.prs, attention, &cache, &cfg, &questions);
     let candidates = plan.cached + plan.settled.len() + plan.to_ask.len() + plan.deferred;
     println!(
         "{} need a judgment: {} answered by rules, {} for the model ({} deferred by the cap)",
@@ -3228,7 +3384,7 @@ fn judge_eval() {
     cache.extend(plan.settled);
     let asked = plan.to_ask.len();
     let started = std::time::Instant::now();
-    let batch = judge::run_batch(&cfg, plan.to_ask, 0.0);
+    let batch = judge::run_batch(&cfg, &questions, plan.to_ask, 0.0);
     println!(
         "{} calls in {:.1}s ({} answered): {} prompt + {} completion tokens, ${:.5}{}",
         asked,
@@ -3244,7 +3400,7 @@ fn judge_eval() {
     }
     cache.extend(batch.judged);
 
-    let again = judge::plan(&out.prs, attention, &cache, &cfg);
+    let again = judge::plan(&out.prs, attention, &cache, &cfg, &questions);
     println!(
         "second pass: {} calls, {} answered from the cache\n",
         again.to_ask.len(),
@@ -3255,37 +3411,36 @@ fn judge_eval() {
         .prs
         .iter()
         .filter_map(|pr| cache.get(&pr.id).map(|j| (pr, j)))
+        .map(|(pr, j)| {
+            let at = layout.section_of(&sections::Subject {
+                pr,
+                attention: attention(pr),
+                answers: &j.answers,
+            });
+            (at, pr, j)
+        })
         .collect();
-    rows.sort_by(|(a, ja), (b, jb)| {
-        jb.urgent
-            .partial_cmp(&ja.urgent)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
     println!(
-        "{:<5} {:<5} {:<5}  {:<4} {:<14} title",
-        "urg", "risk", "triv", "ext", "author"
+        "{:<18} {:<28} {:<4} {:<14} title",
+        "section", "answers", "ext", "author"
     );
-    for (pr, j) in rows {
-        let title: String = pr.title.chars().take(70).collect();
-        let verdict = if j.is_urgent() {
-            "URGENT"
-        } else if j.is_risky() {
-            "CAREFUL"
-        } else if j.is_skim() {
-            "skim"
-        } else {
-            ""
-        };
+    for (at, pr, j) in rows {
+        let section = at.map_or("(none)", |i| layout.sections[i].name.as_str());
+        let mut answers: Vec<_> = j.answers.iter().collect();
+        answers.sort_by(|a, b| a.0.cmp(b.0));
+        let odds: Vec<String> = answers
+            .iter()
+            .map(|(id, p)| format!("{}{:.0}", id.chars().next().unwrap_or('?'), **p * 100.0))
+            .collect();
+        let title: String = pr.title.chars().take(64).collect();
         println!(
-            "{:<5.0} {:<5.0} {:<5.0}  {:<4} {:<14} {} {}   [{}]",
-            j.urgent * 100.0,
-            j.risky * 100.0,
-            j.trivial * 100.0,
+            "{:<18} {:<28} {:<4} {:<14} {}   [{}]",
+            section,
+            odds.join(" "),
             if pr.external { "ext" } else { "" },
             pr.author.chars().take(14).collect::<String>(),
             title,
-            verdict,
             j.by
         );
     }
@@ -3570,15 +3725,16 @@ mod tests {
     fn inbox_groups_can_be_dragged_and_folded() {
         let mut state = init();
         state.preview = true;
-        assert_eq!(state.group_rank(2), 0, "ready to merge leads");
-        assert_eq!(state.group_rank(8), 1, "then do first");
-        assert_eq!(state.group_rank(0), 3);
-        // Groups 0, 2 and 4 are on screen; drag the last to the top.
-        state.drop_group(&[0, 2, 4], 2, 0);
-        assert_eq!(state.group_order, [2, 8, 9, 4, 0, 10, 1, 3, 7, 5, 6]);
-        // Drag the first to the bottom of what is shown: it lands after group 2.
-        state.drop_group(&[4, 0, 2], 0, 2);
-        assert_eq!(state.group_order, [2, 4, 8, 9, 0, 10, 1, 3, 7, 5, 6]);
+        // The order of sections.json is the order on screen: ready to merge leads, then do first.
+        assert_eq!(state.layout.sections[0].name, "Merge these");
+        assert_eq!(state.group_rank(0), 0, "ready to merge leads");
+        assert_eq!(state.group_rank(1), 1, "then do first");
+        // Groups 0, 3 and 6 are on screen; drag the last to the top.
+        state.drop_group(&[0, 3, 6], 2, 0);
+        assert_eq!(state.group_order, [6, 0, 1, 2, 3, 4, 5, 7, 8, 9]);
+        // Drag the first to the bottom of what is shown: it lands after group 3.
+        state.drop_group(&[6, 0, 3], 0, 2);
+        assert_eq!(state.group_order, [0, 1, 2, 3, 6, 4, 5, 7, 8, 9]);
         // Reordering is undone by the reset, which is only on offer while the order differs.
         assert!(!state.group_order_is_default());
         state.reset_group_order();
@@ -3600,43 +3756,159 @@ mod tests {
         assert!(state.collapsed_groups.is_empty());
     }
 
+    fn said(pairs: &[(&str, f32)], by: &str) -> judge::Judgment {
+        judge::Judgment {
+            answers: pairs.iter().map(|(q, p)| ((*q).to_owned(), *p)).collect(),
+            by: by.into(),
+            fingerprint: String::new(),
+        }
+    }
+
+    fn section_name(state: &App, pr: &PullRequest) -> Option<String> {
+        let att = pr.attention(72, 48, current_epoch_hour());
+        state
+            .action_group_of(pr, att)
+            .map(|(_, name)| name.to_owned())
+    }
+
     #[test]
-    fn rules_alone_ignore_the_models_verdicts_but_keep_the_rules_own() {
+    fn review_requests_go_to_the_first_section_that_matches() {
         let mut state = init();
         state.preview = true;
-        let prs = github::demo_prs();
-        let (draft, open, now) = (72, 48, current_epoch_hour());
-        let mut review = prs.iter().find(|p| p.number == 904).unwrap().clone();
-        review.additions = 300;
-        let att = review.attention(draft, open, now);
-        let model_says = |trivial, urgent, risky| judge::Judgment {
-            trivial,
-            urgent,
-            risky,
-            by: "gpt".into(),
-            fingerprint: String::new(),
-        };
+        state.prs = github::demo_prs();
+        let mut pr = state.prs.iter().find(|p| p.number == 904).unwrap().clone();
+        pr.external = false;
+        assert_eq!(section_name(&state, &pr).as_deref(), Some("Review these"));
+        // Size is a plain rule and needs no model.
+        let mut huge = pr.clone();
+        huge.additions = 600;
+        assert_eq!(section_name(&state, &huge).as_deref(), Some("Big reviews"));
+        // The model's answers apply, in the order of the sections.
+        state.judgments.insert(
+            pr.id.clone(),
+            said(&[("trivial", 0.9), ("urgent", 0.02), ("risky", 0.02)], "m"),
+        );
+        assert_eq!(
+            section_name(&state, &pr).as_deref(),
+            Some("Approve at will")
+        );
         state
             .judgments
-            .insert(review.id.clone(), model_says(0.1, 0.9, 0.1));
-        // A model's verdict counts while sorting by AI, and not once the user picks rules.
+            .insert(huge.id.clone(), said(&[("trivial", 0.95)], "m"));
+        assert_eq!(
+            section_name(&state, &huge).as_deref(),
+            Some("Approve at will"),
+            "trivial beats big"
+        );
+        state.judgments.insert(
+            pr.id.clone(),
+            said(&[("trivial", 0.9), ("urgent", 0.7)], "m"),
+        );
+        assert_eq!(section_name(&state, &pr).as_deref(), Some("Do first"));
+        state.judgments.insert(
+            pr.id.clone(),
+            said(&[("trivial", 0.9), ("risky", 0.8)], "m"),
+        );
+        assert_eq!(section_name(&state, &pr).as_deref(), Some("Read carefully"));
+        // Mine are never moved by a question: they keep their own sections.
+        let mine = state
+            .prs
+            .iter()
+            .find(|p| p.ownership == Ownership::Mine && p.number == 908)
+            .unwrap()
+            .clone();
+        state
+            .judgments
+            .insert(mine.id.clone(), said(&[("trivial", 0.99)], "m"));
+        assert_eq!(section_name(&state, &mine).as_deref(), Some("Merge these"));
+    }
+
+    #[test]
+    fn rules_alone_ignore_the_models_answers_but_keep_the_rules_own() {
+        let mut state = init();
+        state.preview = true;
+        let mut review = github::demo_prs()
+            .into_iter()
+            .find(|p| p.number == 904)
+            .unwrap();
+        review.external = false;
+        review.additions = 300;
+        state
+            .judgments
+            .insert(review.id.clone(), said(&[("urgent", 0.9)], "gpt"));
+        // A model's answer counts while sorting by AI, and not once the user picks rules.
         assert!(state.smart_active());
-        assert_eq!(state.action_group_of(&review, att), DO_FIRST);
+        assert_eq!(section_name(&state, &review).as_deref(), Some("Do first"));
         state.toggle_smart_sort();
         assert!(!state.smart_active());
-        assert_eq!(state.action_group_of(&review, att).0, 0);
+        assert_eq!(
+            section_name(&state, &review).as_deref(),
+            Some("Review these")
+        );
         // A rule needs no model: a bot's bump is approved at will either way, saved or not.
         let mut bump = review.clone();
         bump.id = "acme/cli#950".into();
         bump.author = "dependabot".into();
         bump.title = "Bump serde from 1.0.1 to 1.0.2".into();
-        assert_eq!(state.action_group_of(&bump, att), APPROVE_AT_WILL);
-        // With no key and no saved verdicts there is nothing to sort by except rules.
+        assert_eq!(
+            section_name(&state, &bump).as_deref(),
+            Some("Approve at will")
+        );
+        // With no key and no saved answers there is nothing to sort by except rules.
         let mut bare = init();
         bare.preview = true;
         assert!(!bare.smart_available() && !bare.smart_active());
         bare.toggle_smart_sort();
         assert_eq!(bare.smart_sort, None);
+    }
+
+    #[test]
+    fn outside_contributors_can_be_hidden_by_the_flag_or_by_the_config() {
+        let mut state = init();
+        state.preview = true;
+        let mut pr = github::demo_prs()
+            .into_iter()
+            .find(|p| p.number == 904)
+            .unwrap();
+        let now = current_epoch_hour();
+        pr.external = true;
+        state.prs = vec![pr.clone()];
+        assert!(state.in_inbox(&pr, now));
+        state.hide_external = true;
+        assert!(
+            !state.in_inbox(&pr, now),
+            "the flag hides them from the Inbox"
+        );
+        assert_eq!(state.visible_groups(), Vec::<u8>::new());
+        // The same through the config, which can say more than the flag: only a bot, only a repo.
+        state.hide_external = false;
+        state.layout =
+            sections::Layout::parse(r#"{ "hide": [["external", "repo:acme/*"]] }"#).unwrap();
+        assert!(!state.in_inbox(&pr, now));
+        pr.repo = "elsewhere/repo".into();
+        assert!(state.in_inbox(&pr, now));
+    }
+
+    #[test]
+    fn a_new_layout_drops_the_screen_order_made_for_the_old_one() {
+        let mut state = init();
+        state.preview = true;
+        state.group_order = vec![3, 1, 0, 2, 4, 5, 6, 7, 8, 9];
+        let before = state.layout.fingerprint.clone();
+        state.layout =
+            sections::Layout::parse(r#"{ "sections": [{ "name": "All of it", "when": "any" }] }"#)
+                .unwrap();
+        assert_ne!(state.layout.fingerprint, before);
+        // A snapshot saved under the old layout does not bring its order back.
+        let mut snap = db::AppSnapshot {
+            group_order: vec![3, 1, 0],
+            layout_key: Some(before),
+            ..Database::open_in_memory().unwrap().load_snapshot().unwrap()
+        };
+        snap.collapsed_groups = vec![1];
+        state.apply_snapshot(snap);
+        assert_eq!(state.group_order, [0]);
+        assert!(state.collapsed_groups.is_empty());
     }
 
     #[test]
@@ -3658,101 +3930,6 @@ mod tests {
         assert!(state.arrival_age(&state.arrivals[0].0.clone()).is_some());
         state.arrivals[0].1 -= std::time::Duration::from_secs(10);
         assert!(state.arrival_age(&state.arrivals[0].0.clone()).is_none());
-    }
-
-    #[test]
-    fn review_requests_are_split_by_how_to_review_them() {
-        let mut state = init();
-        state.preview = true;
-        state.prs = github::demo_prs();
-        let (draft, open, now) = (72, 48, current_epoch_hour());
-        let pr_904 = state.prs.iter().find(|p| p.number == 904).unwrap().clone();
-        let att = pr_904.attention(draft, open, now);
-        assert_eq!(
-            state.action_group_of(&pr_904, att).0,
-            0,
-            "no judgment: stays a review"
-        );
-
-        let judged = |trivial, urgent, risky| judge::Judgment {
-            trivial,
-            urgent,
-            risky,
-            by: "test".into(),
-            fingerprint: String::new(),
-        };
-        state
-            .judgments
-            .insert(pr_904.id.clone(), judged(0.9, 0.02, 0.02));
-        assert_eq!(state.action_group_of(&pr_904, att), APPROVE_AT_WILL);
-        // A trivial change that is also urgent, or risky, is not for approving at will.
-        state
-            .judgments
-            .insert(pr_904.id.clone(), judged(0.9, 0.7, 0.02));
-        assert_eq!(state.action_group_of(&pr_904, att), DO_FIRST);
-        state
-            .judgments
-            .insert(pr_904.id.clone(), judged(0.9, 0.02, 0.8));
-        assert_eq!(state.action_group_of(&pr_904, att), READ_CAREFULLY);
-        // Size is a plain rule and needs no judgment. A trivial change is approved at will however long it
-        // is, and an urgent one still comes first.
-        let mut huge = pr_904.clone();
-        huge.additions = BIG_PR_LINES;
-        state.judgments.remove(&huge.id);
-        assert_eq!(state.action_group_of(&huge, att), BIG_REVIEWS);
-        state
-            .judgments
-            .insert(huge.id.clone(), judged(0.95, 0.02, 0.02));
-        assert_eq!(state.action_group_of(&huge, att), APPROVE_AT_WILL);
-        state
-            .judgments
-            .insert(huge.id.clone(), judged(0.1, 0.9, 0.02));
-        assert_eq!(state.action_group_of(&huge, att), DO_FIRST);
-        state.judgments.remove(&pr_904.id);
-        // Pull requests of mine are never moved.
-        let mine = state
-            .prs
-            .iter()
-            .find(|p| p.ownership == Ownership::Mine)
-            .unwrap()
-            .clone();
-        state
-            .judgments
-            .insert(mine.id.clone(), judged(0.99, 0.0, 0.0));
-        let mine_att = mine.attention(draft, open, now);
-        assert_eq!(
-            state.action_group_of(&mine, mine_att),
-            mine_att.action_group()
-        );
-
-        // Within a repository, the urgent one jumps ahead of a newer one.
-        let mut older = state
-            .prs
-            .iter()
-            .find(|p| p.repo == "acme/engine")
-            .unwrap()
-            .clone();
-        older.id = "acme/engine#900".into();
-        older.number = 900;
-        older.external = false;
-        older.idle_hours = 500;
-        let mut newer = older.clone();
-        newer.id = "acme/engine#901".into();
-        newer.number = 901;
-        newer.idle_hours = 1;
-        state.prs = vec![older.clone(), newer];
-        state.filter = InboxFilter::All;
-        let order = |s: &App| {
-            s.prs_for_repo("acme/engine")
-                .iter()
-                .map(|p| p.number)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(order(&state), [901, 900]);
-        state
-            .judgments
-            .insert(older.id.clone(), judged(0.1, 0.9, 0.1));
-        assert_eq!(order(&state), [900, 901]);
     }
 
     #[test]

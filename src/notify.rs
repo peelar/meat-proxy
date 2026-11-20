@@ -138,6 +138,20 @@ pub fn launch_gh_auth_in_terminal() -> Result<(), String> {
 }
 
 /// Opens a PR URL directly in the user's default browser (`open <url>` on macOS).
+/// Open a file in the default text editor.
+pub fn open_in_editor(path: &std::path::Path, allow_os_open: bool) {
+    if !allow_os_open {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = path.to_owned();
+        std::thread::spawn(move || {
+            let _ = Command::new("open").arg("-t").arg(path).status();
+        });
+    }
+}
+
 pub fn open_url_in_browser(url: &str, allow_os_open: bool) {
     if !allow_os_open {
         return;
