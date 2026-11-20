@@ -3006,6 +3006,7 @@ fn seed_preview(s: &mut App) {
     };
     s.prs = github::demo_prs();
     s.repos = github::infer_repos_from_prs(&s.prs, &[]);
+    s.last_synced = Some(std::time::Instant::now());
 }
 
 fn main() {
@@ -3162,7 +3163,7 @@ mod tests {
         rt.frame(3.0 / 60.0);
         assert_eq!(rt.state.page, Page::Inbox);
         assert_eq!(rt.state.filter, InboxFilter::Inbox);
-        assert!(rt.find("pr-row-anomalyco/rune#418").is_some());
+        assert!(rt.find("pr-row-acme/engine#418").is_some());
     }
 
     fn repo_named(name: &str, rank: usize, pinned: bool) -> RepoConfig {
