@@ -27,7 +27,6 @@ pub enum Page {
     Onboarding,
     Preferences,
     Inbox,
-    Sample,
 }
 
 pub struct App {
@@ -191,7 +190,7 @@ impl App {
     }
 
     pub fn trigger_sync(&mut self) {
-        if self.loading || self.preview || self.page == Page::Sample {
+        if self.loading || self.preview {
             return;
         }
         let repos = self.repos.clone();
@@ -414,7 +413,7 @@ fn deliver_events(s: &mut App, events: Vec<NotificationEvent>) -> bool {
 }
 
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
-    if s.preview || s.page == Page::Sample {
+    if s.preview {
         return false;
     }
     let mut changed = false;
@@ -593,27 +592,10 @@ fn top_bar(s: &App, k: &Kit) -> El {
             .on_press(|s: &mut App| s.settings_open = true)
             .build(k)
             .key("toggle-settings-btn")
-    } else if s.page == Page::Sample {
-        Button::new("Back to setup")
-            .variant(ButtonVariant::Ghost)
-            .on_press(|s: &mut App| {
-                s.prs.clear();
-                s.repos.clear();
-                s.search_query = TextEdit::new("");
-                s.filter = s.default_filter;
-                s.selected_repo = None;
-                s.page = Page::Onboarding;
-                s.loading = true;
-                s.boot_worker.request((), |()| {
-                    Database::open_default().and_then(|db| db.load_snapshot())
-                });
-            })
-            .build(k)
     } else {
         el()
     };
     let context = match s.page {
-        Page::Sample => "Sample inbox".to_owned(),
         Page::Onboarding => "Setup  /  1 of 2".to_owned(),
         Page::Preferences => "Setup  /  2 of 2".to_owned(),
         _ => match &s.sync_status {
@@ -794,16 +776,7 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
                         .key("onboard-recheck-gh")))
                 .child(text("You can also run gh auth login --hostname github.com --web in your terminal.")
                     .font(k.ty.small).color(c.text_muted))
-                .child(text(reason.clone()).wrap().font(k.ty.small).color(c.text_faint))
-                .child(Button::new("Preview sample inbox")
-                    .variant(ButtonVariant::Ghost)
-                    .on_press(|s: &mut App| {
-                        s.sync_worker.cancel();
-                        s.status_banner = None;
-                        s.prs = github::demo_prs();
-                        s.repos = github::infer_repos_from_prs(&s.prs, &[]);
-                        s.page = Page::Sample;
-                    }).build(k));
+                .child(text(reason.clone()).wrap().font(k.ty.small).color(c.text_faint));
         }
     } else {
         let open_hours = [24, 48, 72, 120];
@@ -1113,7 +1086,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit) -> El {
     let pr_id_snooze = pr.id.clone();
 
     let mut right_side = row().center_y().gap(2.0);
-    if att.is_nudge() && s.page != Page::Sample {
+    if att.is_nudge() {
         right_side = right_side
             .child(
                 row_action(
@@ -1178,7 +1151,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit) -> El {
         .on_press(move |s: &mut App| {
             notify::open_url_in_browser(
                 &pr_url_open,
-                s.allow_os_side_effects && s.page != Page::Sample,
+                s.allow_os_side_effects,
             );
         })
         .child(
@@ -1814,7 +1787,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     let mut overlay = Vec::new();
     let body = match s.page {
         Page::Onboarding | Page::Preferences => onboarding_page_view(s, &k),
-        Page::Inbox | Page::Sample => document_inbox_view(s, &k, &mut overlay),
+        Page::Inbox => document_inbox_view(s, &k, &mut overlay),
     };
 
     let root = col()
