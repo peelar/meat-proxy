@@ -34,7 +34,6 @@ pub struct App {
     avatars: avatars::Avatars,
     settings_open: bool,
     repo_menu: Option<String>,
-    setup_icon: Option<rune::Image>,
     pub page: Page,
     pub prs: Vec<PullRequest>,
     pub repos: Vec<RepoConfig>,
@@ -76,7 +75,6 @@ fn init() -> App {
         avatars: avatars::Avatars::default(),
         settings_open: false,
         repo_menu: None,
-        setup_icon: None,
         page: Page::Onboarding,
         prs: Vec::new(),
         repos: Vec::new(),
@@ -372,15 +370,10 @@ impl App {
 
 fn setup(s: &mut App, waker: rune::Waker) {
     let decoder = std::sync::Arc::new(rune::ImageCache::new(waker.clone()));
-    let image = decoder.load(&include_bytes!("../assets/setup-icon.png")[..]);
     s.avatars.setup(decoder, waker.clone());
     if s.preview {
         s.avatars.load_preview(&s.prs);
     }
-    if s.preview {
-        let _ = image.wait();
-    }
-    s.setup_icon = Some(image);
     if s.preview {
         return;
     }
@@ -720,11 +713,6 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
         .max_w(640.0)
         .py(32.0)
         .gap(16.0)
-        .child(if !preferences && let Some(image) = &s.setup_icon {
-            el().size(76.0, 76.0).pixels(image.pixels())
-        } else {
-            el()
-        })
         .child(
             text(if preferences {
                 "Set up your inbox"
