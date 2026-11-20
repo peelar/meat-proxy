@@ -3,7 +3,8 @@ use rune::{
     row, text,
 };
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Kit, Markdown, SegmentedControl, Switch, TextInput,
+    Button, ButtonVariant, ControlSize, Kit, Markdown, MarkdownStyle, SegmentedControl, Switch,
+    TextInput,
 };
 
 mod avatars;
@@ -2532,7 +2533,15 @@ fn description(s: &App, k: &Kit, pr: &PullRequest, indent: f32) -> El {
         text("No description.").font(k.ty.small).color(c.text_faint)
     } else {
         let _ = s;
+        let style = MarkdownStyle::from_kit(k)
+            .body_font(TextStyle::new(12.5, 400.0))
+            .heading_font(1, TextStyle::new(14.0, 650.0))
+            .heading_font(2, TextStyle::new(13.5, 650.0))
+            .heading_font(3, TextStyle::new(13.0, 650.0))
+            .code_block_font(TextStyle::new(12.0, 400.0))
+            .list(16.0, 3.0);
         Markdown::new(source)
+            .style(style)
             .on_link(|s: &mut App, url: &str| {
                 notify::open_url_in_browser(url, s.allow_os_side_effects)
             })
@@ -2542,16 +2551,25 @@ fn description(s: &App, k: &Kit, pr: &PullRequest, indent: f32) -> El {
         .key(format!("pr-description-{}", pr.id))
         .w_full()
         .pl(indent)
-        .pr(28.0)
-        .pb(14.0)
+        .pr(14.0)
+        .pb(12.0)
         .child(
             col()
                 .w_full()
-                .max_h(320.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(body),
+                .fill(c.layer_02)
+                .border(1.0, c.border_base)
+                .radius(8.0)
+                .px(12.0)
+                .py(10.0)
+                .child(
+                    col()
+                        .w_full()
+                        .max_h(300.0)
+                        .scroll(ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .child(body),
+                ),
         )
 }
 
