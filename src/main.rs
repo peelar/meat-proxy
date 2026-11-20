@@ -2603,6 +2603,27 @@ fn clean_description(raw: &str) -> String {
     }
 }
 
+/// A button label in the button's own ink; the icon takes `tint` while the pointer is on the
+/// button (its wrapper must be a `hover_group`).
+fn tinted_label(
+    glyph: &'static rune::Icon,
+    tint: Color,
+    label: &'static str,
+) -> impl FnOnce(TextStyle, Color) -> El + 'static {
+    move |font, ink| {
+        row()
+            .center_y()
+            .gap(6.0)
+            .child(rune::icon(glyph, 16.0).color(ink).group_color(tint))
+            .child(text(label).font(font).color(ink))
+    }
+}
+
+/// Merge's violet: it has to read on the white Merge button and on the dark ones.
+fn merge_ink() -> Color {
+    oklch(0.56, 0.2, 295.0)
+}
+
 fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let id = pr.id.clone();
     let done = s.approved.contains(&pr.id);
@@ -2623,19 +2644,23 @@ fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     } else if armed {
         Button::new("Confirm approve").variant(ButtonVariant::Submit)
     } else {
-        // Merge is a plain filled button; approving is mint, with a check.
-        let ink = mint(k);
+        // The text is the button's own; the icon carries the colour: mint for a check.
         Button::new("Approve")
             .variant(ButtonVariant::Outline)
-            .icon(&rune_kit::glyphs::CHECK)
-            .label_with(move |font, _| text("Approve").font(font).color(ink))
+            .label_with(tinted_label(&rune_kit::glyphs::CHECK, mint(k), "Approve"))
     }
     .control_size(ControlSize::Small)
     .on_press(move |s: &mut App| s.press_approve(&id))
     .build(k)
-    .key(format!("approve-{}", pr.id));
+    .key(format!("approve-{}", pr.id))
+    .cursor(if done || busy {
+        rune::Cursor::Default
+    } else {
+        rune::Cursor::Pointer
+    });
     let wrap = row()
         .center_y()
+        .hover_group()
         .help(if armed {
             format!("Press again to approve {}#{}", pr.repo, pr.number)
         } else {
@@ -2728,7 +2753,7 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             .disabled(true)
     } else if armed {
         Button::new("Confirm merge")
-            .icon(&MERGE)
+            .label_with(tinted_label(&MERGE, merge_ink(), "Confirm merge"))
             .variant(ButtonVariant::Submit)
     } else if auto_on {
         Button::new("Auto-merge on")
@@ -2742,7 +2767,7 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             .disabled(auto_busy)
     } else {
         Button::new("Merge")
-            .icon(&MERGE)
+            .label_with(tinted_label(&MERGE, merge_ink(), "Merge"))
             .variant(if ready {
                 ButtonVariant::Contrast
             } else {
@@ -2759,10 +2784,16 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         }
     })
     .build(k)
-    .key(format!("merge-{}", pr.id));
+    .key(format!("merge-{}", pr.id))
+    .cursor(if merging || (!ready && !auto) || (busy && !auto) {
+        rune::Cursor::Default
+    } else {
+        rune::Cursor::Pointer
+    });
 
     row()
         .center_y()
+        .hover_group()
         .help(if auto_on {
             "Merges by itself as soon as GitHub allows it. Click to turn off".to_owned()
         } else if auto_offer {
