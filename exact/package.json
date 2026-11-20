@@ -6,8 +6,5 @@
     "build": "bun exact.mjs web-build --out dist",
     "start": "bun exact.mjs serve dist"
   },
-  "dependencies": {
-    "@exact/notifications": "file:../../../tools/exact/packages/notifications",
-    "@exact/oauth": "file:../../../tools/exact/packages/oauth"
-  }
+  "dependencies": {}
 }

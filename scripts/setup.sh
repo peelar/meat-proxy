@@ -66,12 +66,13 @@ else
 fi
 bun scripts/exact.mjs setup --check --platform "$platform"
 
-# The Exact modules the app uses (exact/package.json's @exact/ dependencies), linked from this checkout rather than
-# installed from the fixed path `exact add` wrote, so an Exact elsewhere (EXACT) works too.
+# The Exact modules the app uses (each `use … from "@exact/<name>"` in exact/app.contract), linked into
+# exact/node_modules from this checkout, as imp's link-exact.sh does: `exact add` would write a fixed path to Exact
+# into package.json, and Exact sits elsewhere in CI and releases.
 step "Exact modules"
 modules="$root/exact/node_modules/@exact"
 mkdir -p "$modules"
-for name in $(sed -n 's/^ *"@exact\/\([a-z0-9-]*\)".*/\1/p' "$root/exact/package.json"); do
+for name in $(sed -n 's/^use .* from "@exact\/\([a-z0-9-]*\)"$/\1/p' "$root/exact/app.contract" | sort -u); do
 	[ -d "$exact/packages/$name" ] || fail "no module $name in $exact/packages"
 	ln -sfn "$exact/packages/$name" "$modules/$name"
 	echo "@exact/$name"
