@@ -2616,7 +2616,12 @@ fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     } else if armed {
         Button::new("Confirm approve").variant(ButtonVariant::Submit)
     } else {
-        Button::new("Approve").variant(ButtonVariant::Outline)
+        // Merge is a plain filled button; approving is mint, with a check.
+        let ink = mint(k);
+        Button::new("Approve")
+            .variant(ButtonVariant::Outline)
+            .icon(&rune_kit::glyphs::CHECK)
+            .label_with(move |font, _| text("Approve").font(font).color(ink))
     }
     .control_size(ControlSize::Small)
     .on_press(move |s: &mut App| s.press_approve(&id))
