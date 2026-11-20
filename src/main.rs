@@ -1729,6 +1729,31 @@ fn heading(k: &Kit, label: &str) -> El {
         .color(k.c.text_base)
 }
 
+/// The logo and name. The Inbox shows them above its title; the setup page, in its bar.
+fn brand(s: &App, k: &Kit) -> El {
+    let keycap = if let Some(image) = &s.logo {
+        el().size(22.0, 22.0).pixels(image.pixels())
+    } else {
+        el().size(22.0, 22.0)
+    };
+    row()
+        .key("brand")
+        .center_y()
+        .gap(9.0)
+        .cursor(rune::Cursor::Pointer)
+        .on_press(|s: &mut App| {
+            if s.page == Page::Inbox {
+                s.selected_repo = None;
+            }
+        })
+        .child(keycap)
+        .child(
+            text("meat proxy")
+                .font(TextStyle::new(14.0, 650.0))
+                .color(k.c.text_base),
+        )
+}
+
 /// `hide_brand` while the intro flies its own logo and name into place.
 fn top_bar(s: &App, k: &Kit, hide_brand: bool) -> El {
     let c = &k.c;
@@ -1762,11 +1787,6 @@ fn top_bar(s: &App, k: &Kit, hide_brand: bool) -> El {
             .center_y()
             .child(text("Setup").font(k.ty.mono).color(c.text_muted))
     };
-    let keycap = if let Some(image) = &s.logo {
-        el().size(22.0, 22.0).pixels(image.pixels())
-    } else {
-        el().size(22.0, 22.0)
-    };
     col()
         .key("top-header")
         .w_full()
@@ -1778,26 +1798,13 @@ fn top_bar(s: &App, k: &Kit, hide_brand: bool) -> El {
                 .pr(24.0)
                 .center_y()
                 .justify_between()
-                .child(
-                    row()
-                        .center_y()
-                        .gap(9.0)
-                        .cursor(rune::Cursor::Pointer)
-                        .on_press(|s: &mut App| {
-                            if s.page == Page::Inbox {
-                                s.page = Page::Inbox;
-                                s.selected_repo = None;
-                            }
-                        })
+                .child(if s.page == Page::Inbox {
+                    el()
+                } else {
+                    brand(s, k)
                         .opacity(if hide_brand { 0.0 } else { 1.0 })
                         .opacity_motion(rune::Anim::INSTANT)
-                        .child(keycap)
-                        .child(
-                            text("meat proxy")
-                                .font(TextStyle::new(14.0, 650.0))
-                                .color(c.text_base),
-                        ),
-                )
+                })
                 .child(
                     row()
                         .center_y()
@@ -3282,6 +3289,7 @@ fn document_inbox_view(s: &App, k: &Kit) -> El {
     let now = current_epoch_hour();
     let attention = s.prs.iter().filter(|p| s.needs_you(p, now)).count();
     doc = doc
+        .child(brand(s, k))
         .child(
             row()
                 .w_full()
