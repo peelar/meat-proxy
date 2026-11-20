@@ -2729,20 +2729,20 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .gap(8.0)
         .child(
             TextInput::new(&s.new_rule_name)
-                .placeholder("Label (e.g. Core PRs)")
+                .placeholder("Name")
                 .width(Some(180.0))
                 .on_edit(|s: &mut App| &mut s.new_rule_name)
                 .build(k),
         )
         .child(
             TextInput::new(&s.new_rule_query)
-                .placeholder("GitHub query (e.g. repo:owner/name label:urgent)")
+                .placeholder("GitHub search, e.g. repo:owner/name label:urgent")
                 .width(Some(340.0))
                 .on_edit(|s: &mut App| &mut s.new_rule_query)
                 .build(k),
         )
         .child(
-            Button::new("Add Rule")
+            Button::new("Add")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Regular)
                 .on_press(|s: &mut App| s.add_custom_rule())
@@ -2754,22 +2754,9 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            row()
-                .w_full()
-                .center_y()
-                .justify_between()
-                .child(
-                    text("Subscription rules")
-                        .font(k.ty.ui_medium)
-                        .color(c.text_base),
-                )
-                .child(
-                    Button::new("Sync now")
-                        .variant(ButtonVariant::Ghost)
-                        .control_size(ControlSize::Small)
-                        .on_press(|s: &mut App| s.sync_now())
-                        .build(k),
-                ),
+            text("Also include pull requests matching")
+                .font(k.ty.body)
+                .color(c.text_base),
         )
         .child(rules_list)
         .child(add_rule_bar);
@@ -2838,10 +2825,10 @@ fn settings_content(s: &App, k: &Kit) -> El {
                                 .build(k)
                                 .key("option-max-age-days"),
                         ),
-                )),
+                ))
+                .child(rules_section),
         )
-        .child(panel(k).child(thresholds_section))
-        .child(panel(k).child(rules_section));
+        .child(panel(k).child(thresholds_section));
 
     col()
         .key("settings-viewport")
@@ -3042,6 +3029,14 @@ fn main() {
         }),
         ("settings", |s| {
             seed_preview(s);
+            s.rules = vec![WatchRule {
+                id: "rule-custom-1".into(),
+                name: "Release blockers".into(),
+                query: "label:release-blocker".into(),
+                exclude_drafts: true,
+                exclude_mine: true,
+                enabled: true,
+            }];
             s.page = Page::Inbox;
             s.settings_open = true;
         }),

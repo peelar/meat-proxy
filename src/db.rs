@@ -164,6 +164,12 @@ impl Database {
             }
             tx.commit()?;
         }
+        // Rules an early version seeded: one repeats the built-in searches, the other watched a
+        // repository this app has no reason to know about.
+        self.conn.execute(
+            "DELETE FROM rules WHERE id IN ('rule-assigned', 'rule-team-urgent')",
+            [],
+        )?;
         Ok(())
     }
 
