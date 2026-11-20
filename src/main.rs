@@ -3291,10 +3291,29 @@ fn judge_eval() {
     }
 }
 
+/// AppKit shows the tooltips and waits about a second first. Ask for a quicker one, unless the
+/// user set `NSInitialToolTipDelay` for this app themselves (`defaults write`).
+#[cfg(target_os = "macos")]
+fn show_tooltips_sooner() {
+    use objc2_foundation::{NSString, NSUserDefaults};
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str("NSInitialToolTipDelay");
+    if defaults.objectForKey(&key).is_none() {
+        defaults.setInteger_forKey(TOOLTIP_DELAY_MS, &key);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_tooltips_sooner() {}
+
+/// How long the pointer rests on something before its tooltip appears.
+const TOOLTIP_DELAY_MS: isize = 200;
+
 fn main() {
     if std::env::args().any(|a| a == "--judge-eval") {
         return judge_eval();
     }
+    show_tooltips_sooner();
     rune::prewarm_gpu();
     let chrome = Chrome {
         full_size_content: true,

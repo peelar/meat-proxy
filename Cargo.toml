@@ -16,5 +16,5 @@ chrono = { version = "0.4", default-features = false, features = ["now"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSDictionary", "NSError", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSDictionary", "NSError", "NSString", "NSUserDefaults", "NSObject"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["bitflags", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNUserNotificationCenter"] }
