@@ -27,7 +27,7 @@ const TEST_TOKEN = REAL ? '' : LAUNCH_TOKEN;
 // Made on first use: a build with no OAuth app configured still runs, and its sign-in says what is missing.
 let provider: ReturnType<typeof oauth> | null = null;
 function github(): ReturnType<typeof oauth> {
-  if (!CLIENT_ID) throw Object.assign(new Error('This build has no GitHub OAuth app: set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in .env.local.'), { code: 'config' });
+  if (!CLIENT_ID) throw Object.assign(new Error('This build can’t sign in to GitHub: it was made without a GitHub OAuth app (GITHUB_CLIENT_ID).'), { code: 'config' });
   return provider ??= oauth({
     endpoints: { authorization: 'https://github.com/login/oauth/authorize', token: TOKEN_URL },
     clientId: CLIENT_ID,

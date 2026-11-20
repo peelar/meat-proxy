@@ -118,6 +118,7 @@ component MeatProxy
   derive aimedUp = match aimed { case some(g) => g.canUp, case none => false }
   derive aimedDown = match aimed { case some(g) => g.canDown, case none => false }
   derive signInProblem = match signedIn { case some(r) => r.error, case none => session.error }
+  derive setupProblem = signInProblem != "" ? signInProblem : (session.signedIn and inbox.state == "needs-auth") ? inbox.reason : ""
 
   task boot mount
     after(1, start)
@@ -269,30 +270,35 @@ component MeatProxy
       notificationclick=opened
       for e in stack(nav) key=e.id
         if e.name == "setup"
-          column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 align-items="center" padding=32
-            column max-width="35rem" width="100%" gap=16
-              image "assets/setup-icon.png" width=76 height=76 alt=""
-              text "Connect GitHub" role="heading" aria-level=1 font="-exact-large-title" testId="setup-title"
-              text "Track the pull requests you open and the ones waiting for your review." color="-exact-secondary-label"
-              row gap=12 align-items="center" padding="14px 16px" border-radius=8 background-color="-exact-secondary-background"
-                image (linked ? "symbol:checkmark" : "symbol:person") width=16 height=16 aria-hidden=true
-                text (linked ? `Signed in to GitHub as @${inbox.user}.` : session.signedIn ? "Checking GitHub…" : "Not signed in.") testId="setup-status"
-              if signInProblem != ""
-                text signInProblem color="-exact-system-red" testId="setup-problem"
-              if session.signedIn and inbox.state == "needs-auth"
-                text inbox.reason color="-exact-system-red" testId="setup-reason"
-              row gap=8
-                if linked
-                  button press=goTo("/setup/preferences") buttonStyle="filled" testId="onboard-continue"
-                    text "Continue"
-                  button press=signOut testId="sign-out"
-                    text "Sign out"
-                else
-                  button press=signIn disabled=pending(signedIn) buttonStyle="filled" testId="sign-in"
-                    text "Sign in with GitHub"
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="setup-list" position="absolute" inset=0
+            header display="flex" align-items="center" gap=8 padding="8px 16px"
+              text "Connect GitHub" role="heading" aria-level=1 flex=1 testId="setup-title"
+              if linked
+                button press=goTo("/setup/preferences") buttonStyle="filled" testId="onboard-continue"
+                  text "Continue"
+              else
+                button press=signIn disabled=pending(signedIn) buttonStyle="filled" testId="sign-in"
+                  text "Sign in with GitHub"
+            list id="setup-list" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+              section
+                header
+                  text "Account"
+                row
+                  image (linked ? "symbol:checkmark" : "symbol:person") width=16 height=16 aria-hidden=true
+                  text (linked ? `Signed in to GitHub as @${inbox.user}` : session.signedIn ? "Checking GitHub…" : "Not signed in") flex=1 testId="setup-status"
+                  if linked
+                    button press=signOut testId="sign-out"
+                      text "Sign out"
+                footer
+                  text (setupProblem != "" ? setupProblem : "Track the pull requests you open and the ones waiting for your review.") color=(setupProblem != "" ? "-exact-system-red" : "-exact-secondary-label") testId="setup-note"
               if not linked
-                button press=sample testId="preview-sample"
-                  text "Preview sample inbox"
+                section
+                  row
+                    column flex=1 min-width=0
+                      text "Sample inbox"
+                      text "Look around with example pull requests before you sign in." font="-exact-footnote" color="-exact-secondary-label"
+                    button press=sample testId="preview-sample"
+                      text "Preview"
 
         if e.name == "prefs"
           column navigationKey=`${e.id}` navigationScroll="prefs-list" position="absolute" inset=0
