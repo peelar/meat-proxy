@@ -3284,28 +3284,9 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            row()
-                .w_full()
-                .center_y()
-                .justify_between()
-                .child(
-                    text("Notifications")
-                        .font(k.ty.ui_medium)
-                        .color(c.text_base),
-                )
-                .child(
-                    Button::new("Open setup")
-                        .variant(ButtonVariant::Ghost)
-                        .control_size(ControlSize::Small)
-                        .on_press(|s: &mut App| {
-                            s.settings_open = false;
-                            s.page = Page::Onboarding;
-                            s.status_banner = None;
-                            s.trigger_sync();
-                        })
-                        .build(k)
-                        .key("rerun-onboarding-btn"),
-                ),
+            text("Notifications")
+                .font(k.ty.ui_medium)
+                .color(c.text_base),
         )
         .child(notifications_row)
         .child(
