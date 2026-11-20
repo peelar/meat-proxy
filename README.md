@@ -26,27 +26,13 @@ connect your GitHub CLI account; the inbox opens with sensible defaults, which S
 Every push to `main` publishes a release (`.github/workflows/release.yml`): the next patch, unless `Cargo.toml` names a
 higher version.
 
-## Inbox sections (experimental)
+## Inbox sections and AI sorting (experimental)
 
-The Inbox tab is a list of sections, and the list is configuration: **Settings → Inbox sections → Customize** opens an editor for it. A pull request goes to the first section whose conditions all hold, so the order is the priority and the default order on screen. Dragging only reorders the screen; the button next to "Sorted by …" puts it back. A **hide** rule takes pull requests out of the Inbox tab (they stay under Theirs and All), and **Settings → Show outside contributors in the Inbox** is the simple switch for the most common case. The editor stores what you build in `~/.config/meat-proxy/sections.json`, which looks like this and can also be edited by hand:
+The Inbox tab is a list of sections: Merge these, Hotfixes, Security, Do first, Read carefully, Dependency bumps, Docs, Approve at will, Big reviews, Review these, Address feedback, Team reviews, Get a reviewer and Finish or close. A pull request goes to the first section it fits, so the list order is the priority and the default order on screen. Dragging only reorders the screen; the button next to "Sorted by …" puts it back. **Settings → Show outside contributors in the Inbox** hides outsiders from the Inbox tab; they stay under Theirs and All.
 
-```json
-{
-  "questions": [{ "id": "payments", "ask": "Does the change move or count money?" }],
-  "sections": [
-    { "name": "Money", "when": ["asked:any", "payments"] },
-    { "name": "Saleor core", "when": ["asked:any", "repo:saleor/*", "!bot"] },
-    { "name": "Everything else", "when": "any" }
-  ],
-  "hide": [["bot", "lines<10"]]
-}
-```
+Most sections are plain rules (who asked, size, title, author). Three (Do first, Read carefully, Approve at will) can also use a language model's yes/no answers, and a brain marks them. The model answers with a probability read from its token log-probabilities. It is asked only about review requests sent to you, and only when a cheap rule (bots, dependency bumps, one-line changes) does not already know. Answers are cached until the text changes, private repositories are never sent, each sync sends at most 30, and the app stops after $0.25 in one run. "Sorted by rules" ignores the model entirely, and without a key the Inbox runs on rules alone.
 
-A condition is a word, and `!` negates it: `asked:me`, `asked:team`, `asked:any`, `is:approved`, `is:changes-requested`, `is:unreviewed`, `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=600`, `repo:org/*`, `author:name*`, `label:security`, `title:hotfix`, `any`, or the id of a question. A mistake in a hand-edited file is named in Settings and the defaults stay in use; the editor never saves an invalid layout.
-
-A **question** is answered by a language model with a probability read from its token log-probabilities, so a section that names it is sorted by AI (a brain marks it). The model is asked only the questions the sections use, only about review requests sent to you, and only when a cheap rule (bots, dependency bumps, one-line changes) does not already know. Answers are cached until the text or the questions change, private repositories are never sent, each sync sends at most 30, and the app stops after $0.25 in one run. "Sorted by rules" ignores the model entirely.
-
-To turn it on create `~/.config/meat-proxy/judge.json`. Any OpenAI-compatible endpoint works, and the model must return log-probabilities:
+To turn the model on create `~/.config/meat-proxy/judge.json`. Any OpenAI-compatible endpoint works, and the model must return log-probabilities:
 
 ```json
 { "base_url": "https://openrouter.ai/api/v1", "api_key": "…", "model": "openai/gpt-4o-mini" }

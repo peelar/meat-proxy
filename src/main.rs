@@ -6,7 +6,6 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch
 
 mod avatars;
 mod db;
-mod editor;
 mod github;
 mod judge;
 mod model;
@@ -96,10 +95,8 @@ pub struct App {
     pub judge: Option<judge::JudgeConfig>,
     /// Sort with the model's verdicts (true) or by rules alone (false); unset follows what exists.
     pub smart_sort: Option<bool>,
-    /// The Inbox sections, from `sections.json` or the defaults.
+    /// The Inbox sections (built in).
     pub layout: sections::Layout,
-    /// The Inbox sections editor, while it is open.
-    pub sections_editor: Option<editor::SectionsEditor>,
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
     pub judgments: std::collections::HashMap<String, judge::Judgment>,
@@ -175,7 +172,6 @@ fn init() -> App {
         judge: None,
         smart_sort: None,
         layout: sections::Layout::default(),
-        sections_editor: None,
         hide_external: false,
         judgments: std::collections::HashMap::new(),
         judge_worker: Latest::default(),
@@ -362,7 +358,7 @@ impl App {
         }
     }
 
-    /// The default order of the sections on screen: the order of `sections.json`.
+    /// The default order of the sections on screen: the order they are listed in.
     fn default_group_order(&self) -> Vec<u8> {
         (0..self.layout.sections.len() as u8).collect()
     }
@@ -374,15 +370,6 @@ impl App {
         {
             let _ = db.set_setting("hide_external", if self.hide_external { "1" } else { "0" });
         }
-    }
-
-    /// Back to the built-in sections: the file is removed.
-    pub fn reset_sections(&mut self) {
-        if let Some(path) = sections::path() {
-            let _ = std::fs::remove_file(path);
-        }
-        self.reload_layout();
-        self.status_banner = None;
     }
 
     pub fn group_order_is_default(&self) -> bool {
@@ -407,48 +394,16 @@ impl App {
         Some((at as u8, self.layout.sections[at].name.as_str()))
     }
 
-    /// Whether the configuration, or the flag in Settings, keeps this one out of the Inbox tab.
-    fn hidden_from_inbox(&self, pr: &PullRequest, attention: PrAttention) -> bool {
-        if self.hide_external && pr.external {
-            return true;
-        }
-        let answers = self.answers_for(pr);
-        self.layout.hides(&sections::Subject {
-            pr,
-            attention,
-            answers: &answers,
-        })
+    /// Whether the switch in Settings keeps this one out of the Inbox tab: outside contributors.
+    fn hidden_from_inbox(&self, pr: &PullRequest) -> bool {
+        self.hide_external && pr.external
     }
 
     /// Whether the Inbox tab lists it: it asks something of you, and nothing hides it.
     fn in_inbox(&self, pr: &PullRequest, now: u64) -> bool {
         InboxFilter::Inbox.matches(pr, self.draft_stale_hours, self.open_stale_hours, now)
-            && !self.hidden_from_inbox(
-                pr,
-                pr.attention(self.draft_stale_hours, self.open_stale_hours, now),
-            )
+            && !self.hidden_from_inbox(pr)
             && self.matches_search(pr)
-    }
-
-    /// Read `sections.json` again; a changed layout drops the saved screen order, which was made
-    /// for the old one.
-    pub fn reload_layout(&mut self) {
-        let layout = sections::Layout::load();
-        if layout.fingerprint == self.layout.fingerprint && layout.error == self.layout.error {
-            return;
-        }
-        let changed = layout.fingerprint != self.layout.fingerprint;
-        self.layout = layout;
-        if changed {
-            self.collapsed_groups.clear();
-            self.group_order = self.default_group_order();
-            if !self.preview
-                && let Ok(db) = Database::open_default()
-            {
-                let _ = db.set_setting("inbox_layout", &self.layout.fingerprint);
-            }
-            self.persist_groups();
-        }
     }
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
@@ -788,7 +743,6 @@ impl App {
         if self.loading || self.preview {
             return;
         }
-        self.reload_layout();
         let repos = self.repos.clone();
         let rules = self.rules.clone();
         let options = self.sync_options;
@@ -1026,10 +980,6 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.judge_worker.set_waker(waker.clone());
     if !s.preview && s.allow_os_side_effects {
         s.judge = judge::JudgeConfig::load();
-    }
-    if !s.preview {
-        s.layout = sections::Layout::load();
-        s.group_order = s.default_group_order();
     }
     s.auth_worker.set_waker(waker.clone());
     s.fast_notif_worker.set_waker(waker.clone());
@@ -2778,52 +2728,6 @@ fn flat_inbox(s: &App, k: &Kit) -> El {
 }
 
 /// A switch for one choice about which pull requests the sync brings in.
-/// Where the Inbox sections come from, with a way to edit them or go back to the defaults.
-fn sections_row(s: &App, k: &Kit) -> El {
-    let c = &k.c;
-    let status = if s.layout.custom {
-        format!("{} sections from sections.json", s.layout.sections.len())
-    } else {
-        format!("{} default sections", s.layout.sections.len())
-    };
-    let mut actions = row().center_y().gap(6.0).child(
-        Button::new("Customize")
-            .variant(ButtonVariant::Outline)
-            .control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.open_sections_editor())
-            .build(k)
-            .key("edit-sections"),
-    );
-    if s.layout.custom || s.layout.error.is_some() {
-        actions = actions.child(
-            Button::new("Reset")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.reset_sections())
-                .build(k)
-                .key("reset-sections"),
-        );
-    }
-    let mut block = col().w_full().gap(8.0).child(setup_row(
-        k,
-        "Inbox sections",
-        row()
-            .center_y()
-            .gap(10.0)
-            .child(text(status).font(k.ty.small).color(c.text_faint))
-            .child(actions),
-    ));
-    if let Some(error) = &s.layout.error {
-        block = block.child(
-            text(format!("sections.json is not used: {error}"))
-                .wrap()
-                .font(k.ty.small)
-                .color(c.danger.fg),
-        );
-    }
-    block
-}
-
 fn sync_option_row(
     k: &Kit,
     label: &'static str,
@@ -3109,7 +3013,6 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 ))
                 .child(rules_section),
         )
-        .child(panel(k).child(sections_row(s, k)))
         .child(panel(k).child(thresholds_section));
 
     col()
@@ -3272,9 +3175,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .fill(k.c.bg_base)
         .child(top_bar(s, &k))
         .child(body.grow(1.0).min_h(0.0));
-    if s.sections_editor.is_some() && s.page == Page::Inbox {
-        root.child(editor::sections_editor_modal(s, &k))
-    } else if s.settings_open && s.page == Page::Inbox {
+    if s.settings_open && s.page == Page::Inbox {
         root.child(settings_modal(s, &k))
     } else if s.add_repo_open && s.page == Page::Inbox {
         root.child(repositories_modal(s, &k))
@@ -3286,10 +3187,6 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
     if ev.key == rune::Key::Escape && s.merge_armed.is_some() {
         s.merge_armed = None;
-        return true;
-    }
-    if ev.key == rune::Key::Escape && s.sections_editor.is_some() {
-        s.close_sections_editor();
         return true;
     }
     if ev.key == rune::Key::Escape && s.add_repo_open {
@@ -3346,10 +3243,7 @@ fn judge_eval() {
         return;
     };
     cfg.max_per_sync = 100;
-    let layout = sections::Layout::load();
-    if let Some(error) = &layout.error {
-        println!("sections.json is not used: {error}");
-    }
+    let layout = sections::Layout::default();
     let questions = layout.needed_questions();
     println!(
         "{} sections; questions asked: {}",
@@ -3536,14 +3430,6 @@ fn main() {
             seed_preview(s);
             s.page = Page::Inbox;
             s.group_order = vec![0, 2, 8, 9, 10, 1, 3, 7, 4, 5, 6];
-        }),
-        ("sections-editor", |s| {
-            seed_preview(s);
-            s.page = Page::Inbox;
-            s.open_sections_editor();
-            if let Some(e) = s.sections_editor.as_mut() {
-                e.selected = editor::Selected::Section(3);
-            }
         }),
         // A moment into two pull requests arriving: the tint is still fading.
         ("arriving", |s| {
@@ -3741,7 +3627,7 @@ mod tests {
     fn inbox_groups_can_be_dragged_and_folded() {
         let mut state = init();
         state.preview = true;
-        // The order of sections.json is the order on screen: ready to merge leads, then do first.
+        // The listed order is the order on screen: ready to merge leads.
         assert_eq!(state.layout.sections[0].name, "Merge these");
         assert_eq!(state.group_rank(0), 0, "ready to merge leads");
         assert_eq!(state.group_rank(1), 1, "then the next section in the file");
@@ -3885,7 +3771,7 @@ mod tests {
     }
 
     #[test]
-    fn outside_contributors_can_be_hidden_by_the_flag_or_by_the_config() {
+    fn outside_contributors_can_be_hidden_with_the_flag() {
         let mut state = init();
         state.preview = true;
         let mut pr = github::demo_prs()
@@ -3902,13 +3788,6 @@ mod tests {
             "the flag hides them from the Inbox"
         );
         assert_eq!(state.visible_groups(), Vec::<u8>::new());
-        // The same through the config, which can say more than the flag: only a bot, only a repo.
-        state.hide_external = false;
-        state.layout =
-            sections::Layout::parse(r#"{ "hide": [["external", "repo:acme/*"]] }"#).unwrap();
-        assert!(!state.in_inbox(&pr, now));
-        pr.repo = "elsewhere/repo".into();
-        assert!(state.in_inbox(&pr, now));
     }
 
     #[test]
@@ -3917,9 +3796,10 @@ mod tests {
         state.preview = true;
         state.group_order = vec![3, 1, 0, 2, 4, 5, 6, 7, 8, 9];
         let before = state.layout.fingerprint.clone();
-        state.layout =
-            sections::Layout::parse(r#"{ "sections": [{ "name": "All of it", "when": "any" }] }"#)
-                .unwrap();
+        state.layout = sections::Layout::parse(
+            r#"{ "sections": [{ "name": "All of it", "when": ["any"] }] }"#,
+        )
+        .unwrap();
         assert_ne!(state.layout.fingerprint, before);
         // A snapshot saved under the old layout does not bring its order back.
         let mut snap = db::AppSnapshot {
@@ -3931,45 +3811,6 @@ mod tests {
         state.apply_snapshot(snap);
         assert_eq!(state.group_order, [0]);
         assert!(state.collapsed_groups.is_empty());
-    }
-
-    #[test]
-    fn the_sections_editor_edits_a_draft_and_keeps_it_when_valid() {
-        let mut state = init();
-        state.preview = true;
-        state.open_sections_editor();
-        let before = state.layout.fingerprint.clone();
-        {
-            let e = state.sections_editor.as_mut().unwrap();
-            // A new section, with a condition added the way the palette adds it.
-            e.sections.push(editor::EditSection {
-                name: TextEdit::new("Money"),
-                when: vec!["asked:any".into()],
-            });
-            e.selected = editor::Selected::Section(e.sections.len() - 1);
-            e.kind = 2;
-            e.negate = true;
-            e.value = TextEdit::new("saleor/*");
-            e.add_valued_condition_for_test();
-            assert_eq!(
-                e.sections.last().unwrap().when,
-                ["asked:any", "!repo:saleor/*"]
-            );
-            // It moves up, and a draft that cannot work says why and does not close.
-            let last = e.sections.len() - 1;
-            e.sections.swap(last, last - 1);
-            e.sections[0].name = TextEdit::new("");
-        }
-        assert!(state.sections_editor.as_ref().unwrap().check().is_err());
-        assert!(
-            !state.close_sections_editor(),
-            "an invalid draft stays open"
-        );
-        state.sections_editor.as_mut().unwrap().sections[0].name = TextEdit::new("Ready");
-        assert!(state.close_sections_editor());
-        assert_ne!(state.layout.fingerprint, before);
-        assert_eq!(state.layout.sections[0].name, "Ready");
-        assert!(state.layout.sections.iter().any(|s| s.name == "Money"));
     }
 
     #[test]

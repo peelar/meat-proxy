@@ -1,37 +1,18 @@
-//! The Inbox sections, as configuration.
+//! The Inbox sections.
 //!
-//! `~/.config/meat-proxy/sections.json` lists the sections top to bottom. A pull request goes to
-//! the first section whose conditions all hold, so the order is the priority, and it is the
-//! default order on screen too (dragging changes only the screen). `questions` are yes/no
-//! questions a model answers; a section asks for one by naming it. `hide` removes pull requests
-//! from the Inbox tab (they stay under Theirs and All).
+//! A pull request goes to the first section whose conditions all hold, so the order is the
+//! priority, and it is the order on screen until the user drags a section elsewhere. Most
+//! conditions are plain facts (who asked, size, title, author). A condition can also be a
+//! question a model answers; those sections are sorted by AI and carry a brain.
 //!
-//! A condition is a word, `!` in front of it negates it:
-//!
-//! | condition              | holds when                                                          |
-//! |------------------------|----------------------------------------------------------------------|
-//! | `any`                  | always                                                               |
-//! | `asked:me`             | your review was requested by name                                    |
-//! | `asked:team`           | your review was requested through a team                             |
-//! | `asked:any`            | either                                                               |
-//! | `is:approved`          | your PR is approved and ready to merge                               |
-//! | `is:changes-requested` | your PR has changes requested                                        |
-//! | `is:unreviewed`        | your PR waited for a reviewer longer than your reminder              |
-//! | `is:stale-draft`       | your draft sat untouched longer than your reminder                   |
-//! | `mine` / `theirs`      | who wrote it                                                         |
-//! | `external` / `bot`     | an outside contributor / an automation                               |
-//! | `draft`                | it is a draft                                                        |
-//! | `lines>=600`           | changed lines (`>=`, `>`, `<=`, `<`)                                 |
-//! | `repo:org/*`           | the repository, with `*` as a wildcard                               |
-//! | `author:name*`         | the author, with `*` as a wildcard                                   |
-//! | `label:security`       | it carries that label                                                |
-//! | `title:hotfix`         | the title contains the text                                          |
-//! | a question id          | the model answers yes (at or above the question's `at`)              |
+//! The sections are built in. The condition language is small: `any`, `asked:me`, `asked:team`,
+//! `asked:any`, `is:approved`, `is:changes-requested`, `is:unreviewed`, `is:stale-draft`, `mine`,
+//! `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`, `label:`, `title:`, or a
+//! question id; `!` in front negates.
 
 use crate::model::{PrAttention, PullRequest};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 const DEFAULT_JSON: &str = r#"{
   "questions": [
@@ -54,8 +35,7 @@ const DEFAULT_JSON: &str = r#"{
     { "name": "Team reviews", "when": ["asked:team"] },
     { "name": "Get a reviewer", "when": ["is:unreviewed"] },
     { "name": "Finish or close", "when": ["is:stale-draft"] }
-  ],
-  "hide": []
+  ]
 }
 "#;
 
@@ -118,8 +98,6 @@ pub struct Cond {
 pub struct Section {
     pub name: String,
     when: Vec<Cond>,
-    /// The conditions as written, for the editor.
-    pub words: Vec<String>,
 }
 
 impl Section {
@@ -143,37 +121,14 @@ pub struct Subject<'a> {
 pub struct Layout {
     pub questions: Vec<Question>,
     pub sections: Vec<Section>,
-    hide: Vec<Vec<Cond>>,
-    /// The `hide` entries as written, for the editor.
-    pub hide_words: Vec<Vec<String>>,
     /// Changes whenever the sections do, so a saved screen order made for other ones is dropped.
     pub fingerprint: String,
-    /// The file the layout came from, or None for the defaults.
-    pub custom: bool,
-    /// Why the file was not used, if it was not.
-    pub error: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Terms {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl Terms {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            Terms::One(one) => vec![one],
-            Terms::Many(many) => many,
-        }
-    }
 }
 
 #[derive(Deserialize)]
 struct RawSection {
     name: String,
-    when: Terms,
+    when: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -182,39 +137,11 @@ struct RawLayout {
     questions: Option<Vec<Question>>,
     #[serde(default)]
     sections: Option<Vec<RawSection>>,
-    #[serde(default)]
-    hide: Vec<Terms>,
-}
-
-/// `~/.config/meat-proxy/sections.json`, or the file `MEAT_PROXY_SECTIONS` names.
-pub fn path() -> Option<PathBuf> {
-    if let Some(custom) = std::env::var_os("MEAT_PROXY_SECTIONS") {
-        return Some(PathBuf::from(custom));
-    }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".config/meat-proxy/sections.json"))
 }
 
 impl Layout {
     pub fn default() -> Layout {
         Layout::parse(DEFAULT_JSON).expect("the built-in sections parse")
-    }
-
-    /// The user's file, else the defaults. A file that does not parse is reported, not obeyed.
-    pub fn load() -> Layout {
-        let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) else {
-            return Layout::default();
-        };
-        match Layout::parse(&text) {
-            Ok(mut layout) => {
-                layout.custom = true;
-                layout
-            }
-            Err(error) => Layout {
-                error: Some(error),
-                ..Layout::default()
-            },
-        }
     }
 
     pub fn parse(text: &str) -> Result<Layout, String> {
@@ -239,7 +166,7 @@ impl Layout {
         let mut sections = Vec::new();
         let mut key = String::new();
         for raw in raw_sections {
-            let words = raw.when.into_vec();
+            let words = raw.when;
             if words.is_empty() {
                 return Err(format!(
                     "section \"{}\" has no conditions; use \"any\"",
@@ -258,52 +185,16 @@ impl Layout {
             sections.push(Section {
                 name: raw.name,
                 when,
-                words,
             });
         }
         if sections.len() > 200 {
             return Err("at most 200 sections".into());
         }
-        let hide_words: Vec<Vec<String>> = raw.hide.into_iter().map(Terms::into_vec).collect();
-        let hide = hide_words
-            .iter()
-            .map(|words| {
-                words
-                    .iter()
-                    .map(|w| parse_cond(w, &ids))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| format!("hide: {e}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Layout {
             questions,
             sections,
-            hide,
-            hide_words,
             fingerprint: format!("{:016x}", fnv(&key)),
-            custom: false,
-            error: None,
         })
-    }
-
-    /// The layout as the file stores it.
-    pub fn to_json(&self) -> String {
-        let questions: Vec<_> = self
-            .questions
-            .iter()
-            .map(|q| serde_json::json!({ "id": q.id, "at": q.at, "ask": q.ask }))
-            .collect();
-        let sections: Vec<_> = self
-            .sections
-            .iter()
-            .map(|s| serde_json::json!({ "name": s.name, "when": s.words }))
-            .collect();
-        let json = serde_json::json!({
-            "questions": questions,
-            "sections": sections,
-            "hide": self.hide_words,
-        });
-        serde_json::to_string_pretty(&json).unwrap_or_default()
     }
 
     /// The first section the pull request belongs to: the order is the priority.
@@ -313,22 +204,10 @@ impl Layout {
             .position(|s| s.when.iter().all(|c| self.holds(c, subject)))
     }
 
-    /// Whether a `hide` entry takes it out of the Inbox.
-    pub fn hides(&self, subject: &Subject) -> bool {
-        self.hide
-            .iter()
-            .any(|all| !all.is_empty() && all.iter().all(|c| self.holds(c, subject)))
-    }
-
     /// The questions something in the layout depends on. Without any, no model is ever asked.
     pub fn needed_questions(&self) -> Vec<Question> {
         let mut used: Vec<&str> = Vec::new();
-        for cond in self
-            .sections
-            .iter()
-            .flat_map(|s| &s.when)
-            .chain(self.hide.iter().flatten())
-        {
+        for cond in self.sections.iter().flat_map(|s| &s.when) {
             if let Term::Question(id) = &cond.term
                 && !used.contains(&id.as_str())
             {
@@ -396,53 +275,6 @@ impl Layout {
         };
         yes != cond.not
     }
-}
-
-/// A condition in words a person would use.
-pub fn describe(word: &str) -> String {
-    let word = word.trim();
-    let (not, rest) = match word.strip_prefix('!') {
-        Some(rest) => ("not ", rest.trim()),
-        None => ("", word),
-    };
-    let lower = rest.to_ascii_lowercase();
-    let plain = match lower.as_str() {
-        "any" => "anything".to_owned(),
-        "asked:me" => "asked of you by name".to_owned(),
-        "asked:team" => "asked of your team".to_owned(),
-        "asked:any" => "asked of you".to_owned(),
-        "is:approved" => "your PR is approved".to_owned(),
-        "is:changes-requested" => "changes requested on yours".to_owned(),
-        "is:unreviewed" => "yours waits for a reviewer".to_owned(),
-        "is:stale-draft" => "your draft went stale".to_owned(),
-        "mine" => "yours".to_owned(),
-        "theirs" => "someone else's".to_owned(),
-        "external" => "outside contributor".to_owned(),
-        "bot" => "a bot".to_owned(),
-        "draft" => "a draft".to_owned(),
-        _ => {
-            if let Some(n) = lower.strip_prefix("lines>=") {
-                format!("{n} or more lines")
-            } else if let Some(n) = lower.strip_prefix("lines>") {
-                format!("more than {n} lines")
-            } else if let Some(n) = lower.strip_prefix("lines<=") {
-                format!("{n} lines or fewer")
-            } else if let Some(n) = lower.strip_prefix("lines<") {
-                format!("under {n} lines")
-            } else if let Some((kind, value)) = rest.split_once(':') {
-                match kind.to_ascii_lowercase().as_str() {
-                    "repo" => format!("repo {value}"),
-                    "author" => format!("by {value}"),
-                    "label" => format!("labeled {value}"),
-                    "title" => format!("title has \"{value}\""),
-                    _ => rest.to_owned(),
-                }
-            } else {
-                rest.to_owned()
-            }
-        }
-    };
-    format!("{not}{plain}")
 }
 
 pub fn is_bot(author: &str) -> bool {
@@ -587,11 +419,6 @@ mod tests {
         assert_eq!(layout.sections[0].name, "Merge these");
         assert_eq!(layout.needed_questions().len(), 3);
         assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());
-        // What the editor writes reads back the same.
-        let again = Layout::parse(&layout.to_json()).unwrap();
-        assert_eq!(again.fingerprint, layout.fingerprint);
-        assert_eq!(describe("!lines>=600"), "not 600 or more lines");
-        assert_eq!(describe("title:hotfix"), "title has \"hotfix\"");
     }
 
     #[test]
@@ -638,16 +465,15 @@ mod tests {
     }
 
     #[test]
-    fn a_file_can_add_questions_sections_and_hide_rules() {
+    fn conditions_can_name_questions_repos_and_negations() {
         let layout = Layout::parse(
             r#"{
               "questions": [{ "id": "payments", "ask": "Does it change how money moves?" }],
               "sections": [
                 { "name": "Money", "when": ["asked:any", "payments"] },
-                { "name": "Saleor core", "when": ["asked:any", "repo:saleor/*", "!bot"] },
-                { "name": "Everything else", "when": "any" }
-              ],
-              "hide": ["external", ["bot", "lines<10"]]
+                { "name": "Core", "when": ["asked:any", "repo:saleor/*", "!bot"] },
+                { "name": "Everything else", "when": ["any"] }
+              ]
             }"#,
         )
         .unwrap();
@@ -661,15 +487,6 @@ mod tests {
         assert_eq!(layout.section_of(&subject(&pr, att, &yes)), Some(0));
         pr.repo = "other/repo".into();
         assert_eq!(layout.section_of(&subject(&pr, att, &none)), Some(2));
-        // Hide: anyone outside, or a bot with a tiny change.
-        assert!(!layout.hides(&subject(&pr, att, &none)));
-        pr.external = true;
-        assert!(layout.hides(&subject(&pr, att, &none)));
-        pr.external = false;
-        pr.author = "dependabot".into();
-        pr.additions = 2;
-        pr.deletions = 1;
-        assert!(layout.hides(&subject(&pr, att, &none)));
     }
 
     #[test]
@@ -678,7 +495,7 @@ mod tests {
         assert!(bad(r#"{"sections":[{"name":"A","when":["urgnt"]}]}"#).contains("urgnt"));
         assert!(bad(r#"{"sections":[{"name":"A","when":[]}]}"#).contains("no conditions"));
         assert!(
-            bad(r#"{"sections":[{"name":"A","when":"any"},{"name":"A","when":"any"}]}"#)
+            bad(r#"{"sections":[{"name":"A","when":["any"]},{"name":"A","when":["any"]}]}"#)
                 .contains("twice")
         );
         assert!(bad(r#"{"sections":[{"name":"A","when":["lines>>5"]}]}"#).contains("lines"));
