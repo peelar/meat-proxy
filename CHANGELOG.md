@@ -1,11 +1,8 @@
 # Changelog
 
-## 0.2.2
-
-- Settings: the custom searches ("Also include pull requests matching") sit in the Pull requests section. The two rules an early version seeded are removed; the built-in searches already cover them.
-
 ## 0.2.1
 
+- Settings: the custom searches ("Also include pull requests matching") sit in the Pull requests section. The two rules an early version seeded are removed; the built-in searches already cover them.
 - Teammates' pull requests sort ahead of outsiders' within each section, and outsiders' carry a faint "external" label. Outsiders are GitHub authors who aren't members of the organization.
 
 ## 0.2.0
