@@ -1,4 +1,8 @@
+<p align="center"><img src="assets/logo.png" width="96" alt="A chewed thumb resting on a green approve check"></p>
+
 # meat-proxy
+
+Keep up with the pace of LLM-generated code.
 
 A native macOS inbox for GitHub pull requests, built with Rune. It groups PRs by repository, nests branch-based stacks, and reminds you about pending reviews and stale drafts. It reads GitHub through the GitHub CLI, as you are signed in to it.
 
