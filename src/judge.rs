@@ -17,13 +17,15 @@
 
 use crate::model::{PrAttention, PullRequest};
 use crate::sections::Question;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 const DEFAULT_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
+pub const DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
+pub const DECISIONS_MODEL: &str = "typesafe/jev-1.13";
 const BODY_CHARS: usize = 1400;
 const FILES_CHARS: usize = 1600;
 const PARALLEL_CALLS: usize = 4;
@@ -58,7 +60,7 @@ impl Judgment {
 }
 
 /// Any OpenAI-compatible chat endpoint: OpenRouter, OpenAI, a local llama.cpp or Ollama server.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JudgeConfig {
     #[serde(default = "default_url")]
     pub base_url: String,
@@ -109,6 +111,22 @@ impl JudgeConfig {
     /// `~/.config/meat-proxy/judge.json`, overridden by `MEAT_PROXY_JUDGE_URL`, `_KEY` and `_MODEL`.
     /// Without a key there is nothing to ask, and the inbox runs on rules alone.
     pub fn load() -> Option<Self> {
+        Self::load_raw().filter(Self::usable)
+    }
+
+    /// A key, or a local server that needs none; a hosted one without a key would only fail.
+    pub fn usable(&self) -> bool {
+        let local = self.base_url.contains("localhost")
+            || self.base_url.contains("127.0.0.1")
+            || self
+                .decisions_url
+                .as_deref()
+                .is_some_and(|u| u.contains("://localhost") || u.contains("://127.0.0.1"));
+        local || !self.api_key.trim().is_empty()
+    }
+
+    /// The file and the environment as they are, usable or not: what the settings fields start from.
+    pub fn load_raw() -> Option<Self> {
         let from_file = std::env::var_os("HOME")
             .map(|home| std::path::PathBuf::from(home).join(".config/meat-proxy/judge.json"))
             .and_then(|path| std::fs::read_to_string(path).ok())
@@ -139,9 +157,63 @@ impl JudgeConfig {
         if let Ok(url) = std::env::var("MEAT_PROXY_JUDGE_DECISIONS_URL") {
             cfg.decisions_url = Some(url);
         }
-        // A local server needs no key; a hosted one without a key would only fail.
-        let local = cfg.base_url.contains("localhost") || cfg.base_url.contains("127.0.0.1");
-        (local || !cfg.api_key.trim().is_empty()).then_some(cfg)
+        Some(cfg)
+    }
+
+    /// What the AI settings hold when nothing has been set up: a decision model on OpenRouter.
+    pub fn starting_point() -> Self {
+        let mut cfg = Self::from_fields(DECISIONS_URL, DECISIONS_MODEL, "", None);
+        cfg.max_per_sync = default_max_per_sync();
+        cfg
+    }
+
+    /// Builds a config from the three settings fields. An address ending in `/decisions` or
+    /// `/systemone` is a decision model; any other is an OpenAI-compatible chat endpoint.
+    pub fn from_fields(url: &str, model: &str, key: &str, previous: Option<&JudgeConfig>) -> Self {
+        let url = url.trim().trim_end_matches('/');
+        let decision = url.ends_with("/decisions") || url.ends_with("/systemone");
+        let mut cfg = previous.cloned().unwrap_or(JudgeConfig {
+            base_url: default_url(),
+            api_key: String::new(),
+            model: default_model(),
+            provider: default_provider(),
+            decisions_url: None,
+            input_usd_per_million: 0.0,
+            include_private: false,
+            max_per_sync: default_max_per_sync(),
+            max_spend_usd: default_max_spend(),
+        });
+        cfg.api_key = key.trim().to_owned();
+        cfg.model = model.trim().to_owned();
+        if decision {
+            cfg.provider = "systemone".into();
+            cfg.decisions_url = Some(url.to_owned());
+        } else {
+            cfg.provider = "chat".into();
+            cfg.decisions_url = None;
+            cfg.base_url = url.to_owned();
+        }
+        cfg
+    }
+
+    /// The address the settings field shows.
+    pub fn address(&self) -> &str {
+        match (&self.decisions_url, self.provider.as_str()) {
+            (Some(url), "systemone") => url,
+            _ => &self.base_url,
+        }
+    }
+
+    /// Writes `~/.config/meat-proxy/judge.json`, readable by the owner only.
+    pub fn save(&self) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").ok_or(std::io::ErrorKind::NotFound)?;
+        let dir = std::path::PathBuf::from(home).join(".config/meat-proxy");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("judge.json");
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(&path, text)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
     }
 }
 

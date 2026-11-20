@@ -113,6 +113,11 @@ pub struct App {
     pub show_team_reviews: bool,
     /// Whether private repositories may be sent to the decision model. Off unless chosen.
     pub classify_private: bool,
+    pub ai_url: TextEdit,
+    pub ai_model: TextEdit,
+    pub ai_key: TextEdit,
+    /// The three AI fields as last applied, to notice an edit.
+    ai_applied: (String, String, String),
     /// Pull requests moved to the Ignored section, and whether that section is open.
     pub ignored: std::collections::HashSet<String>,
     pub ignored_open: bool,
@@ -196,6 +201,14 @@ fn init() -> App {
         hide_external: false,
         show_team_reviews: false,
         classify_private: false,
+        ai_url: TextEdit::new(judge::DECISIONS_URL),
+        ai_model: TextEdit::new(judge::DECISIONS_MODEL),
+        ai_key: TextEdit::new(""),
+        ai_applied: (
+            judge::DECISIONS_URL.into(),
+            judge::DECISIONS_MODEL.into(),
+            String::new(),
+        ),
         ignored: std::collections::HashSet::new(),
         ignored_open: false,
         judgments: std::collections::HashMap::new(),
@@ -430,6 +443,35 @@ impl App {
                 if self.show_team_reviews { "1" } else { "0" },
             );
         }
+    }
+
+    fn set_ai_fields(&mut self, url: &str, model: &str, key: &str) {
+        self.ai_url = TextEdit::new(url);
+        self.ai_model = TextEdit::new(model);
+        self.ai_key = TextEdit::new(key);
+        self.ai_applied = (url.into(), model.into(), key.into());
+    }
+
+    /// Applies the AI fields once they differ from what is in effect: saves `judge.json` and asks
+    /// again for anything the model had not been able to judge.
+    fn apply_ai_fields(&mut self) -> bool {
+        let now = (
+            self.ai_url.text.trim().to_owned(),
+            self.ai_model.text.trim().to_owned(),
+            self.ai_key.text.trim().to_owned(),
+        );
+        if now == self.ai_applied || now.0.is_empty() || now.1.is_empty() {
+            return false;
+        }
+        let cfg = judge::JudgeConfig::from_fields(&now.0, &now.1, &now.2, self.judge.as_ref());
+        if !self.preview && self.allow_os_side_effects {
+            let _ = cfg.save();
+        }
+        self.ai_applied = now;
+        self.judge = cfg.usable().then_some(cfg);
+        self.judge_off = false;
+        self.queue_judgments();
+        true
     }
 
     pub fn toggle_classify_private(&mut self) {
@@ -1199,7 +1241,10 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.sync_worker.set_waker(waker.clone());
     s.judge_worker.set_waker(waker.clone());
     if !s.preview && s.allow_os_side_effects {
-        s.judge = judge::JudgeConfig::load();
+        let raw = judge::JudgeConfig::load_raw();
+        s.judge = raw.clone().filter(judge::JudgeConfig::usable);
+        let shown = raw.unwrap_or_else(judge::JudgeConfig::starting_point);
+        s.set_ai_fields(shown.address(), &shown.model, &shown.api_key);
     }
     s.auth_worker.set_waker(waker.clone());
     s.fast_notif_worker.set_waker(waker.clone());
@@ -1243,6 +1288,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.set_max_age_days(days);
         changed = true;
     }
+
+    changed |= s.apply_ai_fields();
 
     if let Some(snapshot) = s.boot_worker.take() {
         s.loading = false;
@@ -3379,6 +3426,58 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 .key("add-rule-btn"),
         );
 
+    let ai_field = |label: &'static str, input: El| setup_row(k, label, input);
+    let ai_section = col()
+        .w_full()
+        .gap(10.0)
+        .child(text("AI").font(k.ty.ui_medium).color(c.text_base))
+        .child(
+            text("Sorts review requests aimed at you by reading the description and changed file paths. Without a key, only rules sort.")
+                .font(k.ty.small)
+                .color(c.text_faint),
+        )
+        .child(ai_field(
+            "API URL",
+            TextInput::new(&s.ai_url)
+                .label("AI API URL")
+                .placeholder("https://openrouter.ai/api/alpha/decisions")
+                .width(Some(360.0))
+                .on_edit(|s: &mut App| &mut s.ai_url)
+                .build(k)
+                .key("option-ai-url"),
+        ))
+        .child(ai_field(
+            "Model",
+            TextInput::new(&s.ai_model)
+                .label("AI model")
+                .placeholder("typesafe/jev-1.13")
+                .width(Some(360.0))
+                .on_edit(|s: &mut App| &mut s.ai_model)
+                .build(k)
+                .key("option-ai-model"),
+        ))
+        .child(ai_field(
+            "API key",
+            TextInput::new(&s.ai_key)
+                .label("AI API key")
+                .placeholder("sk-…")
+                .secure()
+                .width(Some(360.0))
+                .on_edit(|s: &mut App| &mut s.ai_key)
+                .build(k)
+                .key("option-ai-key"),
+        ))
+        .child(setup_row(
+            k,
+            "Send private repositories to the AI",
+            Switch::new(s.classify_private)
+                .label("Send private repositories to the AI")
+                .hide_label()
+                .on_toggle(|s: &mut App| s.toggle_classify_private())
+                .build(k)
+                .key("option-classify-private"),
+        ));
+
     let rules_section = col()
         .w_full()
         .gap(10.0)
@@ -3433,18 +3532,6 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         .build(k)
                         .key("option-hide-external"),
                 ))
-                .children(s.judge.is_some().then(|| {
-                    setup_row(
-                        k,
-                        "Send private repositories to the AI sorter",
-                        Switch::new(s.classify_private)
-                            .label("Send private repositories to the AI sorter")
-                            .hide_label()
-                            .on_toggle(|s: &mut App| s.toggle_classify_private())
-                            .build(k)
-                            .key("option-classify-private"),
-                    )
-                }))
                 .child(sync_option_row(
                     k,
                     "Show archived repositories",
@@ -3474,6 +3561,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 ))
                 .child(rules_section),
         )
+        .child(panel(k).child(ai_section))
         .child(panel(k).child(thresholds_section));
 
     col()
@@ -3852,17 +3940,7 @@ fn main() {
         }),
         ("settings-ai", |s| {
             seed_preview(s);
-            s.judge = Some(judge::JudgeConfig {
-                base_url: String::new(),
-                api_key: "x".into(),
-                model: "jev".into(),
-                provider: "systemone".into(),
-                decisions_url: None,
-                input_usd_per_million: 0.0,
-                include_private: false,
-                max_per_sync: 30,
-                max_spend_usd: 0.25,
-            });
+            s.ai_key = TextEdit::new("sk-or-v1-0123456789abcdef");
             s.page = Page::Inbox;
             s.settings_open = true;
         }),
