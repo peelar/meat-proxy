@@ -2218,6 +2218,13 @@ const EYE: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M1.6 8s2.3-4.2 6.4-4.2S14.4 8 14.4 8s-2.3 4.2-6.4 4.2S1.6 8 1.6 8Z"/><circle fill="none" stroke="currentColor" stroke-width="1.3" cx="8" cy="8" r="1.9"/>"#,
 };
 
+/// Merge: two branches joining.
+const MERGE: rune::Icon = rune::Icon {
+    name: "merge",
+    view: 16.0,
+    body: r#"<g fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="9" r="1.6"/><path d="M4.5 5.1v5.8M4.5 5.1c0 2.4 2.2 3.9 5.4 3.9"/></g>"#,
+};
+
 /// Auto-merge: a bolt.
 const BOLT: rune::Icon = rune::Icon {
     name: "auto-merge",
@@ -2720,7 +2727,9 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             .variant(ButtonVariant::Outline)
             .disabled(true)
     } else if armed {
-        Button::new("Confirm merge").variant(ButtonVariant::Submit)
+        Button::new("Confirm merge")
+            .icon(&MERGE)
+            .variant(ButtonVariant::Submit)
     } else if auto_on {
         Button::new("Auto-merge on")
             .variant(ButtonVariant::Submit)
@@ -2733,6 +2742,7 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             .disabled(auto_busy)
     } else {
         Button::new("Merge")
+            .icon(&MERGE)
             .variant(if ready {
                 ButtonVariant::Contrast
             } else {
@@ -4070,6 +4080,9 @@ fn main() {
             seed_preview(s);
             s.page = Page::Inbox;
             s.expanded.insert("acme/engine#418".into());
+            if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/cli#908") {
+                pr.merge_readiness = model::MergeReadiness::Ready;
+            }
             s.approve_armed = Some(("acme/cli#904".into(), std::time::Instant::now()));
         }),
         ("settings-ai", |s| {
