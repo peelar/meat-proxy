@@ -45,9 +45,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>co.anomaly.meat-proxy</string>
     <key>CFBundleName</key>
-    <string>meat-proxy</string>
+    <string>meat proxy</string>
     <key>CFBundleDisplayName</key>
-    <string>meat-proxy</string>
+    <string>meat proxy</string>
     <key>CFBundleIconFile</key>
     <string>meat-proxy.icns</string>
     <key>CFBundlePackageType</key>

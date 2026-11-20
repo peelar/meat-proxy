@@ -379,18 +379,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_pr_snooze(
-        &self,
-        pr_id: &str,
-        snoozed_until_hour: u64,
-    ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE pull_requests SET snoozed_until_hour = ?2 WHERE id = ?1",
-            params![pr_id, snoozed_until_hour as i64],
-        )?;
-        Ok(())
-    }
-
     pub fn load_repos(&self) -> Result<Vec<RepoConfig>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT name, manual_rank, pinned,

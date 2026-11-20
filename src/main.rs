@@ -278,7 +278,7 @@ impl App {
     pub fn send_welcome_notification(&self) {
         notify::post(
             "notifications-enabled",
-            "meat-proxy",
+            "meat proxy",
             "Notifications are on. You'll see a note here when a review is requested of you or a PR needs a nudge.",
             None,
             self.allow_os_side_effects,
@@ -696,17 +696,6 @@ impl App {
             r.collapsed = !r.collapsed;
         }
         self.persist_repos();
-    }
-
-    pub fn snooze_pr_24h(&mut self, pr_id: &str) {
-        let until = current_epoch_hour() + 24;
-        if let Some(pr) = self.prs.iter_mut().find(|p| p.id == pr_id) {
-            pr.snoozed_until_hour = until;
-            self.status_banner = Some(format!("Snoozed {}#{} for 24h", pr.repo, pr.number));
-        }
-        if let Ok(db) = Database::open_default() {
-            let _ = db.update_pr_snooze(pr_id, until);
-        }
     }
 
     pub fn add_custom_rule(&mut self) {
@@ -1128,7 +1117,7 @@ fn top_bar(s: &App, k: &Kit) -> El {
                         })
                         .child(keycap)
                         .child(
-                            text("meat-proxy")
+                            text("meat proxy")
                                 .font(TextStyle::new(14.0, 650.0))
                                 .color(c.text_base),
                         ),
@@ -1718,12 +1707,6 @@ fn default_filter_row(s: &App, k: &Kit) -> El {
     )
 }
 
-const CLOCK: rune::Icon = rune::Icon {
-    name: "snooze-clock",
-    view: 16.0,
-    body: r#"<circle cx="8" cy="8" r="5.8" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.6v3.6l2.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
-};
-
 const PLUS: rune::Icon = rune::Icon {
     name: "add",
     view: 16.0,
@@ -1763,31 +1746,6 @@ const PIN: rune::Icon = rune::Icon {
 
 // Matching the resting surface keeps the glyph quiet. Keyboard focus paints a
 // contrasting tile behind it even when the pointer is in another row.
-fn row_action(
-    k: &Kit,
-    glyph: &'static rune::Icon,
-    label: &str,
-    background: Color,
-    open: bool,
-) -> El {
-    row()
-        .role("button")
-        .label(label)
-        .help(label)
-        .focusable(true)
-        .cursor(rune::Cursor::Pointer)
-        .size(26.0, 24.0)
-        .radius(5.0)
-        .center()
-        .focus_highlight(oklch(if k.dark { 0.34 } else { 0.90 }, 0.0, 0.0))
-        .child(
-            rune::icon(glyph, 15.0)
-                .color(if open { k.c.text_muted } else { background })
-                .group_color(k.c.text_muted)
-                .a11y_hidden(),
-        )
-}
-
 fn author_badge(s: &App, pr: &PullRequest, k: &Kit) -> El {
     let size = 17.0;
     let mut avatar = row()
@@ -1856,35 +1814,8 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         PrAttention::IncomingWatched => ("Watching".to_owned(), c.text_muted),
     };
     let pr_url_open = pr.url.clone();
-    let pr_url_copy = pr.url.clone();
-    let pr_id_snooze = pr.id.clone();
 
     let mut right_side = row().center_y().gap(2.0);
-    if att.is_nudge() {
-        right_side = right_side
-            .child(
-                row_action(
-                    k,
-                    &rune_kit::glyphs::COPY,
-                    "Copy PR link",
-                    surface(k),
-                    false,
-                )
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| {
-                    tx.copy(pr_url_copy.clone());
-                    s.status_banner = Some("Copied link".to_string());
-                })
-                .key(format!("copy-ping-{}", pr.id)),
-            )
-            .child(
-                row_action(k, &CLOCK, "Snooze for 24 hours", surface(k), false)
-                    .on_press(move |s: &mut App| {
-                        s.snooze_pr_24h(&pr_id_snooze);
-                    })
-                    .key(format!("snooze-{}", pr.id)),
-            );
-    }
-
     if pr.ownership == Ownership::Mine && !pr.is_draft && s.page == Page::Inbox {
         right_side = right_side.child(merge_control(s, k, pr));
     }
@@ -1934,10 +1865,7 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         .hover(c.hover)
         .cursor(rune::Cursor::Pointer)
         .on_press(move |s: &mut App| {
-            notify::open_url_in_browser(
-                &pr_url_open,
-                s.allow_os_side_effects,
-            );
+            notify::open_url_in_browser(&pr_url_open, s.allow_os_side_effects);
         })
         .child(
             rune::icon(
@@ -3153,7 +3081,7 @@ fn main() {
         poll: Some(poll),
         on_key: Some(on_key),
         scenes,
-        ..rune::AppSpec::new("meat-proxy", (920.0, 680.0), init, view)
+        ..rune::AppSpec::new("meat proxy", (920.0, 680.0), init, view)
     })
     .tab_visits_controls(true)
     .chrome(chrome)
