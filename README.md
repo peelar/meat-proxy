@@ -1,30 +1,23 @@
-<p align="center"><img src="assets/logo.png" width="96" alt="A chewed thumb resting on a green approve check"></p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="snapshots/onboarding-dark.gif">
+  <img alt="First launch: a finger presses the approve button, then you connect the GitHub CLI, turn on notifications, and open the inbox" src="snapshots/onboarding-light.gif">
+</picture>
 
 # meat proxy
 
 Keep up with the pace of LLM-generated code.
 
-A native macOS inbox for GitHub pull requests, built with Rune. It puts what needs your thumb first, grouped by the action each pull request needs, and merges your own once GitHub allows it. It reads GitHub through the GitHub CLI, as you are signed in to it.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="snapshots/inbox-dark.png">
-  <img alt="The pull request inbox, grouped by the action each one needs" src="snapshots/inbox-light.png">
-</picture>
+meat proxy is a native macOS inbox for your GitHub pull requests. It gathers the reviews requested of you and the pull requests you opened, then sorts them by what each one needs from you: merge, review, address feedback, find a reviewer, or finish a draft. Your own pull requests merge from the list once GitHub allows it, and macOS notifications tap you on the shoulder when a review lands on you or your pull request sits unreviewed. It reads GitHub through the GitHub CLI, signed in as you, so there are no tokens to paste.
 
 ## Install
 
-Install and sign in to the [GitHub CLI](https://cli.github.com) (`brew install gh && gh auth login`), then:
+Install the [GitHub CLI](https://cli.github.com) (`brew install gh`), then:
 
 ```sh
 curl -fsSL https://github.com/peelar/meat-proxy/releases/latest/download/install-mac.sh | sh
 ```
 
-It puts meat-proxy in `~/Applications` and keeps it at the latest release: a launchd agent checks every hour and
-replaces the app while it is closed. `sh -s -- --uninstall` after the same command removes it. On first launch,
-connect your GitHub CLI account; the inbox opens with sensible defaults, which Settings changes.
-
-Every push to `main` publishes a release (`.github/workflows/release.yml`): the next patch, unless `Cargo.toml` names a
-higher version.
+It updates itself hourly. Add `sh -s -- --uninstall` to the same command to remove it.
 
 ## Inbox sections and AI sorting (experimental)
 
@@ -53,11 +46,8 @@ The chat stand-in looks like this:
 
 ## Build from source
 
-Install Rust, Xcode Command Line Tools, and the GitHub CLI. From the repository root, run:
+With Rust, Xcode Command Line Tools and the GitHub CLI installed:
 
 ```sh
-./package.sh
-~/.cargo/bin/meat-proxy
+./package.sh && ~/.cargo/bin/meat-proxy
 ```
-
-This installs your build in `/Applications`, beside any released copy in `~/Applications`.

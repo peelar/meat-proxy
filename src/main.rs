@@ -35,6 +35,12 @@ const ARRIVAL_GLOW_SECS: f32 = 2.6;
 /// Gap between rows arriving together, so a batch cascades.
 const ARRIVAL_STAGGER_SECS: f32 = 0.07;
 
+/// The first-launch intro: the button springs in, a finger presses it, the name appears, then the
+/// setup screen fades in. A click or Escape skips it; Reduce Motion never plays it.
+const INTRO_SECS: f32 = 5.0;
+/// When the finger reaches the button.
+const INTRO_HIT: f32 = 1.45;
+
 /// The section ignored pull requests move to, always last and folded until opened.
 const IGNORED_GROUP: u8 = 255;
 
@@ -52,6 +58,13 @@ pub struct App {
     avatars: avatars::Avatars,
     settings_open: bool,
     logo: Option<rune::Image>,
+    /// The intro's button base, button face and finger.
+    intro_art: Vec<rune::Image>,
+    /// When the first-launch intro started; cleared once it ends or is skipped.
+    pub intro: Option<std::time::Instant>,
+    /// What `gh auth login` has printed so far, shown on the setup screen.
+    auth_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    auth_lines_shown: usize,
     pub page: Page,
     pub prs: Vec<PullRequest>,
     pub repos: Vec<RepoConfig>,
@@ -166,6 +179,10 @@ fn init() -> App {
         avatars: avatars::Avatars::default(),
         settings_open: false,
         logo: None,
+        intro_art: Vec::new(),
+        intro: None,
+        auth_lines: Default::default(),
+        auth_lines_shown: 0,
         page: Page::Onboarding,
         prs: Vec::new(),
         repos: Vec::new(),
@@ -200,7 +217,7 @@ fn init() -> App {
         open_stale_hours: 48,
         onboarded: false,
         default_filter: InboxFilter::Inbox,
-        native_notifications: true,
+        native_notifications: false,
         sync_options: github::SyncOptions::default(),
         loading: true,
         preview: headless,
@@ -353,6 +370,9 @@ impl App {
         self.prs.retain(|pr| pr.within_days(days));
         if self.onboarded {
             self.page = Page::Inbox;
+        } else {
+            // Notifications are something to opt in to on the setup screen.
+            self.native_notifications = false;
         }
     }
 
@@ -1119,9 +1139,6 @@ impl App {
         self.status_banner = None;
         self.page = Page::Inbox;
         self.next_fast_poll_at = 0.0;
-        if self.native_notifications {
-            self.send_welcome_notification();
-        }
         self.trigger_sync();
     }
 
@@ -1271,9 +1288,17 @@ impl App {
 fn setup(s: &mut App, waker: rune::Waker) {
     let decoder = std::sync::Arc::new(rune::ImageCache::new(waker.clone()));
     let logo = decoder.load(&include_bytes!("../assets/logo.png")[..]);
+    s.intro_art = vec![
+        decoder.load(&include_bytes!("../assets/onboarding/button-base.png")[..]),
+        decoder.load(&include_bytes!("../assets/onboarding/button-top.png")[..]),
+        decoder.load(&include_bytes!("../assets/onboarding/finger.png")[..]),
+    ];
     s.avatars.setup(decoder, waker.clone());
     if s.preview {
         let _ = logo.wait();
+        for art in &s.intro_art {
+            let _ = art.wait();
+        }
     }
     s.logo = Some(logo);
     if s.preview {
@@ -1353,6 +1378,9 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             Ok(snap) => s.apply_snapshot(snap),
             Err(error) => s.status_banner = Some(format!("Could not read saved settings. {error}")),
         }
+        if !s.onboarded {
+            s.intro = Some(std::time::Instant::now());
+        }
         s.trigger_sync();
         s.trigger_discovery();
         changed = true;
@@ -1391,11 +1419,19 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     }
 
     if let Some(result) = s.auth_worker.take() {
-        s.status_banner = Some(match result {
-            Ok(()) => "Finish signing in, then check the connection.".to_string(),
-            Err(error) => format!("Could not open Terminal. {error}"),
-        });
+        match result {
+            Ok(()) => {
+                s.status_banner = None;
+                s.trigger_sync();
+            }
+            Err(error) => s.status_banner = Some(format!("Could not sign in. {error}")),
+        }
         changed = true;
+    } else if s.auth_worker.is_pending() {
+        // Show what gh prints while it waits for the browser.
+        tx.wake_after(std::time::Duration::from_millis(150));
+        let printed = s.auth_lines.lock().map_or(0, |lines| lines.len());
+        changed |= printed != std::mem::replace(&mut s.auth_lines_shown, printed);
     }
 
     if let Some(result) = s.sync_worker.take() {
@@ -1426,15 +1462,6 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 if s.rank_refresh_pending {
                     s.refresh_ranks();
                 }
-                // The first time GitHub answers, setup is done: the defaults stand, the repositories
-                // are the ones the pull requests came from, and discovery fills in how busy each is.
-                if !s.onboarded
-                    && s.page == Page::Onboarding
-                    && matches!(s.sync_status, SyncStatus::Connected { .. })
-                {
-                    s.complete_onboarding();
-                    s.trigger_discovery();
-                }
                 s.queue_judgments();
                 s.after_sync_track();
                 let events: Vec<_> = events
@@ -1450,6 +1477,15 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
             }
             Err(reason) => s.sync_status = SyncStatus::NeedsAuth { reason },
+        }
+        changed = true;
+    }
+
+    if let Some(at) = s.intro {
+        if at.elapsed().as_secs_f32() >= INTRO_SECS {
+            s.intro = None;
+        } else {
+            tx.wake_after(std::time::Duration::from_millis(16));
         }
         changed = true;
     }
@@ -1693,7 +1729,8 @@ fn heading(k: &Kit, label: &str) -> El {
         .color(k.c.text_base)
 }
 
-fn top_bar(s: &App, k: &Kit) -> El {
+/// `hide_brand` while the intro flies its own logo and name into place.
+fn top_bar(s: &App, k: &Kit, hide_brand: bool) -> El {
     let c = &k.c;
     let settings_btn = if s.page == Page::Inbox {
         rune_kit::IconButton::new(&GEAR)
@@ -1752,6 +1789,8 @@ fn top_bar(s: &App, k: &Kit) -> El {
                                 s.selected_repo = None;
                             }
                         })
+                        .opacity(if hide_brand { 0.0 } else { 1.0 })
+                        .opacity_motion(rune::Anim::INSTANT)
                         .child(keycap)
                         .child(
                             text("meat proxy")
@@ -1892,7 +1931,211 @@ fn inbox_tools(s: &App, k: &Kit) -> El {
         )
 }
 
-fn onboarding_page_view(s: &App, k: &Kit) -> El {
+fn phase(t: f32, from: f32, to: f32) -> f32 {
+    ((t - from) / (to - from)).clamp(0.0, 1.0)
+}
+
+fn ease_out(p: f32) -> f32 {
+    1.0 - (1.0 - p).powi(3)
+}
+
+/// Drawn exactly where the intro's clock puts it this frame: no spring follows the change.
+fn frame_exact(e: El) -> El {
+    let now = rune::Anim::INSTANT;
+    e.scale_motion(now)
+        .offset_motion(now)
+        .opacity_motion(now)
+        .rotate_motion(now)
+        .blur_motion(now)
+}
+
+/// The first-launch intro at `t` seconds, over the whole `w`×`h` window: the approve button
+/// springs in, a finger falls onto it, approvals fly off, the name appears, and then button and
+/// name fly into the header, where the logo and name take over. Every value is computed from
+/// `t`, so nothing springs. `name_w` and `name_h` are the full-size name's last laid-out size.
+fn intro_view(s: &App, k: &Kit, t: f32, (w, h): (f32, f32), (name_w, name_h): (f32, f32)) -> El {
+    let c = &k.c;
+    let green = oklch(0.57, 0.15, 150.0);
+    let art = |image: Option<&rune::Image>, size: f32| match image {
+        Some(image) => el().size(size, size).pixels(image.pixels()),
+        None => el().size(size, size),
+    };
+    let since_hit = t - INTRO_HIT;
+    // The press: the face sinks, the button squashes, then both spring back.
+    let press = if since_hit >= 0.0 {
+        (-7.0 * since_hit).exp() * (16.0 * since_hit).cos()
+    } else {
+        0.0
+    };
+    let sink = press.clamp(0.0, 1.0) * 10.0;
+    let arrive = phase(t, 0.1, 0.9);
+    let spring = 1.0 - (-5.5 * arrive).exp() * (10.0 * arrive).cos();
+    let shown = phase(t, 0.1, 0.5);
+    // Into the header: the header's logo is centred at (95, 25), its name starts at x 115.
+    let p = phase(t, 4.0, 4.85);
+    let dock = if p < 0.5 {
+        4.0 * p * p * p
+    } else {
+        1.0 - (-2.0 * p + 2.0).powi(3) / 2.0
+    };
+    let lerp = |a: f32, b: f32| a + (b - a) * dock;
+    let (cx, cy) = (w / 2.0, h / 2.0 - 55.0);
+
+    let mut layer = col()
+        .key("intro")
+        .w_full()
+        .h_full()
+        .instant_changes()
+        .cursor(rune::Cursor::Pointer)
+        .on_press(|s: &mut App| s.intro = None)
+        .child(frame_exact(
+            el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .fill(c.bg_base)
+                .opacity(1.0 - phase(t, 4.3, INTRO_SECS)),
+        ))
+        .child(frame_exact(
+            el().absolute(cx - 210.0, cy - 210.0)
+                .size(420.0, 420.0)
+                .radial_gradient(
+                    [0.5, 0.5],
+                    210.0,
+                    [
+                        (
+                            0.0,
+                            green.alpha(
+                                if k.dark { 0.42 } else { 0.24 } * (0.6 + 0.4 * press.max(0.0)),
+                            ),
+                        ),
+                        (1.0, green.alpha(0.0)),
+                    ],
+                )
+                .opacity(shown * (1.0 - dock)),
+        ));
+    for i in 0..3 {
+        let from = INTRO_HIT + i as f32 * 0.11;
+        let p = ease_out(phase(t, from, from + 1.1));
+        layer = layer.child(frame_exact(
+            el().absolute(cx - 100.0, cy - 100.0)
+                .size(200.0, 200.0)
+                .radius(100.0)
+                .border(3.0 - 2.0 * p, mint(k))
+                .scale(1.0 + p * (1.9 + i as f32 * 0.5))
+                .opacity(if t < from { 0.0 } else { 0.7 * (1.0 - p) }),
+        ));
+    }
+    // The button turns into the logo as it lands in the header.
+    let logo = phase(dock, 0.5, 1.0);
+    layer = layer.child(frame_exact(
+        col()
+            .absolute(cx - 100.0, cy - 100.0)
+            .size(200.0, 212.0)
+            .scale(lerp((0.55 + 0.45 * spring) * (1.0 - 0.07 * press), 0.11))
+            .offset(lerp(0.0, 95.0 - cx), lerp(0.0, 25.7 - (cy + 6.0)))
+            .opacity(shown)
+            .blur((1.0 - shown) * 12.0)
+            .child(
+                art(s.intro_art.first(), 200.0)
+                    .absolute(0.0, 12.0)
+                    .opacity(1.0 - logo),
+            )
+            .child(
+                art(s.intro_art.get(1), 200.0)
+                    .absolute(0.0, 0.0)
+                    .offset(0.0, sink)
+                    .opacity(1.0 - logo),
+            )
+            .child(art(s.logo.as_ref(), 200.0).absolute(0.0, 0.0).opacity(logo)),
+    ));
+    let approvals = [
+        ("LGTM", -150.0, 200.0),
+        ("+1", -115.0, 230.0),
+        ("ship it", -65.0, 210.0),
+        ("approved", -30.0, 250.0),
+        ("👍", 20.0, 200.0),
+        ("didn't read, looks good", 160.0, 215.0),
+    ];
+    for (i, (label, degrees, distance)) in approvals.into_iter().enumerate() {
+        let from = INTRO_HIT + 0.04 + i as f32 * 0.035;
+        let p = 1.0 - (1.0 - phase(t, from, from + 1.25)).powi(5);
+        let angle = (degrees as f32).to_radians();
+        let width = label.chars().count() as f32 * 7.5 + 22.0;
+        layer = layer.child(frame_exact(
+            row()
+                .absolute(cx - width / 2.0, cy - 13.0)
+                .px(11.0)
+                .py(5.0)
+                .radius(999.0)
+                .fill(mint(k).alpha(0.12))
+                .border(1.0, mint(k).alpha(0.3))
+                .offset(
+                    angle.cos() * distance * p,
+                    angle.sin() * distance * p + 40.0 * p * p,
+                )
+                .opacity(if t < from {
+                    0.0
+                } else {
+                    (p * 6.0).min(1.0) * (1.0 - phase(t, from + 0.7, from + 1.3))
+                })
+                .child(text(label).font(TextStyle::new(14.0, 600.0)).color(mint(k))),
+        ));
+    }
+    let fall = phase(t, 0.8, INTRO_HIT).powi(3);
+    let lift = phase(t, 1.9, 2.6).powi(2);
+    let drop = if t >= INTRO_HIT {
+        sink
+    } else {
+        -360.0 * (1.0 - fall)
+    };
+    layer = layer.child(frame_exact(
+        art(s.intro_art.get(2), 110.0)
+            .size(110.0, 275.0)
+            .absolute(cx - 55.0, cy - 295.0)
+            .offset(0.0, drop - lift * 360.0)
+            .rotate(((1.0 - fall) * -4.0 + lift * 3.0).to_radians())
+            .opacity(ease_out(phase(t, 0.8, 1.15)) * (1.0 - phase(t, 2.0, 2.6))),
+    ));
+
+    let name_top = cy + 110.0;
+    let mut name = row()
+        .key("intro-name")
+        .absolute(cx - name_w / 2.0, name_top)
+        .origin(0.0, 0.5)
+        .scale(lerp(1.0, 14.0 / 64.0))
+        .offset(
+            lerp(0.0, 115.0 - (cx - name_w / 2.0)),
+            lerp(0.0, 25.0 - (name_top + name_h / 2.0)),
+        );
+    for (i, ch) in "meat proxy".chars().enumerate() {
+        let from = 2.4 + i as f32 * 0.055;
+        let p = ease_out(phase(t, from, from + 0.7));
+        name = name.child(frame_exact(if ch == ' ' {
+            el().size(18.0, 10.0)
+        } else {
+            text(ch.to_string())
+                .font(TextStyle::new(64.0, 720.0))
+                .color(c.text_base)
+                .opacity(p)
+                .offset(0.0, (1.0 - p) * 22.0)
+                .blur((1.0 - p) * 8.0)
+        }));
+    }
+    let tagline = ease_out(phase(t, 3.0, 3.8)) * (1.0 - phase(t, 3.9, 4.2));
+    layer.child(frame_exact(name)).child(frame_exact(
+        row()
+            .absolute(0.0, name_top + name_h + 4.0)
+            .w_full()
+            .justify_center()
+            .opacity(tagline)
+            .offset(0.0, (1.0 - tagline) * 12.0)
+            .child(
+                text("Keep up with the pace of LLM-generated code.")
+                    .font(TextStyle::new(19.0, 450.0))
+                    .color(c.text_muted),
+            ),
+    ))
+}
+
+fn onboarding_page_view(s: &App, k: &Kit, intro: Option<f32>) -> El {
     let c = &k.c;
     let connected = match &s.sync_status {
         SyncStatus::Connected { username } => Some(username),
@@ -1901,89 +2144,189 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
     let mut doc = col()
         .key("setup-github")
         .w_full()
-        .max_w(640.0)
-        .py(32.0)
-        .gap(16.0)
+        .max_w(560.0)
+        .py(48.0)
+        .gap(14.0)
         .child(
-            text("Connect GitHub")
-                .font(TextStyle::new(31.0, 660.0))
+            text("Connect GitHub.")
+                .font(TextStyle::new(40.0, 720.0))
                 .color(c.text_base),
+        )
+        .child(
+            text("meat proxy puts the pull requests that need your thumb first. It reads GitHub through the GitHub CLI, signed in as you. No tokens to paste.")
+                .wrap()
+                .font(k.ty.body)
+                .color(c.text_muted),
         );
 
     if let Some(message) = &s.status_banner {
-        doc = doc.child(text(message.clone()).font(k.ty.small).color(c.text_muted));
+        doc = doc.child(
+            text(message.clone())
+                .wrap()
+                .font(k.ty.small)
+                .color(c.text_muted),
+        );
     }
 
+    let (glyph, status) = if let Some(username) = connected {
+        ("✓", format!("Signed in as @{username} through GitHub CLI."))
+    } else if s.auth_worker.is_pending() {
+        (
+            "❯_",
+            "Waiting for you to finish in the browser…".to_string(),
+        )
+    } else if s.loading
+        || s.sync_worker.is_pending()
+        || matches!(s.sync_status, SyncStatus::Checking)
     {
-        let status = if let Some(username) = connected {
-            format!("Signed in as @{username} through GitHub CLI.")
-        } else if s.loading
-            || s.sync_worker.is_pending()
-            || matches!(s.sync_status, SyncStatus::Checking)
-        {
-            "Checking GitHub CLI…".to_string()
-        } else {
-            "GitHub CLI needs attention.".to_string()
-        };
-        doc = doc
+        ("❯_", "Checking GitHub CLI…".to_string())
+    } else {
+        ("❯_", "GitHub CLI is not signed in.".to_string())
+    };
+    let mut card = col()
+        .w_full()
+        .radius(10.0)
+        .fill(surface(k))
+        .border(1.0, c.border_weak)
+        .child(
+            row()
+                .w_full()
+                .px(16.0)
+                .py(14.0)
+                .center_y()
+                .gap(12.0)
+                .child(text(glyph).font(k.ty.mono).color(mint(k)))
+                .child(text(status).font(k.ty.body).color(c.text_base)),
+        );
+    // What gh prints while it signs in, the one-time code among it.
+    let lines: Vec<String> = s
+        .auth_lines
+        .lock()
+        .map(|lines| lines.iter().rev().take(4).rev().cloned().collect())
+        .unwrap_or_default();
+    if connected.is_none() && (s.auth_worker.is_pending() || !lines.is_empty()) {
+        let mut term = col()
+            .key("onboard-terminal")
+            .w_full()
+            .px(16.0)
+            .py(12.0)
+            .gap(4.0)
             .child(
-                text("Track the pull requests you open and the ones waiting for your review.")
-                    .font(k.ty.body)
-                    .color(c.text_muted),
+                text("❯ gh auth login --web")
+                    .font(k.ty.mono)
+                    .color(c.text_base),
+            );
+        for line in lines {
+            term = term.child(text(line).wrap().font(k.ty.mono).color(c.text_muted));
+        }
+        card = card
+            .child(el().w_full().h(1.0).fill(c.border_weak))
+            .child(term);
+    }
+    doc = doc.child(card).child(
+        row()
+            .w_full()
+            .px(16.0)
+            .py(14.0)
+            .radius(10.0)
+            .fill(surface(k))
+            .border(1.0, c.border_weak)
+            .center_y()
+            .gap(16.0)
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(3.0)
+                    .child(text("Tap me on the shoulder").font(TextStyle::new(15.0, 650.0)).color(c.text_base))
+                    .child(
+                        text("A macOS notification when a review is requested of you or your PR sits unreviewed.")
+                            .wrap()
+                            .font(k.ty.small)
+                            .color(c.text_muted),
+                    ),
             )
             .child(
+                Switch::new(s.native_notifications)
+                    .label("Tap me on the shoulder")
+                    .hide_label()
+                    .on_toggle(|s: &mut App| {
+                        s.native_notifications = !s.native_notifications;
+                        if s.native_notifications {
+                            s.send_welcome_notification();
+                        }
+                    })
+                    .build(k)
+                    .key("onboard-notifications"),
+            ),
+    );
+
+    if connected.is_some() {
+        doc = doc.child(
+            row().pt(6.0).child(
+                Button::new("Open inbox")
+                    .variant(ButtonVariant::Contrast)
+                    .on_press(|s: &mut App| {
+                        s.complete_onboarding();
+                        s.trigger_discovery();
+                    })
+                    .build(k)
+                    .key("onboard-open-inbox"),
+            ),
+        );
+    } else {
+        doc = doc
+            .child(
                 row()
-                    .w_full()
-                    .px(16.0)
-                    .py(14.0)
-                    .radius(8.0)
-                    .fill(surface(k))
-                    .border(1.0, c.border_weak)
-                    .center_y()
-                    .gap(12.0)
-                    .child(text("❯_").font(k.ty.mono).color(mint(k)))
-                    .child(text(status).font(k.ty.body).color(c.text_base)),
+                    .pt(6.0)
+                    .gap(8.0)
+                    .child(
+                        Button::new("Authenticate with GitHub CLI")
+                            .variant(ButtonVariant::Contrast)
+                            .disabled(s.auth_worker.is_pending())
+                            .on_press(|s: &mut App| {
+                                if s.allow_os_side_effects {
+                                    s.status_banner = None;
+                                    s.auth_lines.lock().unwrap().clear();
+                                    let lines = s.auth_lines.clone();
+                                    s.auth_worker.request((), move |()| github::login_in_browser(lines));
+                                }
+                            })
+                            .build(k)
+                            .key("onboard-run-gh-auth"),
+                    )
+                    .child(
+                        Button::new("Check connection")
+                            .variant(ButtonVariant::Outline)
+                            .disabled(s.sync_worker.is_pending())
+                            .on_press(|s: &mut App| {
+                                s.status_banner = None;
+                                s.trigger_sync();
+                            })
+                            .build(k)
+                            .key("onboard-recheck-gh"),
+                    ),
+            )
+            .child(
+                text("Or run gh auth login --hostname github.com --web in your terminal, then check the connection.")
+                    .wrap()
+                    .font(k.ty.small)
+                    .color(c.text_muted),
             );
-        if connected.is_some() {
+        if let SyncStatus::NeedsAuth { reason } = &s.sync_status
+            && !s.auth_worker.is_pending()
+        {
             doc = doc.child(
-                row().child(
-                    Button::new("Continue")
-                        .variant(ButtonVariant::Contrast)
-                        .on_press(|s: &mut App| s.complete_onboarding())
-                        .build(k)
-                        .key("onboard-continue"),
-                ),
+                text(reason.clone())
+                    .wrap()
+                    .font(k.ty.small)
+                    .color(c.text_faint),
             );
-        } else if let SyncStatus::NeedsAuth { reason } = &s.sync_status {
-            doc = doc
-                .child(row().gap(8.0)
-                    .child(Button::new("Sign in with gh")
-                        .variant(ButtonVariant::Contrast)
-                        .disabled(s.auth_worker.is_pending())
-                        .on_press(|s: &mut App| {
-                            if s.allow_os_side_effects {
-                                s.auth_worker.request((), |()| notify::launch_gh_auth_in_terminal());
-                            }
-                        })
-                        .build(k)
-                        .key("onboard-run-gh-auth"))
-                    .child(Button::new("Check connection")
-                        .variant(ButtonVariant::Outline)
-                        .disabled(s.sync_worker.is_pending())
-                        .on_press(|s: &mut App| {
-                            s.status_banner = None;
-                            s.trigger_sync();
-                        })
-                        .build(k)
-                        .key("onboard-recheck-gh")))
-                .child(text("You can also run gh auth login --hostname github.com --web in your terminal.")
-                    .font(k.ty.small).color(c.text_muted))
-                .child(text(reason.clone()).wrap().font(k.ty.small).color(c.text_faint));
         }
     }
 
     // The scroll sits on a column: a row clips its children to its own height and never overflows.
-    col().w_full().h_full().min_h(0.0).child(
+    let setup = col().w_full().h_full().min_h(0.0).child(
         col()
             .w_full()
             .scroll(ScrollSpec {
@@ -1992,7 +2335,14 @@ fn onboarding_page_view(s: &App, k: &Kit) -> El {
             .grow(1.0)
             .min_h(0.0)
             .child(row().w_full().px(28.0).justify_center().child(doc)),
-    )
+    );
+    match intro {
+        // The setup screen fades in under the intro as it ends.
+        Some(t) => setup
+            .instant_changes()
+            .opacity(phase(t, INTRO_SECS - 0.6, INTRO_SECS)),
+        None => setup,
+    }
 }
 
 fn setup_row(k: &Kit, label: &str, control: El) -> El {
@@ -3882,8 +4232,12 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
     // The off state of a switch is this color; the stock one vanishes on a white panel.
     k.c.layer_04 = oklch(if k.dark { 0.36 } else { 0.86 }, 0.004, 175.0);
 
+    let intro = s
+        .intro
+        .filter(|_| s.page == Page::Onboarding && !cx.is_reduced_motion())
+        .map(|at| at.elapsed().as_secs_f32());
     let body = match s.page {
-        Page::Onboarding => onboarding_page_view(s, &k),
+        Page::Onboarding => onboarding_page_view(s, &k, intro),
         Page::Inbox => document_inbox_view(s, &k),
     };
 
@@ -3892,8 +4246,25 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .w_full()
         .h_full()
         .fill(k.c.bg_base)
-        .child(top_bar(s, &k))
+        .child(top_bar(s, &k, intro.is_some()))
         .child(body.grow(1.0).min_h(0.0));
+    let root = match intro {
+        Some(t) => {
+            let window = cx
+                .layout_size("root")
+                .map_or((920.0, 680.0), |[w, h]| (w, h));
+            let name = cx
+                .layout_size("intro-name")
+                .map_or((340.0, 77.0), |[w, h]| (w, h));
+            root.child(intro_view(s, &k, t, window, name).pin(
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+            ))
+        }
+        None => root,
+    };
     if s.settings_open && s.page == Page::Inbox {
         root.child(settings_modal(s, &k))
     } else if s.add_repo_open && s.page == Page::Inbox {
@@ -3904,6 +4275,10 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 }
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
+    if ev.key == rune::Key::Escape && s.intro.is_some() {
+        s.intro = None;
+        return true;
+    }
     if ev.key == rune::Key::Escape && s.approve_armed.is_some() {
         s.approve_armed = None;
         return true;
@@ -4113,6 +4488,21 @@ fn main() {
             };
         }),
         ("signed-in", seed_preview),
+        // The intro as the finger lands, and once the name is up.
+        ("intro-press", |s| {
+            s.loading = false;
+            s.intro = Some(
+                std::time::Instant::now() - std::time::Duration::from_secs_f32(INTRO_HIT + 0.12),
+            );
+        }),
+        ("intro-dock", |s| {
+            s.loading = false;
+            s.intro = Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(4.45));
+        }),
+        ("intro-name", |s| {
+            s.loading = false;
+            s.intro = Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(3.9));
+        }),
         ("inbox", |s| {
             seed_preview(s);
             s.page = Page::Inbox;
@@ -4342,14 +4732,20 @@ mod tests {
         rt.frame(0.0);
         assert!(rt.find("onboard-run-gh-auth").is_some());
 
-        // Connected: one press finishes setup with the defaults. There is no second step.
+        // Connected: setup waits for Open inbox. Notifications start off and are switched on here.
         seed_preview(&mut rt.state);
         rt.update(|_, _| {});
         rt.frame(1.0 / 60.0);
-        let (x, y) = rt.find("onboard-continue").unwrap();
+        assert_eq!(rt.state.page, Page::Onboarding);
+        assert!(!rt.state.native_notifications);
+        let (x, y) = rt.find("onboard-notifications").unwrap();
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(2.0 / 60.0);
+        let (x, y) = rt.find("onboard-open-inbox").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(3.0 / 60.0);
         assert_eq!(rt.state.page, Page::Inbox);
         assert_eq!(rt.state.filter, InboxFilter::Inbox);
         assert_eq!(

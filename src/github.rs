@@ -41,6 +41,66 @@ fn gh_command() -> Command {
     cmd
 }
 
+/// Signs the GitHub CLI in through the browser without a terminal. Each line gh prints is
+/// appended to `lines` as it arrives, and the device page opens once gh shows its one-time code
+/// (which `--clipboard` copies). Returns when gh finishes.
+pub fn login_in_browser(
+    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    let mut child = gh_command()
+        .args([
+            "auth",
+            "login",
+            "--hostname",
+            "github.com",
+            "--web",
+            "--clipboard",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not run gh. {error}"))?;
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let follow = |stream: Box<dyn Read + Send>| {
+        let (lines, opened) = (lines.clone(), opened.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                let line = line.trim().to_owned();
+                if line.is_empty() {
+                    continue;
+                }
+                if line.contains("github.com/login/device")
+                    && !opened.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    crate::notify::open_url_in_browser("https://github.com/login/device", true);
+                }
+                lines.lock().unwrap().push(line);
+            }
+        })
+    };
+    let readers = [
+        child.stdout.take().map(|s| follow(Box::new(s))),
+        child.stderr.take().map(|s| follow(Box::new(s))),
+    ];
+    for reader in readers.into_iter().flatten() {
+        let _ = reader.join();
+    }
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(lines
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "gh auth login failed.".to_owned()))
+    }
+}
+
 pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPoll, String> {
     let mut cmd = gh_command();
     cmd.args([
