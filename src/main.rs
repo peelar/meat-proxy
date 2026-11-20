@@ -3366,6 +3366,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
             "API URL",
             TextInput::new(&s.ai_url)
                 .label("AI API URL")
+                .disabled(!s.ai_enabled)
                 .placeholder("https://openrouter.ai/api/alpha/decisions")
                 .width(Some(360.0))
                 .on_edit(|s: &mut App| &mut s.ai_url)
@@ -3376,6 +3377,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
             "Model",
             TextInput::new(&s.ai_model)
                 .label("AI model")
+                .disabled(!s.ai_enabled)
                 .placeholder("typesafe/jev-1.13")
                 .width(Some(360.0))
                 .on_edit(|s: &mut App| &mut s.ai_model)
@@ -3386,6 +3388,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
             "API key",
             TextInput::new(&s.ai_key)
                 .label("AI API key")
+                .disabled(!s.ai_enabled)
                 .placeholder("sk-…")
                 .secure()
                 .width(Some(360.0))
@@ -3837,6 +3840,7 @@ fn main() {
         ("settings-ai", |s| {
             seed_preview(s);
             s.ai_key = TextEdit::new("sk-or-v1-0123456789abcdef");
+            s.ai_enabled = false;
             s.page = Page::Inbox;
             s.settings_open = true;
         }),
