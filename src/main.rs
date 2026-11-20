@@ -3343,70 +3343,6 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         .key("draft-threshold-seg"),
                 ),
         );
-
-    let mut rules_list = col().w_full().gap(6.0);
-    for rule in &s.rules {
-        let rid_toggle = rule.id.clone();
-        let rid_del = rule.id.clone();
-        rules_list = rules_list.child(
-            row()
-                .key(format!("rule-row-{}", rule.id))
-                .w_full()
-                .py(6.0)
-                .px(10.0)
-                .radius(6.0)
-                .fill(c.layer_01)
-                .border(1.0, c.border_weak)
-                .center_y()
-                .justify_between()
-                .child(
-                    row()
-                        .center_y()
-                        .gap(10.0)
-                        .child(
-                            Switch::new(rule.enabled)
-                                .on_toggle(move |s: &mut App| s.toggle_rule(&rid_toggle))
-                                .build(k),
-                        )
-                        .child(text(rule.name.clone()).font(k.ty.body).color(c.text_base)),
-                )
-                .child(
-                    Button::new("Remove")
-                        .variant(ButtonVariant::Ghost)
-                        .control_size(ControlSize::Small)
-                        .on_press(move |s: &mut App| s.remove_rule(&rid_del))
-                        .build(k),
-                ),
-        );
-    }
-
-    let add_rule_bar = row()
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .child(
-            TextInput::new(&s.new_rule_name)
-                .placeholder("Name")
-                .width(Some(180.0))
-                .on_edit(|s: &mut App| &mut s.new_rule_name)
-                .build(k),
-        )
-        .child(
-            TextInput::new(&s.new_rule_query)
-                .placeholder("GitHub search, e.g. repo:owner/name label:urgent")
-                .width(Some(340.0))
-                .on_edit(|s: &mut App| &mut s.new_rule_query)
-                .build(k),
-        )
-        .child(
-            Button::new("Add")
-                .variant(ButtonVariant::Outline)
-                .control_size(ControlSize::Regular)
-                .on_press(|s: &mut App| s.add_custom_rule())
-                .build(k)
-                .key("add-rule-btn"),
-        );
-
     let ai_field = |label: &'static str, input: El| setup_row(k, label, input);
     let ai_section = col()
         .w_full()
@@ -3458,26 +3394,6 @@ fn settings_content(s: &App, k: &Kit) -> El {
                 .build(k)
                 .key("option-classify-private"),
         ));
-
-    let rules_section = col()
-        .w_full()
-        .gap(10.0)
-        .child(
-            col()
-                .gap(2.0)
-                .child(
-                    text("Extra GitHub searches")
-                        .font(k.ty.body)
-                        .color(c.text_base),
-                )
-                .child(
-                    text("Add pull requests you are not involved in, such as every PR in a repo. They show under Theirs and All.")
-                        .font(k.ty.small)
-                        .color(c.text_faint),
-                ),
-        )
-        .child(rules_list)
-        .child(add_rule_bar);
 
     let doc = col()
         .key("settings-column")
@@ -3539,8 +3455,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                                 .build(k)
                                 .key("option-max-age-days"),
                         ),
-                ))
-                .child(rules_section),
+                )),
         )
         .child(panel(k).child(ai_section))
         .child(panel(k).child(thresholds_section));
