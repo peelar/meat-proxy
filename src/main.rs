@@ -25,6 +25,11 @@ use model::{
 const ARMED_SECS: f32 = 4.0;
 /// How long a merged PR's row celebrates before it leaves the list.
 const CELEBRATION_SECS: f32 = 1.9;
+/// A pull request that just arrived slides in over this long, and its row stays tinted for the longer one.
+const ARRIVAL_SLIDE_SECS: f32 = 0.45;
+const ARRIVAL_GLOW_SECS: f32 = 2.6;
+/// Gap between rows arriving together, so a batch cascades.
+const ARRIVAL_STAGGER_SECS: f32 = 0.07;
 
 /// What to do first, then what to read, then the rest, until the user drags groups elsewhere.
 const DEFAULT_GROUP_ORDER: [u8; 11] = [8, 9, 0, 10, 1, 2, 3, 7, 4, 5, 6];
@@ -71,6 +76,8 @@ pub struct App {
     pub merging: Vec<String>,
     /// PRs just merged, with the moment they were: the row celebrates, then leaves the list.
     pub celebrations: Vec<(String, std::time::Instant)>,
+    /// Pull requests a sync just brought in, with when each starts to appear.
+    pub arrivals: Vec<(String, std::time::Instant)>,
     pub merge_worker: Latest<(String, Result<(), String>)>,
     pub last_synced: Option<std::time::Instant>,
     /// The status text as last drawn, to redraw only when it changes.
@@ -143,6 +150,7 @@ fn init() -> App {
         merge_armed: None,
         merging: Vec::new(),
         celebrations: Vec::new(),
+        arrivals: Vec::new(),
         merge_worker: Latest::default(),
         last_synced: None,
         sync_label_shown: String::new(),
@@ -269,6 +277,32 @@ impl App {
         if self.onboarded {
             self.page = Page::Inbox;
         }
+    }
+
+    /// Remember which pull requests a sync brought that the list did not have, so they can slide
+    /// in. Nothing arrives on the first fill of an empty list.
+    fn note_arrivals(&mut self, incoming: &[PullRequest]) {
+        if self.prs.is_empty() || self.preview {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let fresh = incoming
+            .iter()
+            .filter(|pr| !self.prs.iter().any(|known| known.id == pr.id))
+            .take(12);
+        for (n, pr) in fresh.enumerate() {
+            let at = now + std::time::Duration::from_secs_f32(n as f32 * ARRIVAL_STAGGER_SECS);
+            self.arrivals.push((pr.id.clone(), at));
+        }
+    }
+
+    /// Seconds since this pull request started to arrive, while it is still arriving.
+    fn arrival_age(&self, pr_id: &str) -> Option<f32> {
+        let (_, at) = self.arrivals.iter().find(|(id, _)| id == pr_id)?;
+        let age = std::time::Instant::now()
+            .saturating_duration_since(*at)
+            .as_secs_f32();
+        (age < ARRIVAL_GLOW_SECS).then_some(age)
     }
 
     /// What a judgment says about this pull request, if one was made.
@@ -991,6 +1025,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 s.sync_status = out.status;
                 s.last_synced = Some(std::time::Instant::now());
                 s.repos = github::infer_repos_from_prs(&out.prs, &s.repos);
+                s.note_arrivals(&out.prs);
                 s.prs = out.prs;
                 if s.rank_refresh_pending {
                     s.refresh_ranks();
@@ -1015,6 +1050,16 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             }
             Err(reason) => s.sync_status = SyncStatus::NeedsAuth { reason },
         }
+        changed = true;
+    }
+
+    if !s.arrivals.is_empty() {
+        let now = std::time::Instant::now();
+        s.arrivals.retain(|(_, at)| {
+            now.saturating_duration_since(*at).as_secs_f32() < ARRIVAL_GLOW_SECS || *at > now
+        });
+        // Redraw every frame while rows slide in and their tint fades.
+        tx.wake_after(std::time::Duration::from_millis(16));
         changed = true;
     }
 
@@ -1862,6 +1907,16 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
     if let Some(t) = celebrating {
         // A wash of mint that fades as the confetti flies.
         line = line.fill(mint(k).alpha((0.2 * (1.0 - t / 0.9)).max(0.0)));
+    }
+    if let Some(age) = s.arrival_age(&pr.id) {
+        // New here: it fades in and settles down a few pixels, then a mint tint ebbs away.
+        let slide = (age / ARRIVAL_SLIDE_SECS).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - slide).powi(3);
+        let glow = (1.0 - age / ARRIVAL_GLOW_SECS).clamp(0.0, 1.0);
+        line = line
+            .opacity(ease)
+            .offset(0.0, (1.0 - ease) * -10.0)
+            .fill(mint(k).alpha(0.16 * glow * glow));
     }
     line
 }
@@ -3171,6 +3226,16 @@ fn main() {
             s.last_synced = Some(std::time::Instant::now());
             s.refresh_ranks();
         }),
+        // A moment into two pull requests arriving: the tint is still fading.
+        ("arriving", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            let past = std::time::Instant::now() - std::time::Duration::from_millis(150);
+            s.arrivals = vec![
+                ("acme/engine#920".into(), past),
+                ("acme/engine#925".into(), past),
+            ];
+        }),
         ("empty", |s| {
             seed_preview(s);
             s.prs.clear();
@@ -3380,6 +3445,27 @@ mod tests {
         assert!(shown.iter().all(|g| state.collapsed_groups.contains(g)));
         state.toggle_collapse_all();
         assert!(state.collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn only_pull_requests_new_to_a_filled_list_arrive() {
+        let mut state = init();
+        let all = github::demo_prs();
+        // The first fill of an empty list animates nothing.
+        state.note_arrivals(&all);
+        assert!(state.arrivals.is_empty());
+        state.prs = all[..10].to_vec();
+        state.note_arrivals(&all);
+        let ids: Vec<&str> = state.arrivals.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids.len(), all.len() - 10);
+        assert!(ids.iter().all(|id| !state.prs.iter().any(|p| p.id == *id)));
+        // Each later arrival starts a little after the one before it, so a batch cascades.
+        let times: Vec<_> = state.arrivals.iter().map(|(_, at)| *at).collect();
+        assert!(times.windows(2).all(|w| w[0] <= w[1]));
+        // It ends: a long time on, nothing is arriving.
+        assert!(state.arrival_age(&state.arrivals[0].0.clone()).is_some());
+        state.arrivals[0].1 -= std::time::Duration::from_secs(10);
+        assert!(state.arrival_age(&state.arrivals[0].0.clone()).is_none());
     }
 
     #[test]
