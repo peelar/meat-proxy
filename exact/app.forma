@@ -1,5 +1,10 @@
 forma meat-proxy
 
+theme
+  // Black and white, as the Rune app was: filled buttons, switches and focus rings take the near-black of its
+  // primary buttons, not the platform's blue. A filled button's label stays white, so the dark side is a grey.
+  AccentColor = light-dark(#1c1c1e, #48484a)
+
 icons
   // Phosphor's (phosphor-icons.com, MIT), regular weight; the Mac draws the SF Symbol.
   icon.pull-request = icon(sf "arrow.triangle.pull", svg "icons/git-pull-request.svg")
