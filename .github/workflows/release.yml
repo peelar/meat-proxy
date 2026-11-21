@@ -1,5 +1,5 @@
-# Every push to main releases the Mac app as a GitHub release, which installed copies update to within the hour
-# (scripts/install-mac.sh):
+# Every push to main whose tests and clippy pass releases the Mac app as a GitHub release, which installed copies
+# update to within the hour (scripts/install-mac.sh). Pull requests run the same checks and release nothing.
 #
 #   meat-proxy-macos.zip   the ad-hoc signed app (./package.sh --zip)
 #   install-mac.sh         its installer
@@ -12,17 +12,37 @@ on:
   push:
     branches: [main]
     paths-ignore: ["**.md", "snapshots/**"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
-
-# One run at a time, so two pushes never take the same version.
-concurrency:
-  group: release
+  contents: read
 
 jobs:
+  # A release waits for this job, so a commit that fails its tests or clippy reaches no one.
+  check:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal -c clippy && rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
   release:
+    needs: check
+    if: github.event_name != 'pull_request'
+    # One release at a time, so two pushes never take the same version.
+    concurrency:
+      group: release
+    permissions:
+      contents: write
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4

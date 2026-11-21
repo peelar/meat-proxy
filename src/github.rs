@@ -519,7 +519,7 @@ pub fn fetch_live(
         .iter()
         .filter(|repo| !repo.removed && repo.activity >= BUSY_REPO_ACTIVITY)
         .collect();
-    busy.sort_by(|a, b| b.activity.cmp(&a.activity));
+    busy.sort_by_key(|pr| std::cmp::Reverse(pr.activity));
     searches.extend(busy.into_iter().take(BUSY_REPO_LIMIT).map(|repo| Search {
         query: format!(
             "is:pr is:open -is:draft -author:@me repo:{} updated:>={fresh_since}",
@@ -878,10 +878,9 @@ fn parse_graphql_pr(
                 .get("requestedReviewer")
                 .and_then(|u| u.get("login").or_else(|| u.get("name")))
                 .and_then(|l| l.as_str())
+                && !reviewers.iter().any(|r| r == user)
             {
-                if !reviewers.iter().any(|r| r == user) {
-                    reviewers.push(user.to_string());
-                }
+                reviewers.push(user.to_string());
             }
         }
     }

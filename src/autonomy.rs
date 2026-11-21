@@ -40,6 +40,9 @@ impl Action {
     }
 }
 
+/// What one action came to: the pull request's id, the action, and GitHub's answer.
+pub type Outcome = (String, Action, Result<(), String>);
+
 /// Names one action on one commit of one pull request.
 pub fn key(pr: &PullRequest, action: &Action) -> String {
     format!("{}:{}:{}", pr.id, action.name(), pr.head_oid)

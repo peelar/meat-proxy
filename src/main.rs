@@ -201,7 +201,7 @@ pub struct App {
     pub autonomy_reviewers: bool,
     /// Actions already taken (`autonomy::key`), so each happens once per commit.
     pub autonomy_done: std::collections::HashSet<String>,
-    pub autonomy_worker: Latest<Vec<(String, autonomy::Action, Result<(), String>)>>,
+    pub autonomy_worker: Latest<Vec<autonomy::Outcome>>,
     /// Pace: the score of quick approvals and merges, on unless switched off in Settings; its
     /// panel above the Inbox, and whether it is folded.
     pub pace_enabled: bool,
@@ -250,7 +250,7 @@ fn init() -> App {
         group_order: (0..sections::Layout::default().sections.len() as u8).collect(),
         collapsed_groups: Vec::new(),
         group_reorder: reorder::Reorder::new(),
-        max_age_input: TextEdit::new(&github::DEFAULT_MAX_AGE_DAYS.to_string()),
+        max_age_input: TextEdit::new(github::DEFAULT_MAX_AGE_DAYS.to_string()),
         filter: InboxFilter::Inbox,
         selected_repo: None,
         draft_stale_hours: 72,
@@ -406,7 +406,7 @@ impl App {
             let _ = db.set_setting("inbox_layout", &self.layout.fingerprint);
         }
         self.normalize_group_order();
-        self.max_age_input = TextEdit::new(&self.sync_options.max_age_days.to_string());
+        self.max_age_input = TextEdit::new(self.sync_options.max_age_days.to_string());
         self.last_notif_modified = snap.last_notif_modified;
         self.organization = TextEdit::new(&snap.organization);
         self.judgments = snap.judgments;
@@ -5658,7 +5658,7 @@ fn demo_pace_events() -> Vec<pace::Event> {
         let count = match back {
             0..=3 => 2 + h % 2,
             4 => 0,
-            _ if weekend => u64::from(h % 9 == 0),
+            _ if weekend => u64::from(h.is_multiple_of(9)),
             _ => h % 6,
         };
         for i in 0..count {
@@ -5666,7 +5666,7 @@ fn demo_pace_events() -> Vec<pace::Event> {
             let (merge, quick) = if back < 7 {
                 (i == 1, i == 1 || (back as u64 + i) % 3 != 2)
             } else {
-                ((h + i) % 3 == 0, (h + i) % 4 != 0)
+                ((h + i).is_multiple_of(3), !(h + i).is_multiple_of(4))
             };
             let wait = if quick { 4 + (h * 7 + i * 13) as i64 % 50 } else { 90 + h as i64 * 11 };
             out.push(pace::Event {
@@ -5867,7 +5867,8 @@ fn main() {
         traffic_lights: Some((16.0, 18.0)),
         drag_regions: true,
     };
-    let scenes: &[(&str, fn(&mut App))] = &[
+    type Scene = (&'static str, fn(&mut App));
+    let scenes: &[Scene] = &[
         ("onboarding", |s| {
             s.loading = false;
             s.sync_status = SyncStatus::NeedsAuth {
