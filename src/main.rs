@@ -27,6 +27,8 @@ use model::{
 /// The Inbox tab's groups, most urgent first, until the user drags them elsewhere.
 /// How long a pressed Merge button waits for its confirming press.
 const ARMED_SECS: f32 = 4.0;
+/// How long a row stays washed in its button's colour after an approve or merge lands.
+const INK_WASH_SECS: f32 = 1.4;
 /// How long a merged PR's row celebrates before it leaves the list.
 const CELEBRATION_SECS: f32 = 1.9;
 /// A pull request that just arrived slides in over this long, and its row stays tinted for the longer one.
@@ -83,8 +85,8 @@ pub struct App {
     /// The PR whose Approve button was pressed once and waits for a second press.
     pub approve_armed: Option<(String, std::time::Instant)>,
     pub approving: Vec<String>,
-    /// Approved from here; the button stays done until a sync moves the row.
-    pub approved: Vec<String>,
+    /// Approved from here, and when; the button stays done until a sync moves the row.
+    pub approved: Vec<(String, std::time::Instant)>,
     pub approve_worker: Latest<(String, Result<(), String>)>,
     /// PRs just merged, with the moment they were: the row celebrates, then leaves the list.
     pub celebrations: Vec<(String, std::time::Instant)>,
@@ -765,7 +767,7 @@ impl App {
 
     /// First press arms the button, the second approves. An approval can't be taken back.
     pub fn press_approve(&mut self, pr_id: &str) {
-        if !self.approving.is_empty() || self.approved.iter().any(|id| id == pr_id) {
+        if !self.approving.is_empty() || self.approved.iter().any(|(id, _)| id == pr_id) {
             return;
         }
         let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
@@ -1622,7 +1624,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.approving.retain(|a| *a != id);
         match result {
             Ok(()) => {
-                s.approved.push(id);
+                s.approved.push((id, std::time::Instant::now()));
                 s.trigger_sync();
             }
             Err(error) => s.status_banner = Some(format!("Could not approve. {error}")),
@@ -1641,6 +1643,14 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > ARMED_SECS)
     {
         s.merge_armed = None;
+        changed = true;
+    }
+    // Redraw every frame while an armed button's bar drains or a fresh approval's row washes.
+    if s.approve_armed.is_some()
+        || s.merge_armed.is_some()
+        || s.approved.iter().any(|(_, at)| at.elapsed().as_secs_f32() < INK_WASH_SECS)
+    {
+        tx.wake_after(std::time::Duration::from_millis(16));
         changed = true;
     }
     if !s.celebrations.is_empty() {
@@ -2866,9 +2876,14 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
                 .child(metadata),
         )
         .child(right_side);
-    if let Some(t) = celebrating {
-        // A wash of mint that fades as the confetti flies.
-        line = line.fill(mint(k).alpha((0.2 * (1.0 - t / 0.9)).max(0.0)));
+    let approved_at = s
+        .approved
+        .iter()
+        .find(|(id, _)| *id == pr.id)
+        .map(|(_, at)| (mint(k), at.elapsed().as_secs_f32()));
+    if let Some((tone, t)) = celebrating.map(|t| (merge_tone(k), t)).or(approved_at) {
+        // The button's colour washes over the row once and ebbs away.
+        line = line.fill(tone.alpha((0.16 * (1.0 - t / INK_WASH_SECS)).max(0.0)));
     }
     if let Some(age) = s.arrival_age(&pr.id) {
         // New here: it fades in and settles down a few pixels, then a mint tint ebbs away.
@@ -2960,80 +2975,145 @@ fn clean_description(raw: &str) -> String {
     }
 }
 
-/// A button label in the button's own ink; the icon takes `tint`, if any, while the pointer is on
-/// the button (its wrapper must be a `hover_group`). A disabled button passes none.
-fn tinted_label(
-    glyph: &'static rune::Icon,
-    tint: Option<Color>,
-    label: &'static str,
-) -> impl FnOnce(TextStyle, Color) -> El + 'static {
-    move |font, ink| {
-        let icon = rune::icon(glyph, 16.0).color(ink);
-        row()
-            .center_y()
-            .gap(6.0)
-            .child(match tint {
-                Some(tint) => icon.group_color(tint),
-                None => icon,
-            })
-            .child(text(label).font(font).color(ink))
-    }
+/// What a Quiet ink button shows: at rest it has no fill, only its icon in its colour.
+#[derive(Clone, Copy, PartialEq)]
+enum Ink {
+    Rest,
+    /// Waiting for the confirming press, with the share of the wait left.
+    Armed(f32),
+    /// Switched on (auto-merge): it keeps its tint.
+    On,
+    Busy,
+    Disabled,
+    /// Landed `age` seconds ago: it pops once.
+    Done(f32),
 }
 
-/// Merge's violet: it has to read on the white Merge button and on the dark ones.
-fn merge_ink() -> Color {
-    oklch(0.56, 0.2, 295.0)
+/// Approve and Merge: no fill at rest, a tint under the pointer that deepens as the button sinks,
+/// and the colour itself once it is armed or done. Every reward stays inside the button's box.
+fn ink_button(
+    k: &Kit,
+    tone: Color,
+    glyph: &'static rune::Icon,
+    label: &str,
+    ink: Ink,
+    key: String,
+) -> El {
+    let c = &k.c;
+    let live = matches!(ink, Ink::Rest | Ink::Armed(_) | Ink::On);
+    let (text_ink, icon_ink) = match ink {
+        Ink::Rest => (c.text_base, tone),
+        Ink::Busy => (c.text_muted, c.text_muted),
+        Ink::Disabled => (c.text_faint, c.text_faint),
+        Ink::Armed(_) | Ink::On | Ink::Done(_) => (tone, tone),
+    };
+    let icon = if ink == Ink::Busy {
+        rune_kit::Spinner::new().size(14.0).color(c.text_muted).build(k)
+    } else {
+        rune::icon(glyph, 14.0).color(icon_ink)
+    };
+    let mut button = row()
+        .key(key)
+        .role("button")
+        .label(label.to_owned())
+        .focusable(live)
+        .disabled(!live)
+        .h(26.0)
+        .min_w(92.0)
+        .px(10.0)
+        .radius(6.0)
+        .center()
+        .gap(6.0)
+        .cursor(if live {
+            rune::Cursor::Pointer
+        } else {
+            rune::Cursor::Default
+        })
+        .child(icon.a11y_hidden())
+        .child(text(label.to_owned()).font(TextStyle::new(12.5, 600.0)).color(text_ink));
+    if live {
+        button = button
+            .hover(tone.alpha(0.12))
+            .press(tone.alpha(0.12))
+            .press_scale(0.94);
+    }
+    match ink {
+        Ink::Armed(left) => {
+            // The wait for the second press drains along the bottom edge.
+            button = button.fill(tone.alpha(0.14)).child(
+                row()
+                    .pin(Some(6.0), None, Some(6.0), Some(2.0))
+                    .h(2.0)
+                    .instant_changes()
+                    .child(el().h_full().w_frac(left.clamp(0.0, 1.0)).radius(1.0).fill(tone)),
+            );
+        }
+        Ink::On => button = button.fill(tone.alpha(0.14)),
+        Ink::Done(age) => {
+            // A small overshoot from 0.88, once.
+            let p = (age / 0.32).clamp(0.0, 1.0) - 1.0;
+            let back = 1.0 + 2.7 * p * p * p + 1.7 * p * p;
+            button = button
+                .scale(0.88 + 0.12 * back)
+                .scale_motion(rune::Anim::INSTANT);
+        }
+        _ => {}
+    }
+    button
+}
+
+/// Merge's violet, lighter on dark so it reads as text.
+fn merge_tone(k: &Kit) -> Color {
+    oklch(if k.dark { 0.72 } else { 0.56 }, if k.dark { 0.17 } else { 0.2 }, 295.0)
+}
+
+fn armed_left(armed: &Option<(String, std::time::Instant)>, id: &str) -> Option<f32> {
+    armed
+        .as_ref()
+        .filter(|(armed, _)| armed == id)
+        .map(|(_, at)| 1.0 - at.elapsed().as_secs_f32() / ARMED_SECS)
 }
 
 fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let id = pr.id.clone();
-    let done = s.approved.contains(&pr.id);
+    let done = s
+        .approved
+        .iter()
+        .find(|(a, _)| *a == pr.id)
+        .map(|(_, at)| at.elapsed().as_secs_f32());
     let busy = s.approving.contains(&pr.id);
-    let armed = s
-        .approve_armed
-        .as_ref()
-        .is_some_and(|(armed, _)| *armed == pr.id);
-    let button = if done {
-        Button::new("Approved")
-            .variant(ButtonVariant::Outline)
-            .icon(&rune_kit::glyphs::CHECK)
-            .disabled(true)
+    let armed = armed_left(&s.approve_armed, &pr.id);
+    let (label, ink) = if let Some(age) = done {
+        ("Approved", Ink::Done(age))
     } else if busy {
-        Button::new("Approving…")
-            .variant(ButtonVariant::Outline)
-            .disabled(true)
-    } else if armed {
-        Button::new("Confirm approve").variant(ButtonVariant::Submit)
+        ("Approving…", Ink::Busy)
+    } else if let Some(left) = armed {
+        ("Press again", Ink::Armed(left))
     } else {
-        // The text is the button's own; the icon carries the colour: mint for a check.
-        Button::new("Approve")
-            .variant(ButtonVariant::Outline)
-            .label_with(tinted_label(
-                &rune_kit::glyphs::CHECK,
-                Some(mint(k)),
-                "Approve",
-            ))
+        ("Approve", Ink::Rest)
+    };
+    let mut button = ink_button(
+        k,
+        mint(k),
+        &rune_kit::glyphs::CHECK,
+        label,
+        ink,
+        format!("approve-{}", pr.id),
+    );
+    if done.is_none() && !busy {
+        button = button.on_press(move |s: &mut App| s.press_approve(&id));
     }
-    .control_size(ControlSize::Small)
-    .on_press(move |s: &mut App| s.press_approve(&id))
-    .build(k)
-    .key(format!("approve-{}", pr.id))
-    .cursor(if done || busy {
-        rune::Cursor::Default
-    } else {
-        rune::Cursor::Pointer
-    });
     let wrap = row()
         .center_y()
         .hover_group()
-        .help(if armed {
+        .help(if armed.is_some() {
             format!("Press again to approve {}#{}", pr.repo, pr.number)
         } else {
             "Approve without a comment".to_owned()
         })
         .child(button);
     // It shows while the row is hovered, and stays once it is armed, busy or done.
-    if armed || busy || done {
+    if armed.is_some() || busy || done.is_some() {
         wrap
     } else {
         wrap.group_opacity(0.0, 1.0)
@@ -3093,18 +3173,18 @@ fn finished_row(k: &Kit, t: &model::Tracked) -> El {
 }
 
 /// The Merge button on one of the user's PRs: off until GitHub says it can merge, armed by the
-/// first press, and replaced by a celebration once the merge lands.
+/// first press, and done once the merge lands, while the row leaves.
 fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
+    let tone = merge_tone(k);
+    let key = format!("merge-{}", pr.id);
     if let Some((_, at)) = s.celebrations.iter().find(|(id, _)| *id == pr.id) {
-        return celebration(k, at.elapsed().as_secs_f32());
+        let age = at.elapsed().as_secs_f32();
+        return ink_button(k, tone, &rune_kit::glyphs::CHECK, "Merged", Ink::Done(age), key);
     }
     let id = pr.id.clone();
     let ready = pr.merge_readiness.is_ready();
     let merging = s.merging.contains(&pr.id);
-    let armed = s
-        .merge_armed
-        .as_ref()
-        .is_some_and(|(armed, _)| *armed == pr.id);
+    let armed = armed_left(&s.merge_armed, &pr.id);
     let busy = !s.merging.is_empty();
     // Not mergeable yet: GitHub can merge it by itself once it is, which is its own state.
     let auto_on = pr.auto_merge == model::AutoMerge::On;
@@ -3112,51 +3192,29 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let auto = auto_on || auto_offer;
     let auto_busy = s.auto_merging.contains(&pr.id);
 
-    let live = !(merging || (!ready && !auto) || (busy && !auto));
-    let tint = live.then(merge_ink);
-    let button = if merging {
-        Button::new("Merging…")
-            .variant(ButtonVariant::Outline)
-            .disabled(true)
-    } else if armed {
-        Button::new("Confirm merge")
-            .label_with(tinted_label(&MERGE, tint, "Confirm merge"))
-            .variant(ButtonVariant::Submit)
+    let (glyph, label, ink) = if merging {
+        (&MERGE, "Merging…", Ink::Busy)
+    } else if let Some(left) = armed {
+        (&MERGE, "Press again", Ink::Armed(left))
     } else if auto_on {
-        Button::new("Auto-merge on")
-            .variant(ButtonVariant::Submit)
-            .icon(&BOLT)
-            .disabled(auto_busy)
+        (&BOLT, "Auto-merge on", if auto_busy { Ink::Busy } else { Ink::On })
     } else if auto_offer {
-        Button::new("Auto-merge")
-            .variant(ButtonVariant::Outline)
-            .icon(&BOLT)
-            .disabled(auto_busy)
+        (&BOLT, "Auto-merge", if auto_busy { Ink::Busy } else { Ink::Rest })
+    } else if !ready || busy {
+        (&MERGE, "Merge", Ink::Disabled)
     } else {
-        Button::new("Merge")
-            .label_with(tinted_label(&MERGE, tint, "Merge"))
-            .variant(if ready {
-                ButtonVariant::Contrast
+        (&MERGE, "Merge", Ink::Rest)
+    };
+    let mut button = ink_button(k, tone, glyph, label, ink, key);
+    if matches!(ink, Ink::Rest | Ink::Armed(_) | Ink::On) {
+        button = button.on_press(move |s: &mut App| {
+            if auto {
+                s.press_auto_merge(&id)
             } else {
-                ButtonVariant::Outline
-            })
-            .disabled(!ready || busy)
+                s.press_merge(&id)
+            }
+        });
     }
-    .control_size(ControlSize::Small)
-    .on_press(move |s: &mut App| {
-        if auto {
-            s.press_auto_merge(&id)
-        } else {
-            s.press_merge(&id)
-        }
-    })
-    .build(k)
-    .key(format!("merge-{}", pr.id))
-    .cursor(if !live {
-        rune::Cursor::Default
-    } else {
-        rune::Cursor::Pointer
-    });
 
     row()
         .center_y()
@@ -3168,7 +3226,7 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
                 "Merge by itself once GitHub allows it ({}). Click to turn on",
                 pr.merge_readiness.blocked_reason().to_lowercase()
             )
-        } else if armed {
+        } else if armed.is_some() {
             format!(
                 "Press again to {} merge {}#{}",
                 pr.merge_method.label(),
@@ -3186,21 +3244,6 @@ fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
             pr.merge_readiness.blocked_reason().to_owned()
         })
         .child(button)
-}
-
-/// "Thumb exercised ✓", fading as the row leaves. It never changes size, so nothing around it moves.
-fn celebration(k: &Kit, t: f32) -> El {
-    let fade = (1.0 - t / CELEBRATION_SECS).clamp(0.0, 1.0);
-    row()
-        .key("merge-celebration")
-        .size(150.0, 24.0)
-        .center()
-        .child(
-            text("Thumb exercised ✓")
-                .font(TextStyle::new(13.0, 700.0))
-                .color(mint(k))
-                .opacity(fade.sqrt()),
-        )
 }
 
 /// One light icon button on a repository header, tinted `hue` (oklch degrees).
@@ -4640,6 +4683,16 @@ fn main() {
                 s.celebrations
                     .push((pr.id.clone(), std::time::Instant::now()));
             }
+        }),
+        // Approve and Merge mid-flight: one of each armed, one approval just landed.
+        ("buttons", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.filter = InboxFilter::Inbox;
+            let ago = |secs: f32| std::time::Instant::now() - std::time::Duration::from_secs_f32(secs);
+            s.approve_armed = Some(("acme/engine#418".into(), ago(1.5)));
+            s.approved = vec![("acme/cli#904".into(), ago(0.6))];
+            s.merge_armed = Some(("acme/cli#908".into(), ago(1.0)));
         }),
         ("action-needed", |s| {
             seed_preview(s);

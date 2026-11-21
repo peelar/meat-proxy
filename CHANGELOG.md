@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+
+- Approve and Merge are quieter at rest: no fill, only the icon in green or violet. The first press fills the button and a thin bar drains until the second press times out; when it lands, "Approved" or "Merged" pops in once and the row washes in its color for a moment.
+- Every new approval on your pull requests notifies you ("@kai approved acme/cli#908"), including second approvals and approvals in repositories that don't require reviews.
+
 ## 0.3.1
 
 - First launch opens with an intro: a finger presses the approve button, and the logo and name fly into the header. A click or Escape skips it; Reduce Motion turns it off.
