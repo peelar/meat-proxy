@@ -168,13 +168,17 @@ pub fn login_in_browser(
     }
 }
 
+/// GitHub's largest page of notifications, and how many pages one check reads at most.
+const NOTIFICATIONS_PER_PAGE: usize = 50;
+const NOTIFICATIONS_PAGES: usize = 3;
+
 pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPoll, String> {
     let mut cmd = gh_command();
     cmd.args([
         "api",
         "--hostname",
         "github.com",
-        "/notifications?participating=true&per_page=50",
+        &format!("/notifications?participating=true&per_page={NOTIFICATIONS_PER_PAGE}"),
         "-i",
     ]);
     if let Some(lm) = last_modified {
@@ -213,7 +217,29 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
 
-    let items: Vec<serde_json::Value> = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let mut items: Vec<serde_json::Value> = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    // A full page may have more behind it. A few more pages cover a busy morning; the full sync
+    // each minute finds anything older.
+    let mut page = 1;
+    let mut last = items.len();
+    while last == NOTIFICATIONS_PER_PAGE && page < NOTIFICATIONS_PAGES {
+        page += 1;
+        let out = gh_command()
+            .args([
+                "api",
+                "--hostname",
+                "github.com",
+                &format!("/notifications?participating=true&per_page={NOTIFICATIONS_PER_PAGE}&page={page}"),
+            ])
+            .run_gh()?;
+        if !out.status.success() {
+            break;
+        }
+        let more: Vec<serde_json::Value> =
+            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+        last = more.len();
+        items.extend(more);
+    }
     let mut events = Vec::new();
     for item in items {
         let reason = item["reason"].as_str().unwrap_or_default();
