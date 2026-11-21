@@ -826,7 +826,7 @@ mod tests {
     use serde_json::json;
 
     fn pr(title: &str) -> PullRequest {
-        let mut pr = crate::github::demo_prs().remove(0);
+        let mut pr = crate::scenes::demo_prs().remove(0);
         pr.title = title.into();
         pr.body = "Fixes the thing.".into();
         pr.additions = 40;

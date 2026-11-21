@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn urgent_child_brings_its_stack_forward_and_hidden_parent_stays_hidden() {
-        let all = crate::github::demo_prs();
+        let all = crate::scenes::demo_prs();
         let by_number = |id| all.iter().find(|p| p.number == id).unwrap().clone();
         let visible = vec![
             by_number(421),
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn fork_heads_ambiguous_branches_and_cycles_do_not_create_false_stacks() {
-        let all = crate::github::demo_prs();
+        let all = crate::scenes::demo_prs();
         let mut prs: Vec<_> = all
             .into_iter()
             .filter(|p| matches!(p.number, 412 | 418))

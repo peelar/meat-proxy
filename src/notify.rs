@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn each_new_approval_and_review_request_notifies() {
         // Your PR in a repository that doesn't require reviews: GitHub never sets a decision.
-        let mut mine = crate::github::demo_prs()
+        let mut mine = crate::scenes::demo_prs()
             .into_iter()
             .find(|p| p.ownership == Ownership::Mine && !p.is_draft)
             .unwrap();
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(titles(&[waiting], &[decided]), vec![format!("@kai approved {name}")]);
 
         // Someone asks for your review.
-        let mut theirs = crate::github::demo_prs()
+        let mut theirs = crate::scenes::demo_prs()
             .into_iter()
             .find(|p| p.ownership == Ownership::Theirs)
             .unwrap();
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn your_pull_request_moving_away_from_or_toward_its_merge_notifies() {
-        let mut mine = crate::github::demo_prs()
+        let mut mine = crate::scenes::demo_prs()
             .into_iter()
             .find(|p| p.ownership == Ownership::Mine && !p.is_draft)
             .unwrap();

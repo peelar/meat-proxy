@@ -89,7 +89,7 @@ mod tests {
     fn teammates_sort_ahead_of_outsiders_then_newest_first() {
         let mut s = init();
         s.filter = InboxFilter::All;
-        let mut prs = github::demo_prs();
+        let mut prs = scenes::demo_prs();
         prs.retain(|p| p.repo == "acme/cli");
         for pr in &mut prs {
             pr.external = false;
@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn unified_inbox_sorts_assigned_and_stale_nudges_first_and_persists_to_sqlite() {
         let db = Database::open_in_memory().unwrap();
-        let prs = github::demo_prs();
+        let prs = scenes::demo_prs();
         db.save_prs(&prs).unwrap();
         db.save_repos(&github::infer_repos_from_prs(&prs, &[]))
             .unwrap();
@@ -208,7 +208,7 @@ mod tests {
         state.sync_status = SyncStatus::Connected {
             username: "octocat".into(),
         };
-        let demo = github::demo_prs();
+        let demo = scenes::demo_prs();
         state.prs = (0..40)
             .map(|n| {
                 let mut pr = demo[0].clone();
@@ -259,7 +259,7 @@ mod tests {
         assert!(state.collapsed_groups.is_empty());
 
         state.filter = InboxFilter::Inbox;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let shown = state.visible_groups();
         assert!(!shown.is_empty());
         state.toggle_collapse_all();
@@ -288,7 +288,7 @@ mod tests {
     fn review_requests_go_to_the_first_section_that_matches() {
         let mut state = init();
         state.preview = true;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let mut pr = state.prs.iter().find(|p| p.number == 904).unwrap().clone();
         pr.external = false;
         assert_eq!(section_name(&state, &pr).as_deref(), Some("Review these"));
@@ -343,7 +343,7 @@ mod tests {
         state.preview = true;
         state.ai_feature = true;
         state.ai_enabled = true;
-        let mut review = github::demo_prs()
+        let mut review = scenes::demo_prs()
             .into_iter()
             .find(|p| p.number == 904)
             .unwrap();
@@ -385,7 +385,7 @@ mod tests {
     fn outside_contributors_can_be_hidden_with_the_flag() {
         let mut state = init();
         state.preview = true;
-        let mut pr = github::demo_prs()
+        let mut pr = scenes::demo_prs()
             .into_iter()
             .find(|p| p.number == 904)
             .unwrap();
@@ -428,7 +428,7 @@ mod tests {
     fn an_ignored_pull_request_moves_to_its_own_section_and_stops_counting() {
         let mut state = init();
         state.preview = true;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let now = current_epoch_hour();
         let pr = state.prs.iter().find(|p| p.number == 920).unwrap().clone();
         let counted = |s: &App| s.prs.iter().filter(|p| s.needs_you(p, now)).count();
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn the_age_limit_looks_at_when_it_was_opened_as_well_as_when_it_last_moved() {
-        let mut pr = github::demo_prs().remove(0);
+        let mut pr = scenes::demo_prs().remove(0);
         pr.opened_hours = 24 * 190; // opened in May
         pr.idle_hours = 24 * 14; // an edit two weeks ago
         assert!(!pr.within_days(30), "an edit does not make it young");
@@ -486,7 +486,7 @@ mod tests {
     fn auto_merge_is_a_state_of_the_merge_button() {
         let mut state = init();
         state.preview = true;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let id = "acme/engine#412".to_owned();
         let set = |s: &mut App, auto: model::AutoMerge, ready: model::MergeReadiness| {
             let pr = s.prs.iter_mut().find(|p| p.id == id).unwrap();
@@ -522,7 +522,7 @@ mod tests {
         state.preview = true;
         state.page = Page::Inbox;
         state.filter = InboxFilter::Inbox;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let mut merged = state.prs.iter().find(|p| p.number == 908).unwrap().clone();
         merged.id = "acme/cli#999".into();
         merged.number = 999;
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn who_approved_is_named() {
-        let mut pr = github::demo_prs().remove(0);
+        let mut pr = scenes::demo_prs().remove(0);
         assert_eq!(pr.approval_label(), "Approved");
         pr.approved_by = vec!["lkostrowski".into()];
         assert_eq!(pr.approval_label(), "lkostrowski approved");
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn only_pull_requests_new_to_a_filled_list_arrive() {
         let mut state = init();
-        let all = github::demo_prs();
+        let all = scenes::demo_prs();
         // The first fill of an empty list animates nothing.
         state.note_arrivals(&all);
         assert!(state.arrivals.is_empty());
@@ -605,7 +605,7 @@ mod tests {
     fn merge_needs_a_ready_pr_and_a_second_press() {
         let mut state = init();
         state.preview = true;
-        let mut blocked = github::demo_prs()[1].clone();
+        let mut blocked = scenes::demo_prs()[1].clone();
         blocked.merge_readiness = model::MergeReadiness::NeedsReview;
         let mut ready = blocked.clone();
         ready.id = "o/r#9".into();
@@ -626,7 +626,7 @@ mod tests {
     fn a_row_opens_on_press_and_approve_needs_two() {
         let mut state = init();
         state.preview = true;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let id = state.prs[0].id.clone();
         state.toggle_expanded(&id);
         assert!(state.expanded.contains(&id));
@@ -752,7 +752,7 @@ mod tests {
     fn old_prs_are_hidden_after_the_limit_and_kept_when_it_is_zero() {
         let mut state = init();
         state.preview = true;
-        let demo = github::demo_prs();
+        let demo = scenes::demo_prs();
         let (fresh, stale) = (demo[0].clone(), {
             let mut pr = demo[1].clone();
             pr.idle_hours = 24 * 40;
@@ -867,7 +867,7 @@ mod tests {
         state.preview = true;
         state.loading = false;
         state.page = Page::Inbox;
-        state.prs = github::demo_prs();
+        state.prs = scenes::demo_prs();
         let id = "acme/cli#904";
         let pr = state.prs.iter_mut().find(|p| p.id == id).unwrap();
         let asked = chrono::Utc::now() - chrono::Duration::minutes(12);

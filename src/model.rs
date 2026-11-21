@@ -1,15 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 /// Whether a PR belongs to the current user ("Mine") or someone else ("Theirs").
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ownership {
     Mine,
+    #[default]
     Theirs,
 }
 
 /// Review status of a Pull Request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewState {
+    #[default]
     None,
     ReviewRequested,
     ChangesRequested,
@@ -40,11 +42,12 @@ impl ReviewState {
 }
 
 /// CI check status of a Pull Request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CiStatus {
     Passing,
     Pending,
     Failing,
+    #[default]
     None,
 }
 
@@ -69,9 +72,10 @@ impl CiStatus {
 }
 
 /// Why an incoming ("Theirs") PR is in the inbox.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IncomingReason {
     /// None (for "Mine" PRs)
+    #[default]
     NotIncoming,
     /// Explicitly assigned or review-requested to `@me`
     AssignedOrReviewRequested,
@@ -321,7 +325,7 @@ impl MergeMethod {
 }
 
 /// A Pull Request item in the unified inbox.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequest {
     /// Unique identifier (`owner/repo#number`)
     pub id: String,
@@ -899,43 +903,13 @@ mod tests {
             repo: repo.into(),
             number,
             title: "t".into(),
-            url: String::new(),
             author: "me".into(),
             ownership: Ownership::Mine,
-            is_draft: false,
             review_state: ReviewState::ReviewRequested,
             ci_status: CiStatus::Passing,
-            incoming_reason: IncomingReason::NotIncoming,
-            reviewers: Vec::new(),
             idle_hours: idle_days * 24,
-            approved_by: Vec::new(),
-            opened_hours: 0,
             unreviewed_hours: idle_days * 24,
-            head_ref: String::new(),
-            head_repo: None,
-            stack_base: None,
-            matched_rule: None,
-            snoozed_until_hour: 0,
-            additions: 0,
-            deletions: 0,
-            merge_readiness: MergeReadiness::Unknown,
-            merge_method: MergeMethod::Squash,
-            auto_merge: AutoMerge::Unavailable,
-            external: false,
-            body: String::new(),
-            description: String::new(),
-            labels: Vec::new(),
-            private_repo: false,
-            files: Vec::new(),
-            failing_checks: Vec::new(),
-            can_update_branch: false,
-            unanswered_threads: None,
-            asked: None,
-            head_oid: String::new(),
-            last_commit_at: String::new(),
-            requested_reviewers: Vec::new(),
-            changes_requested: Vec::new(),
-            approved_at: String::new(),
+            ..Default::default()
         }
     }
 

@@ -442,7 +442,7 @@ mod tests {
     }
 
     fn review() -> PullRequest {
-        let mut pr = crate::github::demo_prs().remove(0);
+        let mut pr = crate::scenes::demo_prs().remove(0);
         pr.additions = 40;
         pr.deletions = 10;
         pr.external = false;

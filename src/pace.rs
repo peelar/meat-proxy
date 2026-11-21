@@ -337,7 +337,7 @@ mod tests {
     }
 
     fn asked(minutes_ago: i64, lines: u32) -> PullRequest {
-        let mut pr = crate::github::demo_prs().remove(0);
+        let mut pr = crate::scenes::demo_prs().remove(0);
         let at = DateTime::from_timestamp(now() - minutes_ago * 60, 0).unwrap();
         pr.asked = Some(Ask {
             at: at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

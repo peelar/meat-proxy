@@ -609,24 +609,7 @@ impl Database {
                 additions: row.get::<_, i64>(17)? as u32,
                 deletions: row.get::<_, i64>(18)? as u32,
                 // Merge state is fetched fresh on every sync, never stored.
-                merge_readiness: Default::default(),
-                merge_method: Default::default(),
-                auto_merge: Default::default(),
-                external: false,
-                body: String::new(),
-                description: String::new(),
-                labels: Vec::new(),
-                private_repo: false,
-                files: Vec::new(),
-                failing_checks: Vec::new(),
-                can_update_branch: false,
-                unanswered_threads: None,
-                asked: None,
-                head_oid: String::new(),
-                last_commit_at: String::new(),
-                requested_reviewers: Vec::new(),
-                changes_requested: Vec::new(),
-                approved_at: String::new(),
+                ..Default::default()
             })
         })?;
         let mut out = Vec::new();

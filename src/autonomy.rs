@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     fn mine() -> PullRequest {
-        let mut pr = crate::github::demo_prs()
+        let mut pr = crate::scenes::demo_prs()
             .into_iter()
             .find(|p| p.ownership == Ownership::Mine && !p.is_draft)
             .unwrap();

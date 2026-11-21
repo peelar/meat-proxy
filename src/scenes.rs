@@ -1,6 +1,290 @@
 //! Demo data for previews and snapshots.
 
 use crate::*;
+use model::{IncomingReason, ReviewState};
+
+/// The pull requests previews, scenes and tests start from: a few repositories' worth, in every
+/// state the Inbox shows.
+pub(crate) fn demo_prs() -> Vec<PullRequest> {
+    let mut prs = vec![
+        // --- acme/engine (High priority repo: assigned PRs + stale draft + unreviewed open PR) ---
+        PullRequest {
+            id: "acme/engine#418".to_string(),
+            repo: "acme/engine".to_string(),
+            number: 418,
+            title: "metal-backend: coalesce offscreen Rgba16Float layer binds during pinch"
+                .to_string(),
+            url: "https://github.com/acme/engine/pull/418".to_string(),
+            author: "kai".to_string(),
+            review_state: ReviewState::ReviewRequested,
+            ci_status: CiStatus::Passing,
+            incoming_reason: IncomingReason::AssignedOrReviewRequested,
+            reviewers: vec!["mira".to_string()],
+            idle_hours: 1,
+            unreviewed_hours: 1,
+            head_ref: "metal-layer-coalesce".to_string(),
+            head_repo: Some("acme/engine".into()),
+            matched_rule: Some("Assigned to you".to_string()),
+            additions: 142,
+            deletions: 38,
+            ..Default::default()
+        },
+        PullRequest {
+            id: "acme/engine#412".to_string(),
+            repo: "acme/engine".to_string(),
+            number: 412,
+            title: "taffy: preserve subpixel baseline cache across color-only commits".to_string(),
+            url: "https://github.com/acme/engine/pull/412".to_string(),
+            author: "mira".to_string(),
+            ownership: Ownership::Mine,
+            ci_status: CiStatus::Passing,
+            reviewers: Vec::new(), // No reviewer assigned -> NUDGE to send to colleague!
+            idle_hours: 54,
+            unreviewed_hours: 54, // > 48h (2 days) without review -> NUDGE!
+            head_ref: "feat/baseline-cache".to_string(),
+            head_repo: Some("acme/engine".into()),
+            stack_base: Some("metal-layer-coalesce".into()),
+            additions: 89,
+            deletions: 14,
+            ..Default::default()
+        },
+        PullRequest {
+            id: "acme/engine#397".to_string(),
+            repo: "acme/engine".to_string(),
+            number: 397,
+            title: "WIP: experimental CoreAudio low-latency spatial voice ring".to_string(),
+            url: "https://github.com/acme/engine/pull/397".to_string(),
+            author: "mira".to_string(),
+            ownership: Ownership::Mine,
+            is_draft: true,
+            ci_status: CiStatus::Pending,
+            idle_hours: 120, // 5 days idle draft -> NUDGE!
+            unreviewed_hours: 120,
+            head_ref: "draft/coreaudio-ring".to_string(),
+            head_repo: Some("acme/engine".into()),
+            additions: 412,
+            deletions: 19,
+            ..Default::default()
+        },
+        PullRequest {
+            id: "acme/engine#421".to_string(),
+            repo: "acme/engine".to_string(),
+            number: 421,
+            title: "windfoil: tighten CJK autohint stem dilation at 1x scale".to_string(),
+            url: "https://github.com/acme/engine/pull/421".to_string(),
+            author: "sam".to_string(),
+            review_state: ReviewState::Commented,
+            ci_status: CiStatus::Passing,
+            incoming_reason: IncomingReason::SubscribedRule,
+            reviewers: vec!["kai".to_string()],
+            idle_hours: 5,
+            unreviewed_hours: 5,
+            head_ref: "windfoil-cjk-1x".to_string(),
+            head_repo: Some("acme/engine".into()),
+            stack_base: Some("feat/baseline-cache".into()),
+            matched_rule: Some("Core Runtime Non-Draft PRs".to_string()),
+            additions: 64,
+            deletions: 29,
+            ..Default::default()
+        },
+        // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
+        PullRequest {
+            id: "acme/cli#904".to_string(),
+            repo: "acme/cli".to_string(),
+            number: 904,
+            title: "acp: stream tool call diffs over zero-copy IPC channel".to_string(),
+            url: "https://github.com/acme/cli/pull/904".to_string(),
+            author: "juno".to_string(),
+            review_state: ReviewState::ReviewRequested,
+            ci_status: CiStatus::Passing,
+            incoming_reason: IncomingReason::AssignedOrReviewRequested,
+            reviewers: vec!["mira".to_string()],
+            idle_hours: 3,
+            unreviewed_hours: 3,
+            head_ref: "acp-zero-copy-diffs".to_string(),
+            head_repo: Some("acme/cli".into()),
+            matched_rule: Some("Assigned to you".to_string()),
+            additions: 275,
+            deletions: 84,
+            external: true,
+            ..Default::default()
+        },
+        PullRequest {
+            id: "acme/cli#889".to_string(),
+            repo: "acme/cli".to_string(),
+            number: 889,
+            title: "session: retry transient rate-limit 529 with jittered backoff".to_string(),
+            url: "https://github.com/acme/cli/pull/889".to_string(),
+            author: "mira".to_string(),
+            ownership: Ownership::Mine,
+            review_state: ReviewState::ReviewRequested,
+            ci_status: CiStatus::Passing,
+            reviewers: vec!["juno".to_string()],
+            idle_hours: 74,
+            unreviewed_hours: 74, // Waiting on @rekram for 3 days -> NUDGE to ping colleague!
+            head_ref: "fix/retry-529-backoff".to_string(),
+            head_repo: Some("acme/cli".into()),
+            additions: 53,
+            deletions: 12,
+            ..Default::default()
+        },
+        PullRequest {
+            id: "acme/cli#908".to_string(),
+            repo: "acme/cli".to_string(),
+            number: 908,
+            title: "cli: add `--json-events` flag for headless subagent pipelines".to_string(),
+            url: "https://github.com/acme/cli/pull/908".to_string(),
+            author: "mira".to_string(),
+            ownership: Ownership::Mine,
+            review_state: ReviewState::Approved,
+            ci_status: CiStatus::Passing,
+            reviewers: vec!["kai".to_string()],
+            idle_hours: 2,
+            head_ref: "feat/json-events".to_string(),
+            head_repo: Some("acme/cli".into()),
+            additions: 118,
+            deletions: 7,
+            ..Default::default()
+        },
+        // --- acme/inbox (Third repo: active draft + changes requested) ---
+        PullRequest {
+            id: "acme/inbox#14".to_string(),
+            repo: "acme/inbox".to_string(),
+            number: 14,
+            title: "sqlite: persist per-repo smart importance weights & snooze deadlines"
+                .to_string(),
+            url: "https://github.com/acme/inbox/pull/14".to_string(),
+            author: "mira".to_string(),
+            ownership: Ownership::Mine,
+            review_state: ReviewState::ChangesRequested,
+            ci_status: CiStatus::Failing,
+            reviewers: vec!["alex".to_string()],
+            idle_hours: 6,
+            unreviewed_hours: 6,
+            head_ref: "sqlite-importance-weights".to_string(),
+            head_repo: Some("acme/inbox".into()),
+            additions: 310,
+            deletions: 44,
+            ..Default::default()
+        },
+        PullRequest {
+            id: "acme/inbox#19".to_string(),
+            repo: "acme/inbox".to_string(),
+            number: 19,
+            title: "draft: webhook websocket bridge for sub-second PR assignment pushes"
+                .to_string(),
+            url: "https://github.com/acme/inbox/pull/19".to_string(),
+            author: "mira".to_string(),
+            ownership: Ownership::Mine,
+            is_draft: true,
+            ci_status: CiStatus::Pending,
+            idle_hours: 8, // Fresh draft (< 72h), not stale
+            unreviewed_hours: 8,
+            head_ref: "draft/ws-webhook-bridge".to_string(),
+            head_repo: Some("acme/inbox".into()),
+            additions: 195,
+            ..Default::default()
+        },
+    ];
+    for pr in &mut prs {
+        if pr.number == 908 {
+            pr.approved_by = vec!["kai".to_owned()];
+        }
+    }
+    // Opened a while before it last moved, as real ones are.
+    for pr in &mut prs {
+        pr.opened_hours = pr.idle_hours * 4 + 20;
+    }
+    let base = prs[0].clone();
+    let review = |repo: &str,
+                  number: u64,
+                  title: &str,
+                  author: &str,
+                  external: bool,
+                  team: bool,
+                  size: (u32, u32),
+                  idle: u64| {
+        let mut pr = base.clone();
+        pr.id = format!("{repo}#{number}");
+        pr.repo = repo.into();
+        pr.number = number;
+        pr.title = title.into();
+        pr.url = format!("https://github.com/{repo}/pull/{number}");
+        pr.author = author.into();
+        pr.external = external;
+        pr.incoming_reason = if team {
+            IncomingReason::TeamReviewRequested
+        } else {
+            IncomingReason::AssignedOrReviewRequested
+        };
+        pr.matched_rule = None;
+        pr.reviewers = if team {
+            Vec::new()
+        } else {
+            vec!["mira".into()]
+        };
+        pr.head_ref = format!("demo-{number}");
+        pr.head_repo = Some(repo.into());
+        pr.stack_base = None;
+        (pr.additions, pr.deletions) = size;
+        pr.idle_hours = idle;
+        pr.opened_hours = idle * 4 + 20;
+        pr.unreviewed_hours = idle;
+        pr
+    };
+    prs.push(review(
+        "acme/cli",
+        910,
+        "docs: fix typos in the contributing guide",
+        "juno",
+        true,
+        false,
+        (4, 4),
+        7,
+    ));
+    prs.push(review(
+        "acme/cli",
+        912,
+        "parser: migrate the command parser to the new tokenizer",
+        "kai",
+        false,
+        false,
+        (1240, 860),
+        9,
+    ));
+    prs.push(review(
+        "acme/engine",
+        920,
+        "webhooks: retry deliveries with exponential backoff",
+        "sam",
+        false,
+        false,
+        (96, 31),
+        11,
+    ));
+    prs.push(review(
+        "acme/engine",
+        925,
+        "metrics: export the queue depth gauge",
+        "kai",
+        false,
+        true,
+        (58, 6),
+        13,
+    ));
+    prs.push(review(
+        "acme/cli",
+        931,
+        "i18n: update the Polish translations",
+        "juno",
+        true,
+        true,
+        (310, 290),
+        15,
+    ));
+    prs
+}
+
 
 /// Eighteen weeks of made-up approvals and merges for the preview scenes: busy on weekdays,
 /// quiet at weekends, and a streak running into today.
@@ -52,7 +336,7 @@ pub(crate) fn seed_preview(s: &mut App) {
     s.sync_status = SyncStatus::Connected {
         username: "octocat".to_string(),
     };
-    s.prs = github::demo_prs();
+    s.prs = scenes::demo_prs();
     if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/engine#418") {
         pr.description = "## What\n\nBinding the offscreen `Rgba16Float` layer once per pinch frame instead of once per draw. **Cuts about 40%** of encoder time on a 3-finger pinch.\n\n<!-- template: link the issue -->\n\n- coalesce binds in `metal/layer.rs`\n- keep the bind cache across passes\n- add a pinch trace to the bench\n\nFixes [#402](https://github.com/acme/engine/issues/402)".into();
     }
