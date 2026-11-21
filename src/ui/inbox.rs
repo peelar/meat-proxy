@@ -143,7 +143,7 @@ pub(crate) fn sort_control(s: &App, k: &Kit) -> El {
     row()
         .center_y()
         .gap(2.0)
-        .children(s.ai_feature.then_some(toggle))
+        .children(s.ai.feature.then_some(toggle))
         .child(reset)
 }
 

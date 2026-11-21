@@ -36,10 +36,10 @@ pub(crate) fn setup(s: &mut App, waker: rune::Waker) {
     }
     s.boot_worker.set_waker(waker.clone());
     s.sync_worker.set_waker(waker.clone());
-    s.judge_worker.set_waker(waker.clone());
-    if s.ai_feature && !s.preview && s.allow_os_side_effects {
+    s.ai.worker.set_waker(waker.clone());
+    if s.ai.feature && !s.preview && s.allow_os_side_effects {
         let raw = judge::JudgeConfig::load_raw();
-        s.judge = raw.clone().filter(judge::JudgeConfig::usable);
+        s.ai.config = raw.clone().filter(judge::JudgeConfig::usable);
         let shown = raw.unwrap_or_else(judge::JudgeConfig::starting_point);
         s.set_ai_fields(shown.address(), &shown.model, &shown.api_key);
     }
@@ -120,7 +120,7 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
 /// Applies what was typed in Settings once the typing has paused.
 fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    let typed = [&s.max_age_input, &s.ai_url, &s.ai_model, &s.ai_key]
+    let typed = [&s.max_age_input, &s.ai.url, &s.ai.model, &s.ai.key]
         .map(|field| field.text.as_str())
         .join("\u{1f}");
     if s.typed.as_ref().is_none_or(|(seen, _)| *seen != typed) {
@@ -317,9 +317,9 @@ fn tick_intro(s: &mut App, tx: &mut Tx) -> bool {
 /// The model's verdicts landed.
 fn on_judgments(s: &mut App) -> bool {
     let mut changed = false;
-    if let Some(batch) = s.judge_worker.take() {
-        s.judge_spent += batch.usage.cost_usd;
-        s.judge_off |= batch.fatal;
+    if let Some(batch) = s.ai.worker.take() {
+        s.ai.spent += batch.usage.cost_usd;
+        s.ai.off |= batch.fatal;
         for error in batch.errors.iter().take(3) {
             eprintln!("meat-proxy judge: {error}");
         }

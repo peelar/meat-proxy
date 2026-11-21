@@ -178,7 +178,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
         .child(setup_row(
             k,
             "Use AI sorting",
-            Switch::new(s.ai_enabled)
+            Switch::new(s.ai.enabled)
                 .label("Use AI sorting")
                 .hide_label()
                 .on_toggle(|s: &mut App| s.toggle_ai())
@@ -187,35 +187,35 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
         ))
         .child(ai_field(
             "API URL",
-            TextInput::new(&s.ai_url)
+            TextInput::new(&s.ai.url)
                 .label("AI API URL")
-                .disabled(!s.ai_enabled)
+                .disabled(!s.ai.enabled)
                 .placeholder("https://openrouter.ai/api/alpha/decisions")
                 .width(Some(360.0))
-                .on_edit(|s: &mut App| &mut s.ai_url)
+                .on_edit(|s: &mut App| &mut s.ai.url)
                 .build(k)
                 .key("option-ai-url"),
         ))
         .child(ai_field(
             "Model",
-            TextInput::new(&s.ai_model)
+            TextInput::new(&s.ai.model)
                 .label("AI model")
-                .disabled(!s.ai_enabled)
+                .disabled(!s.ai.enabled)
                 .placeholder("typesafe/jev-1.13")
                 .width(Some(360.0))
-                .on_edit(|s: &mut App| &mut s.ai_model)
+                .on_edit(|s: &mut App| &mut s.ai.model)
                 .build(k)
                 .key("option-ai-model"),
         ))
         .child(ai_field(
             "API key",
-            TextInput::new(&s.ai_key)
+            TextInput::new(&s.ai.key)
                 .label("AI API key")
-                .disabled(!s.ai_enabled)
+                .disabled(!s.ai.enabled)
                 .placeholder("sk-…")
                 .secure()
                 .width(Some(360.0))
-                .on_edit(|s: &mut App| &mut s.ai_key)
+                .on_edit(|s: &mut App| &mut s.ai.key)
                 .build(k)
                 .key("option-ai-key"),
         ));
@@ -284,7 +284,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
         )
         .child(panel(k).child(autonomy_section(s, k)))
         .child(panel(k).child(pace_section(s, k)))
-        .children(s.ai_feature.then(|| panel(k).child(ai_section)))
+        .children(s.ai.feature.then(|| panel(k).child(ai_section)))
         .child(panel(k).child(thresholds_section));
 
     col()

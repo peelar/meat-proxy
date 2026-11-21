@@ -297,9 +297,9 @@ mod tests {
         huge.additions = 600;
         assert_eq!(section_name(&state, &huge).as_deref(), Some("Big reviews"));
         // The model's answers apply, in the order of the sections.
-        state.ai_feature = true;
-        state.ai_enabled = true;
-        state.judgments.insert(
+        state.ai.feature = true;
+        state.ai.enabled = true;
+        state.ai.judgments.insert(
             pr.id.clone(),
             said(&[("reading", 0.05), ("urgent", 0.02)], "m"),
         );
@@ -308,6 +308,7 @@ mod tests {
             Some("Approve at will")
         );
         state
+            .ai
             .judgments
             .insert(huge.id.clone(), said(&[("reading", 0.02)], "m"));
         assert_eq!(
@@ -315,12 +316,13 @@ mod tests {
             Some("Big reviews"),
             "big is never approved on sight"
         );
-        state.judgments.insert(
+        state.ai.judgments.insert(
             pr.id.clone(),
             said(&[("reading", 0.05), ("urgent", 0.7)], "m"),
         );
         assert_eq!(section_name(&state, &pr).as_deref(), Some("Do first"));
         state
+            .ai
             .judgments
             .insert(pr.id.clone(), said(&[("reading", 0.9)], "m"));
         assert_eq!(section_name(&state, &pr).as_deref(), Some("Read carefully"));
@@ -332,6 +334,7 @@ mod tests {
             .unwrap()
             .clone();
         state
+            .ai
             .judgments
             .insert(mine.id.clone(), said(&[("reading", 0.01)], "m"));
         assert_eq!(section_name(&state, &mine).as_deref(), Some("Merge these"));
@@ -341,8 +344,8 @@ mod tests {
     fn rules_alone_ignore_the_models_answers_but_keep_the_rules_own() {
         let mut state = init();
         state.preview = true;
-        state.ai_feature = true;
-        state.ai_enabled = true;
+        state.ai.feature = true;
+        state.ai.enabled = true;
         let mut review = scenes::demo_prs()
             .into_iter()
             .find(|p| p.number == 904)
@@ -350,6 +353,7 @@ mod tests {
         review.external = false;
         review.additions = 300;
         state
+            .ai
             .judgments
             .insert(review.id.clone(), said(&[("urgent", 0.9)], "gpt"));
         // A model's answer counts while sorting by AI, and not once the user picks rules.
@@ -371,14 +375,14 @@ mod tests {
             Some("Approve at will")
         );
         // Behind the flag: with it off nothing is asked and the answers saved earlier are ignored.
-        state.ai_feature = false;
+        state.ai.feature = false;
         assert!(!state.smart_available() && !state.smart_active());
         // With no key and no saved answers there is nothing to sort by except rules.
         let mut bare = init();
         bare.preview = true;
         assert!(!bare.smart_available() && !bare.smart_active());
         bare.toggle_smart_sort();
-        assert_eq!(bare.smart_sort, None);
+        assert_eq!(bare.ai.smart_sort, None);
     }
 
     #[test]

@@ -133,25 +133,14 @@ pub struct App {
     pub sync_worker: Latest<Result<SyncOutput, String>>,
     /// A sync was asked for while one ran; it starts when that one lands.
     pub sync_again: bool,
-    pub judge: Option<judge::JudgeConfig>,
-    /// Sort with the model's verdicts (true) or by rules alone (false); unset follows what exists.
-    pub smart_sort: Option<bool>,
     /// The Inbox sections (built in).
     pub layout: sections::Layout,
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
     /// List requests made of a team you are in, not of you by name, in the Inbox too.
     pub show_team_reviews: bool,
-    /// Whether the decision model may be asked at all. Off until chosen: turning it on sends the
-    /// description and changed file paths of review requests, private repositories included.
-    pub ai_enabled: bool,
-    /// The experimental AI feature is visible at all (`MEAT_PROXY_AI=1`).
-    pub ai_feature: bool,
-    pub ai_url: TextEdit,
-    pub ai_model: TextEdit,
-    pub ai_key: TextEdit,
-    /// The three AI fields as last applied, to notice an edit.
-    pub(crate) ai_applied: (String, String, String),
+    /// The experimental AI sorting, its settings and what the model said.
+    pub ai: Ai,
     /// What the typed settings (the age limit and the AI fields) held when last seen, and since
     /// when: they apply once the typing stops, not on each keystroke, so "14" never applies "1"
     /// and a half-typed address never gets the key.
@@ -159,12 +148,6 @@ pub struct App {
     /// Pull requests moved to the Ignored section, and whether that section is open.
     pub ignored: std::collections::HashSet<String>,
     pub ignored_open: bool,
-    pub judgments: std::collections::HashMap<String, judge::Judgment>,
-    pub judge_worker: Latest<judge::Batch>,
-    /// Spent on the model in this run of the app, against the config's cap.
-    pub judge_spent: f64,
-    /// An error that would repeat (bad key, no credit): no more asking until the app restarts.
-    pub judge_off: bool,
     pub auth_worker: Latest<Result<(), String>>,
     pub fast_notif_worker: Latest<Result<github::NotificationPoll, String>>,
     pub discovery_worker: Latest<Result<github::Discovery, String>>,
@@ -193,6 +176,53 @@ pub struct App {
     pub pace_events: Vec<pace::Event>,
     /// What was just counted, and when: the row says so, and the panel's number pulses.
     pub pace_flash: Vec<(pace::Event, std::time::Instant)>,
+}
+
+/// The AI feature, apart from the rest of the app: hidden unless `MEAT_PROXY_AI=1`.
+pub struct Ai {
+    /// The experimental AI feature is visible at all (`MEAT_PROXY_AI=1`).
+    pub feature: bool,
+    /// Whether the decision model may be asked at all. Off until chosen: turning it on sends the
+    /// description and changed file paths of review requests, private repositories included.
+    pub enabled: bool,
+    /// The endpoint, when one is set up and usable.
+    pub config: Option<judge::JudgeConfig>,
+    /// Sort with the model's verdicts (true) or by rules alone (false); unset follows what exists.
+    pub smart_sort: Option<bool>,
+    pub url: TextEdit,
+    pub model: TextEdit,
+    pub key: TextEdit,
+    /// The three fields as last applied, to notice an edit.
+    pub(crate) applied: (String, String, String),
+    pub judgments: std::collections::HashMap<String, judge::Judgment>,
+    pub worker: Latest<judge::Batch>,
+    /// Spent on the model in this run of the app, against the config's cap.
+    pub spent: f64,
+    /// An error that would repeat (bad key, no credit): no more asking until the app restarts.
+    pub off: bool,
+}
+
+impl Ai {
+    fn new() -> Self {
+        Ai {
+            feature: judge::feature_enabled(),
+            enabled: false,
+            config: None,
+            smart_sort: None,
+            url: TextEdit::new(judge::DECISIONS_URL),
+            model: TextEdit::new(judge::DECISIONS_MODEL),
+            key: TextEdit::new(""),
+            applied: (
+                judge::DECISIONS_URL.into(),
+                judge::DECISIONS_MODEL.into(),
+                String::new(),
+            ),
+            judgments: std::collections::HashMap::new(),
+            worker: Latest::default(),
+            spent: 0.0,
+            off: false,
+        }
+    }
 }
 
 pub(crate) fn init() -> App {
@@ -254,28 +284,13 @@ pub(crate) fn init() -> App {
         boot_worker: Latest::default(),
         sync_worker: Latest::default(),
         sync_again: false,
-        judge: None,
-        smart_sort: None,
         layout: sections::Layout::default(),
         hide_external: false,
         show_team_reviews: false,
-        ai_enabled: false,
-        ai_feature: judge::feature_enabled(),
-        ai_url: TextEdit::new(judge::DECISIONS_URL),
-        ai_model: TextEdit::new(judge::DECISIONS_MODEL),
-        ai_key: TextEdit::new(""),
-        ai_applied: (
-            judge::DECISIONS_URL.into(),
-            judge::DECISIONS_MODEL.into(),
-            String::new(),
-        ),
+        ai: Ai::new(),
         typed: None,
         ignored: std::collections::HashSet::new(),
         ignored_open: false,
-        judgments: std::collections::HashMap::new(),
-        judge_worker: Latest::default(),
-        judge_spent: 0.0,
-        judge_off: false,
         auth_worker: Latest::default(),
         fast_notif_worker: Latest::default(),
         discovery_worker: Latest::default(),
@@ -410,11 +425,11 @@ impl App {
         self.max_age_input = TextEdit::new(self.sync_options.max_age_days.to_string());
         self.last_notif_modified = snap.last_notif_modified;
         self.organization = TextEdit::new(&snap.organization);
-        self.judgments = snap.judgments;
-        self.smart_sort = snap.smart_sort;
+        self.ai.judgments = snap.judgments;
+        self.ai.smart_sort = snap.smart_sort;
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
-        self.ai_enabled = snap.ai_enabled;
+        self.ai.enabled = snap.ai_enabled;
         self.autonomy_branches = snap.autonomy_branches;
         self.autonomy_reviewers = snap.autonomy_reviewers;
         self.autonomy_done = snap.autonomy_done;
@@ -463,21 +478,21 @@ impl App {
 
     /// What a judgment says about this pull request, if one was made.
     pub fn judgment(&self, pr: &PullRequest) -> Option<&judge::Judgment> {
-        self.judgments.get(&pr.id)
+        self.ai.judgments.get(&pr.id)
     }
 
     /// Whether a model has anything to say here: a key is set, or verdicts were saved earlier.
     pub fn smart_available(&self) -> bool {
-        self.ai_feature
-            && self.ai_enabled
-            && (self.judge.is_some() || !self.judgments.is_empty())
+        self.ai.feature
+            && self.ai.enabled
+            && (self.ai.config.is_some() || !self.ai.judgments.is_empty())
             && !self.layout.needed_questions().is_empty()
     }
 
     /// Sorting with the model's verdicts. The user's choice wins; without one, the model is used
     /// when it is there.
     pub fn smart_active(&self) -> bool {
-        self.smart_sort.unwrap_or_else(|| self.smart_available()) && self.smart_available()
+        self.ai.smart_sort.unwrap_or_else(|| self.smart_available()) && self.smart_available()
     }
 
     pub fn toggle_smart_sort(&mut self) {
@@ -485,7 +500,7 @@ impl App {
             return;
         }
         let next = !self.smart_active();
-        self.smart_sort = Some(next);
+        self.ai.smart_sort = Some(next);
         self.save_flag("smart_sort", next);
     }
 
@@ -534,37 +549,37 @@ impl App {
     }
 
     pub(crate) fn set_ai_fields(&mut self, url: &str, model: &str, key: &str) {
-        self.ai_url = TextEdit::new(url);
-        self.ai_model = TextEdit::new(model);
-        self.ai_key = TextEdit::new(key);
-        self.ai_applied = (url.into(), model.into(), key.into());
+        self.ai.url = TextEdit::new(url);
+        self.ai.model = TextEdit::new(model);
+        self.ai.key = TextEdit::new(key);
+        self.ai.applied = (url.into(), model.into(), key.into());
     }
 
     /// Applies the AI fields once they differ from what is in effect: saves `judge.json` and asks
     /// again for anything the model had not been able to judge.
     pub(crate) fn apply_ai_fields(&mut self) -> bool {
         let now = (
-            self.ai_url.text.trim().to_owned(),
-            self.ai_model.text.trim().to_owned(),
-            self.ai_key.text.trim().to_owned(),
+            self.ai.url.text.trim().to_owned(),
+            self.ai.model.text.trim().to_owned(),
+            self.ai.key.text.trim().to_owned(),
         );
-        if now == self.ai_applied || now.0.is_empty() || now.1.is_empty() {
+        if now == self.ai.applied || now.0.is_empty() || now.1.is_empty() {
             return false;
         }
-        let cfg = judge::JudgeConfig::from_fields(&now.0, &now.1, &now.2, self.judge.as_ref());
+        let cfg = judge::JudgeConfig::from_fields(&now.0, &now.1, &now.2, self.ai.config.as_ref());
         if !self.preview && self.allow_os_side_effects {
             let _ = cfg.save();
         }
-        self.ai_applied = now;
-        self.judge = cfg.usable().then_some(cfg);
-        self.judge_off = false;
+        self.ai.applied = now;
+        self.ai.config = cfg.usable().then_some(cfg);
+        self.ai.off = false;
         self.queue_judgments();
         true
     }
 
     pub fn toggle_ai(&mut self) {
-        self.ai_enabled = !self.ai_enabled;
-        self.save_flag("ai_enabled", self.ai_enabled);
+        self.ai.enabled = !self.ai.enabled;
+        self.save_flag("ai_enabled", self.ai.enabled);
         // Review requests become (or stop being) candidates: ask again on the next sync.
         self.queue_judgments();
     }
@@ -724,14 +739,14 @@ impl App {
 
     /// After a sync: answer what cheap rules can, and send the model only what is left.
     pub fn queue_judgments(&mut self) {
-        let Some(cfg) = self.judge.clone() else {
+        let Some(cfg) = self.ai.config.clone() else {
             return;
         };
-        if !self.ai_feature
-            || !self.ai_enabled
-            || self.judge_off
+        if !self.ai.feature
+            || !self.ai.enabled
+            || self.ai.off
             || self.preview
-            || self.judge_worker.is_pending()
+            || self.ai.worker.is_pending()
         {
             return;
         }
@@ -745,7 +760,7 @@ impl App {
         let plan = judge::plan(
             &self.prs,
             |pr| pr.attention(draft, open, now),
-            &self.judgments,
+            &self.ai.judgments,
             &cfg,
             &questions,
         );
@@ -753,11 +768,11 @@ impl App {
         if !settled.is_empty() {
             self.store_judgments(settled);
         }
-        if plan.to_ask.is_empty() || self.judge_spent >= cfg.max_spend_usd {
+        if plan.to_ask.is_empty() || self.ai.spent >= cfg.max_spend_usd {
             return;
         }
-        let spent = self.judge_spent;
-        self.judge_worker.request(plan.to_ask, move |prs| {
+        let spent = self.ai.spent;
+        self.ai.worker.request(plan.to_ask, move |prs| {
             judge::run_batch(&cfg, &questions, prs, spent)
         });
     }
@@ -767,7 +782,7 @@ impl App {
             let live: Vec<String> = self.prs.iter().map(|p| p.id.clone()).collect();
             let _ = db.save_judgments(&judged, &live);
         }
-        self.judgments.extend(judged);
+        self.ai.judgments.extend(judged);
     }
 
     pub fn refresh_ranks(&mut self) {

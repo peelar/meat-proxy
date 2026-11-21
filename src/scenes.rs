@@ -331,8 +331,8 @@ pub(crate) fn demo_pace_events() -> Vec<pace::Event> {
 pub(crate) fn seed_preview(s: &mut App) {
     s.loading = false;
     s.pace_events = demo_pace_events();
-    s.ai_feature = true;
-    s.ai_enabled = true;
+    s.ai.feature = true;
+    s.ai.enabled = true;
     s.sync_status = SyncStatus::Connected {
         username: "octocat".to_string(),
     };
@@ -351,7 +351,7 @@ pub(crate) fn seed_preview(s: &mut App) {
         ("acme/engine#920", 0.45, 0.05, model),
         ("acme/cli#931", 0.05, 0.02, model),
     ] {
-        s.judgments.insert(
+        s.ai.judgments.insert(
             id.to_owned(),
             judge::Judgment {
                 answers: [("reading", reading), ("urgent", urgent)]
@@ -406,8 +406,8 @@ pub(crate) static SCENES: &[Scene] = &[
     }),
     ("settings-ai", |s| {
         seed_preview(s);
-        s.ai_key = TextEdit::new("sk-or-v1-0123456789abcdef");
-        s.ai_enabled = false;
+        s.ai.key = TextEdit::new("sk-or-v1-0123456789abcdef");
+        s.ai.enabled = false;
         s.page = Page::Inbox;
         s.settings_open = true;
     }),
@@ -446,7 +446,7 @@ pub(crate) static SCENES: &[Scene] = &[
     ("sorted-by-rules", |s| {
         seed_preview(s);
         s.page = Page::Inbox;
-        s.smart_sort = Some(false);
+        s.ai.smart_sort = Some(false);
     }),
     // The groups dragged away from the default, so the reset button is on offer.
     ("reordered", |s| {
