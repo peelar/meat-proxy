@@ -2,6 +2,7 @@ use std::process::Command;
 
 use crate::model::{
     IncomingReason, NotificationEvent, NotificationKind, Ownership, PrAttention, PullRequest,
+    ReviewState,
 };
 
 /// A short system sound, for moments worth a little celebration.
@@ -154,6 +155,29 @@ pub fn evaluate_inbox_notifications(
         let att = pr.attention(draft_stale_hours, open_stale_hours, now_hour);
         let was_present = previous_prs.iter().find(|p| p.id == pr.id);
 
+        // Each new approval of yours, named. GitHub's review decision stays empty in repositories
+        // that don't require reviews, and a second approval doesn't change it.
+        let mut approved_now = false;
+        if pr.ownership == Ownership::Mine
+            && let Some(prev) = was_present
+        {
+            for login in pr.approved_by.iter().filter(|l| !prev.approved_by.contains(l)) {
+                approved_now = true;
+                let notif_id = format!("approved-{}-{login}", pr.id);
+                if !existing_notifications.iter().any(|n| n.id == notif_id) {
+                    events.push(NotificationEvent {
+                        id: notif_id,
+                        title: format!("@{login} approved {}#{}", pr.repo, pr.number),
+                        body: pr.title.clone(),
+                        pr_url: pr.url.clone(),
+                        kind: NotificationKind::ReviewActivity,
+                        timestamp_label: "just now".to_string(),
+                        unread: true,
+                    });
+                }
+            }
+        }
+
         match att {
             PrAttention::IncomingAssigned => {
                 let is_newly_assigned = match was_present {
@@ -218,6 +242,7 @@ pub fn evaluate_inbox_notifications(
                 if pr.ownership == Ownership::Mine
                     && let Some(prev) = was_present
                     && prev.review_state != pr.review_state
+                    && !(approved_now && pr.review_state == ReviewState::Approved)
                 {
                     let notif_id = format!("review-state-{}-{}", pr.id, pr.review_state.as_str());
                     if !existing_notifications.iter().any(|n| n.id == notif_id) {
@@ -242,4 +267,53 @@ pub fn evaluate_inbox_notifications(
     }
 
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn titles(before: &[PullRequest], after: &[PullRequest]) -> Vec<String> {
+        evaluate_inbox_notifications(before, after, &[], 72, 48, 0)
+            .into_iter()
+            .map(|e| e.title)
+            .collect()
+    }
+
+    #[test]
+    fn each_new_approval_and_review_request_notifies() {
+        // Your PR in a repository that doesn't require reviews: GitHub never sets a decision.
+        let mut mine = crate::github::demo_prs()
+            .into_iter()
+            .find(|p| p.ownership == Ownership::Mine && !p.is_draft)
+            .unwrap();
+        mine.review_state = ReviewState::None;
+        mine.approved_by = Vec::new();
+        let mut kai = mine.clone();
+        kai.approved_by = vec!["kai".into()];
+        let mut both = kai.clone();
+        both.approved_by = vec!["kai".into(), "mira".into()];
+        let name = format!("{}#{}", mine.repo, mine.number);
+        assert!(titles(&[mine.clone()], &[kai.clone()]).contains(&format!("@kai approved {name}")));
+        let second = titles(&[kai.clone()], &[both.clone()]);
+        assert!(second.contains(&format!("@mira approved {name}")));
+        assert!(!second.iter().any(|t| t.contains("@kai")));
+
+        // Where reviews are required, the approval is named once, not also as "PR Approved".
+        let mut decided = kai.clone();
+        decided.review_state = ReviewState::Approved;
+        let mut waiting = mine.clone();
+        waiting.review_state = ReviewState::ReviewRequested;
+        assert_eq!(titles(&[waiting], &[decided]), vec![format!("@kai approved {name}")]);
+
+        // Someone asks for your review.
+        let mut theirs = crate::github::demo_prs()
+            .into_iter()
+            .find(|p| p.ownership == Ownership::Theirs)
+            .unwrap();
+        theirs.incoming_reason = IncomingReason::SubscribedRule;
+        let mut asked = theirs.clone();
+        asked.incoming_reason = IncomingReason::AssignedOrReviewRequested;
+        assert!(titles(&[theirs], &[asked]).iter().any(|t| t.starts_with("Assigned to review")));
+    }
 }
