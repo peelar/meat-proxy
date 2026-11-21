@@ -206,6 +206,8 @@ pub struct Ai {
     pub spent: f64,
     /// An error that would repeat (bad key, no credit): no more asking until the app restarts.
     pub off: bool,
+    /// Tells the running batch to stop: AI sorting was switched off.
+    pub(crate) stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Ai {
@@ -227,6 +229,7 @@ impl Ai {
             worker: Latest::default(),
             spent: 0.0,
             off: false,
+            stop: Default::default(),
         }
     }
 }
@@ -587,6 +590,9 @@ impl App {
     pub fn toggle_ai(&mut self) {
         self.ai.enabled = !self.ai.enabled;
         self.save_flag("ai_enabled", self.ai.enabled);
+        if !self.ai.enabled {
+            self.ai.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // Review requests become (or stop being) candidates: ask again on the next sync.
         self.queue_judgments();
     }
@@ -779,8 +785,10 @@ impl App {
             return;
         }
         let spent = self.ai.spent;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.ai.stop = stop.clone();
         self.ai.worker.request(plan.to_ask, move |prs| {
-            judge::run_batch(&cfg, &questions, prs, spent)
+            judge::run_batch(&cfg, &questions, prs, spent, &stop)
         });
     }
 

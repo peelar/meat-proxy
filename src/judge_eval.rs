@@ -63,7 +63,7 @@ pub(crate) fn judge_eval() {
     cache.extend(plan.settled);
     let asked = plan.to_ask.len();
     let started = std::time::Instant::now();
-    let batch = judge::run_batch(&cfg, &questions, plan.to_ask, 0.0);
+    let batch = judge::run_batch(&cfg, &questions, plan.to_ask, 0.0, &Default::default());
     println!(
         "{} calls in {:.1}s ({} answered): {} prompt + {} completion tokens, ${:.5}{}",
         asked,

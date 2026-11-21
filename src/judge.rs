@@ -735,10 +735,15 @@ pub fn run_batch(
     questions: &[Question],
     prs: Vec<PullRequest>,
     spent_before: f64,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> Batch {
     let mut batch = Batch::default();
     for chunk in prs.chunks(PARALLEL_CALLS) {
-        if batch.fatal || spent_before + batch.usage.cost_usd >= cfg.max_spend_usd {
+        // AI sorting was switched off: nothing more leaves the machine.
+        if stop.load(std::sync::atomic::Ordering::Relaxed)
+            || batch.fatal
+            || spent_before + batch.usage.cost_usd >= cfg.max_spend_usd
+        {
             break;
         }
         let results: Vec<_> = std::thread::scope(|scope| {
@@ -746,7 +751,15 @@ pub fn run_batch(
                 .iter()
                 .map(|pr| scope.spawn(move || (pr.id.clone(), ask(cfg, questions, pr))))
                 .collect();
-            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            handles
+                .into_iter()
+                .zip(chunk)
+                .map(|(h, pr)| {
+                    h.join().unwrap_or_else(|_| {
+                        (pr.id.clone(), Err("the call stopped unexpectedly".to_owned()))
+                    })
+                })
+                .collect()
         });
         for (id, result) in results {
             batch.calls += 1;

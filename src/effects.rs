@@ -324,7 +324,10 @@ fn on_judgments(s: &mut App) -> bool {
         for error in batch.errors.iter().take(3) {
             eprintln!("meat-proxy judge: {error}");
         }
-        s.store_judgments(batch.judged);
+        // Verdicts that land after AI sorting was switched off are not used.
+        if s.ai.enabled {
+            s.store_judgments(batch.judged);
+        }
         changed = true;
     }
     changed
