@@ -7,6 +7,7 @@ use rune_kit::{
     TextInput,
 };
 
+mod agent;
 mod autonomy;
 mod avatars;
 mod db;

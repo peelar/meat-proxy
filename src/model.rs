@@ -185,16 +185,6 @@ pub struct Check {
     pub url: String,
 }
 
-impl Check {
-    /// The GitHub Actions run behind this check, which can be run again; other providers have none.
-    pub fn actions_run(&self) -> Option<(&str, u64)> {
-        let rest = self.url.strip_prefix("https://github.com/")?;
-        let (repo, rest) = rest.split_once("/actions/runs/")?;
-        let id = rest.split(['/', '?', '#']).next()?.parse().ok()?;
-        Some((repo, id))
-    }
-}
-
 /// Whether GitHub would let the PR be merged right now, and if not, why.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeReadiness {
@@ -574,17 +564,6 @@ impl PullRequest {
             .map(|(login, _)| login.as_str())
             .filter(|login| !self.requested_reviewers.iter().any(|r| r == login))
             .collect()
-    }
-
-    /// The failed checks that are GitHub Actions runs, as (repository, run id), each once.
-    pub fn rerunnable(&self) -> Vec<(String, u64)> {
-        let mut runs: Vec<(String, u64)> = Vec::new();
-        for (repo, id) in self.failing_checks.iter().filter_map(Check::actions_run) {
-            if !runs.iter().any(|(_, known)| *known == id) {
-                runs.push((repo.to_owned(), id));
-            }
-        }
-        runs
     }
 
     /// Human-readable age / staleness badge text.

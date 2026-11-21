@@ -19,11 +19,12 @@ pub(crate) fn brand(s: &App, k: &Kit) -> El {
                 s.selected_repo = None;
             }
         })
-        .child(keycap)
+        .child(keycap.cursor(rune::Cursor::Pointer))
         .child(
             text("meat proxy")
                 .font(TextStyle::new(14.0, 650.0))
-                .color(k.c.text_base),
+                .color(k.c.text_base)
+                .cursor(rune::Cursor::Pointer),
         )
 }
 
@@ -531,7 +532,6 @@ pub(crate) fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_rep
         return col()
             .w_full()
             .child(line)
-            .child(merge_path(s, k, pr, indent))
             .child(description(s, k, pr, indent));
     }
     line
@@ -605,7 +605,36 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
     // checks run again on the result.
     let update_first = blockers.contains(&Blocker::Behind) && pr.can_update_branch;
     let prompt = if update_first { None } else { pr.agent_prompt() };
-    let (button, why, at_rest) = if let Some(prompt) = prompt {
+    let fix = if prompt.is_some() && s.agent_ready() {
+        Some(s.agent.provider)
+    } else {
+        None
+    };
+    let (button, why, at_rest) = if let Some(provider) = fix {
+        let (glyph, tone) = match provider {
+            agent::Provider::Claude => (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0)),
+            agent::Provider::Codex => (&CODEX, tone),
+        };
+        let running = s.agent_running.as_deref();
+        let (label, ink) = if running == Some(pr.id.as_str()) {
+            ("Fixing…", Ink::Busy)
+        } else if running.is_some() {
+            ("Fix", Ink::Disabled)
+        } else {
+            ("Fix", Ink::Rest)
+        };
+        let why = format!(
+            "Run {} on this pull request in the background and say whether it pushed a fix",
+            provider.label()
+        );
+        (
+            ink_button(k, tone, glyph, label, ink, key)
+                .on_press(move |s: &mut App| s.press_fix(&id)),
+            why,
+            first.is_some_and(|blocker| blocker != Blocker::Behind)
+                || running == Some(pr.id.as_str()),
+        )
+    } else if let Some(prompt) = prompt {
         let copied = s
             .copied
             .as_ref()
@@ -634,7 +663,8 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
             }
             (true, false) => "Copy a prompt for your coding agent: resolve the conflicts",
             _ => "Copy a prompt for your coding agent: fix the failed checks",
-        };
+        }
+        .to_owned();
         (
             button,
             why,
@@ -649,7 +679,7 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
         (
             ink_button(k, tone, &UPDATE, label, ink, key)
                 .on_press(move |s: &mut App| s.press_unblock(&id, Unblock::UpdateBranch)),
-            "Merge the base branch into this one, as Update branch does on GitHub",
+            "Merge the base branch into this one, as Update branch does on GitHub".to_owned(),
             first == Some(Blocker::Behind),
         )
     } else {
@@ -661,160 +691,6 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
     } else {
         (wrap.group_opacity(0.0, 1.0), false)
     })
-}
-
-/// Under an opened row, above the description: where the pull request stands on its way to the
-/// merge. Checks that failed link to their logs, and the user's own can be run again from here.
-pub(crate) fn merge_path(s: &App, k: &Kit, pr: &PullRequest, indent: f32) -> El {
-    let c = &k.c;
-    let fact = |label: &str, value: El| {
-        row()
-            .w_full()
-            .gap(10.0)
-            .child(text(label.to_owned()).font(k.ty.small).color(c.text_faint).w(52.0))
-            .child(value.grow(1.0).min_w(0.0))
-    };
-    let plain = |value: String, tone: Color| text(value).font(k.ty.small).color(tone).wrap();
-    let mut facts: Vec<El> = Vec::new();
-
-    if !pr.failing_checks.is_empty() {
-        let mut line = String::new();
-        let mut links = Vec::new();
-        for check in &pr.failing_checks {
-            if !line.is_empty() {
-                line.push_str("  ·  ");
-            }
-            let start = line.len();
-            line.push_str(&check.name);
-            if !check.url.is_empty() {
-                links.push(
-                    rune::Link::new(start..line.len(), check.url.clone())
-                        .hover(rune::LinkPaint::new().underline(c.danger.fg))
-                        .help("Open this check"),
-                );
-            }
-        }
-        let mut names = plain(line, c.danger.fg);
-        for link in links {
-            names = names.link(link);
-        }
-        let names = names.on_link(|s: &mut App, url: &str, _: &mut Tx| {
-            notify::open_url_in_browser(url, s.allow_os_side_effects)
-        });
-        // Running the failed jobs again only helps when the failure was a fluke, so it is offered
-        // here and not as the row's button.
-        let can_rerun = pr.ownership == Ownership::Mine
-            && !pr.rerunnable().is_empty()
-            && !s.unblocking.contains(&pr.id);
-        let failed = if can_rerun {
-            let label = "Run the failed jobs again";
-            let id = pr.id.clone();
-            col().gap(3.0).child(names).child(
-                text(label)
-                    .key(format!("rerun-{}", pr.id))
-                    .font(k.ty.small)
-                    .color(unblock_tone(k))
-                    .link(
-                        rune::Link::new(0..label.len(), "rerun")
-                            .hover(rune::LinkPaint::new().underline(unblock_tone(k)))
-                            .help("Runs the failed GitHub Actions jobs again, which helps when the failure was a fluke"),
-                    )
-                    .on_link(move |s: &mut App, _: &str, _: &mut Tx| {
-                        s.press_unblock(&id, Unblock::Rerun)
-                    }),
-            )
-        } else {
-            names
-        };
-        facts.push(fact("Failed", failed));
-    } else {
-        match pr.ci_status {
-            CiStatus::Failing => facts.push(fact("Checks", plain("Failing".into(), c.danger.fg))),
-            CiStatus::Pending => facts.push(fact("Checks", plain("Running".into(), c.text_muted))),
-            CiStatus::Passing => facts.push(fact("Checks", plain("Passing".into(), c.text_muted))),
-            CiStatus::None => {}
-        }
-    }
-
-    match pr.merge_readiness {
-        model::MergeReadiness::Conflicts => {
-            facts.push(fact("Branch", plain("Conflicts with its base".into(), c.danger.fg)))
-        }
-        model::MergeReadiness::Behind => facts.push(fact(
-            "Branch",
-            plain("Behind its base, which has to be merged in first".into(), c.warning.fg),
-        )),
-        _ if pr.can_update_branch => {
-            facts.push(fact("Branch", plain("Behind its base".into(), c.text_muted)))
-        }
-        _ => {}
-    }
-
-    let mut reviews: Vec<String> = Vec::new();
-    if !pr.approved_by.is_empty() {
-        reviews.push(pr.approval_label());
-    }
-    let pending: Vec<&str> = pr
-        .reviewers
-        .iter()
-        .filter(|r| !pr.approved_by.contains(r))
-        .map(String::as_str)
-        .collect();
-    if !pending.is_empty() {
-        reviews.push(format!("waiting on {}", pending.join(", ")));
-    }
-    if pr.unanswered() > 0 {
-        reviews.push(comments_to_answer(pr.unanswered()));
-    }
-    if let Some(ask) = &pr.asked {
-        reviews.push(format!(
-            "you were asked {}{} ago",
-            if ask.again { "again " } else { "" },
-            model::span(ask.hours_ago)
-        ));
-    }
-    if !reviews.is_empty() {
-        facts.push(fact("Reviews", plain(reviews.join("  ·  "), c.text_muted)));
-    }
-
-    if !pr.files.is_empty() {
-        const SHOWN: usize = 6;
-        let mut list = col().gap(2.0).child(plain(
-            format!("+{} −{}", pr.additions, pr.deletions),
-            c.text_muted,
-        ));
-        for path in pr.files.iter().take(SHOWN) {
-            list = list.child(
-                text(path.clone())
-                    .font(k.ty.mono)
-                    .color(c.text_muted)
-                    .truncate_head(),
-            );
-        }
-        if pr.files.len() >= github::FILES_FETCHED {
-            list = list.child(plain("and more".into(), c.text_faint));
-        } else if pr.files.len() > SHOWN {
-            list = list.child(plain(
-                format!("and {} more", pr.files.len() - SHOWN),
-                c.text_faint,
-            ));
-        }
-        facts.push(fact("Files", list));
-    }
-
-    let mut block = col()
-        .key(format!("pr-path-{}", pr.id))
-        .w_full()
-        .pl(indent)
-        .pr(14.0)
-        .gap(5.0);
-    if !facts.is_empty() {
-        block = block.pb(10.0);
-    }
-    for fact in facts {
-        block = block.child(fact);
-    }
-    block
 }
 
 /// The PR description as Markdown, under its row.

@@ -2,6 +2,9 @@
 
 use crate::*;
 
+/// The titles of the Settings sections.
+pub(crate) const SECTION_TITLE: TextStyle = TextStyle::new(17.0, 650.0).lh(24.0);
+
 /// A switch for one choice about which pull requests the sync brings in.
 pub(crate) fn sync_option_row(
     k: &Kit,
@@ -28,6 +31,60 @@ pub(crate) fn sync_option_row(
     )
 }
 
+/// Settings › Fix with an agent: Copy prompt becomes Fix, which runs the prompt in a detached
+/// Claude Code or Codex session.
+fn agent_section(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let on = s.agent.enabled;
+    col()
+        .w_full()
+        .gap(10.0)
+        .child(text("Fix with an agent").font(SECTION_TITLE).color(c.text_base))
+        .child(
+            text("Instead of copying a prompt, a Fix button runs it for you: meat proxy clones the repository, checks the pull request out and starts the agent there, unattended and without asking for permissions. It says when the agent pushed, or didn't.")
+                .wrap()
+                .font(k.ty.small)
+                .color(c.text_faint),
+        )
+        .child(setup_row(
+            k,
+            "Run agents from the Fix button",
+            Switch::new(on)
+                .label("Run agents from the Fix button")
+                .hide_label()
+                .on_toggle(|s: &mut App| s.toggle_agent())
+                .build(k)
+                .key("option-agent-enabled"),
+        ))
+        .child(setup_row(
+            k,
+            "Agent",
+            SegmentedControl::new(
+                &agent::Provider::ALL.map(|p| p.label()),
+                Some(s.agent.provider.index()),
+            )
+            .label("Agent")
+            .width(Some(220.0))
+            .on_pick(|s: &mut App, idx, _| {
+                s.pick_agent_provider(agent::Provider::ALL[idx.min(1)]);
+            })
+            .build(k)
+            .key("option-agent-provider"),
+        ))
+        .child(setup_row(
+            k,
+            "Model",
+            TextInput::new(&s.agent_model)
+                .label("Agent model")
+                .disabled(!on)
+                .placeholder("The agent's default")
+                .width(Some(360.0))
+                .on_edit(|s: &mut App| &mut s.agent_model)
+                .build(k)
+                .key("option-agent-model"),
+        ))
+}
+
 /// Settings › Autonomous: two switches, by who an action reaches. What each does stays out of
 /// sight; the notification after each action says it.
 pub(crate) fn autonomy_section(s: &App, k: &Kit) -> El {
@@ -46,9 +103,9 @@ pub(crate) fn autonomy_section(s: &App, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
-        .child(text("Autonomous").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(text("Autonomous").font(SECTION_TITLE).color(k.c.text_base))
         .child(
-            text("Your own PRs only. You get a notification each time.")
+            text("Let meat proxy act on GitHub for you, on your own pull requests only, so they keep moving without you. Each switch below turns one action on, and you get a notification every time it acts.")
                 .wrap()
                 .font(k.ty.small)
                 .color(k.c.text_faint),
@@ -105,8 +162,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            text("Notifications")
-                .font(k.ty.ui_medium)
+            text("Notifications").font(SECTION_TITLE)
                 .color(c.text_base),
         )
         .child(notifications_row)
@@ -168,7 +224,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
     let ai_section = col()
         .w_full()
         .gap(10.0)
-        .child(text("AI").font(k.ty.ui_medium).color(c.text_base))
+        .child(text("AI").font(SECTION_TITLE).color(c.text_base))
         .child(
             text("When on, the description and changed file paths of every PR that asks for your review, private repositories included, are sent to the model at this URL. Off, only rules sort.")
                 .wrap()
@@ -230,8 +286,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
         .child(
             panel(k)
                 .child(
-                    text("Pull requests")
-                        .font(k.ty.ui_medium)
+                    text("Pull requests").font(SECTION_TITLE)
                         .color(c.text_base),
                 )
                 .child(setup_row(
@@ -282,6 +337,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
                         ),
                 )),
         )
+        .child(panel(k).child(agent_section(s, k)))
         .child(panel(k).child(autonomy_section(s, k)))
         .child(panel(k).child(pace_section(s, k)))
         .children(s.ai.feature.then(|| panel(k).child(ai_section)))
@@ -346,12 +402,13 @@ pub(crate) fn settings_modal(s: &App, k: &Kit) -> El {
                         .gap(10.0)
                         .child(
                             text("Settings")
-                                .font(TextStyle::new(22.0, 650.0))
+                                .font(TextStyle::new(22.0, 650.0).lh(28.0))
                                 .color(k.c.text_base),
                         )
                         .child(
+                            // The same line height as the title, so both centre on one line.
                             text(format!("v{}", app_version()))
-                                .font(TextStyle::new(11.0, 450.0))
+                                .font(TextStyle::new(11.0, 450.0).lh(28.0))
                                 .color(k.c.text_faint)
                                 .key("app-version"),
                         ),
@@ -366,10 +423,14 @@ pub(crate) fn settings_modal(s: &App, k: &Kit) -> El {
         .w_full()
         .h_full()
         .padding(24.0)
+        .backdrop_blur(SETTINGS_BACKDROP_BLUR)
         .fill(k.c.scrim)
         .center()
         .child(dialog)
 }
+
+/// How far the Inbox blurs behind the Settings dialog.
+const SETTINGS_BACKDROP_BLUR: f32 = 12.0;
 
 pub(crate) fn repositories_modal(s: &App, k: &Kit) -> El {
     let close = rune_kit::IconButton::new(k.glyph.close)

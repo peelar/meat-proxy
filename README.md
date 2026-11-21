@@ -3,7 +3,7 @@
   <img alt="First launch: a finger presses the approve button, then you connect the GitHub CLI, turn on notifications, and open the inbox" src="snapshots/onboarding-light.gif">
 </picture>
 
-# meat proxy
+# <img src="assets/logo.svg" alt="" width="40" height="40" align="top"> meat proxy
 
 Keep up with the pace of LLM-generated code.
 

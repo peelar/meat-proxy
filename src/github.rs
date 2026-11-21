@@ -29,7 +29,7 @@ pub struct NotificationPoll {
     pub events: Vec<NotificationEvent>,
 }
 
-fn gh_command() -> Command {
+pub(crate) fn gh_command() -> Command {
     let mut cmd = Command::new("gh");
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     // A relative or empty entry would find a `gh` in whatever directory the app was started from.
@@ -637,12 +637,15 @@ pub fn fetch_live(
         tracked_only: false,
     }));
 
-    // Each search runs on its own thread; GitHub's cost grows with the PRs returned, so they
-    // overlap instead of queueing.
-    let results: Vec<_> = std::thread::scope(|scope| {
+    // Two rounds. Each search, on its own thread, lists only the IDs it finds, which is cheap
+    // enough to ask for 100 at a time. Then every pull request found, once however many searches
+    // found it, has its fields fetched in small batches side by side. Asking each search for the
+    // fields page by page queued its pages behind each other and fetched the same pull request
+    // once per search that found it.
+    let results = std::thread::scope(|scope| {
         let handles: Vec<_> = searches
             .iter()
-            .map(|search| scope.spawn(move || fetch_search(search, options)))
+            .map(|search| scope.spawn(move || search_ids(search, options)))
             .collect();
         handles
             .into_iter()
@@ -650,23 +653,45 @@ pub fn fetch_live(
                 h.join()
                     .unwrap_or_else(|_| Err("A GitHub search stopped unexpectedly".to_string()))
             })
-            .collect()
+            .collect::<Vec<_>>()
     });
-
-    let mut viewer = String::new();
-    let mut prs = Vec::<PullRequest>::new();
     let mut failed_rules = Vec::new();
+    let mut found = Vec::new();
     for (at, (search, result)) in searches.iter().zip(results).enumerate() {
-        let (login, nodes) = match result {
-            Ok(found) => found,
+        match result {
+            Ok(ids) => found.push(ids),
             Err(error) if at >= first_rule => {
                 failed_rules.push(format!("{}: {error}", search.label.as_deref().unwrap_or("rule")));
-                continue;
+                found.push((String::new(), Vec::new()));
             }
             Err(error) => return Err(error),
-        };
-        viewer = login;
-        for node in &nodes {
+        }
+    }
+
+    let mut viewer = String::new();
+    let mut own_ids = Vec::new();
+    let mut other_ids = Vec::new();
+    for (search, (login, ids)) in searches.iter().zip(&found) {
+        if !login.is_empty() {
+            viewer.clone_from(login);
+        }
+        for id in ids {
+            if own_ids.contains(id) || other_ids.contains(id) {
+                continue;
+            }
+            // The user's own search comes first, so their pull requests land here.
+            if search.reason == IncomingReason::NotIncoming {
+                own_ids.push(id.clone());
+            } else {
+                other_ids.push(id.clone());
+            }
+        }
+    }
+    let nodes = fetch_nodes(&own_ids, &other_ids)?;
+
+    let mut prs = Vec::<PullRequest>::new();
+    for (search, (_, ids)) in searches.iter().zip(&found) {
+        for node in ids.iter().filter_map(|id| nodes.get(id)) {
             let mine = node["author"]["login"]
                 .as_str()
                 .is_some_and(|login| login.eq_ignore_ascii_case(&viewer));
@@ -814,20 +839,15 @@ fn unanswered_threads(node: &serde_json::Value, author: &str) -> Option<u32> {
     (waiting > 0 || !cut_off).then_some(waiting as u32)
 }
 
-/// GitHub gives a query about ten seconds and answers 502 past that. With the checks and review
-/// threads of each pull request, pages of 30 ran over when measured on a long list of review
-/// requests; pages of 10 took between five and eight seconds.
-const PAGE_SIZE: u32 = 10;
+/// Search results listed by ID alone are cheap, so a page can be long.
+const ID_PAGE_SIZE: u32 = 100;
 
 /// The most pages one search reads every minute: 200 pull requests. Past that, a search is too
 /// broad to be an inbox, and reading it all would spend GitHub's rate limit on every sync.
-const MAX_PAGES: usize = 20;
+const MAX_PAGES: usize = 2;
 
-/// Every page of one search, with the signed-in account's login.
-fn fetch_search(
-    search: &Search,
-    options: SyncOptions,
-) -> Result<(String, Vec<serde_json::Value>), String> {
+/// The IDs of every pull request one search finds, with the signed-in account's login.
+fn search_ids(search: &Search, options: SyncOptions) -> Result<(String, Vec<String>), String> {
     // Archived repositories and old PRs are skipped server-side, which keeps the sync light. A
     // pull request is old when it was opened long ago: updated is never before created, so the
     // created date is the one that has to be inside the limit.
@@ -847,19 +867,13 @@ fn fetch_search(
     let term = serde_json::to_string(&format!("{}{archived}{recent}", search.query))
         .expect("serialize search");
 
-    // Review threads cost the most to ask for and only say something about the user's own pull
-    // requests, so only that search asks.
-    let own = search.reason == IncomingReason::NotIncoming;
-    let fields = PR_FIELDS
-        .replace("$own", if own { "true" } else { "false" })
-        .replace("$files", &FILES_FETCHED.to_string());
-    let mut nodes = Vec::new();
-    let mut nodes_viewer: Option<String> = None;
+    let mut ids = Vec::new();
+    let mut seen_viewer: Option<String> = None;
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
         let after = serde_json::to_string(&cursor).expect("serialize cursor");
         let query = format!(
-            "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {PAGE_SIZE}, after: {after}) {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }} }}{fields}"
+            "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {ID_PAGE_SIZE}, after: {after}) {{ nodes {{ ... on PullRequest {{ id }} }} pageInfo {{ hasNextPage endCursor }} }} }}"
         );
         // A page GitHub was too slow for once usually comes back the second time; any other
         // error (a lapsed login, a bad query) would fail the same way again.
@@ -874,17 +888,17 @@ fn fetch_search(
             .as_str()
             .ok_or_else(|| "GitHub did not return the signed-in account".to_string())?
             .to_owned();
-        nodes_viewer = Some(viewer.clone());
+        seen_viewer = Some(viewer.clone());
         let page = &data["s0"];
-        nodes.extend(
+        ids.extend(
             page["nodes"]
                 .as_array()
                 .ok_or_else(|| "GitHub did not return search results".to_string())?
                 .iter()
-                .cloned(),
+                .filter_map(|node| node["id"].as_str().map(str::to_owned)),
         );
         if page["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
-            return Ok((viewer, nodes));
+            return Ok((viewer, ids));
         }
         let next = page["pageInfo"]["endCursor"]
             .as_str()
@@ -892,8 +906,7 @@ fn fetch_search(
             .ok_or_else(|| "GitHub returned an invalid search cursor".to_string())?;
         cursor = Some(next.to_owned());
     }
-    let viewer = nodes_viewer.unwrap_or_default();
-    Ok((viewer, nodes))
+    Ok((seen_viewer.unwrap_or_default(), ids))
 }
 
 /// An error worth one more try: GitHub ran out of time, or the network dropped.
@@ -902,6 +915,70 @@ fn is_transient(error: &str) -> bool {
     ["502", "503", "504", "timeout", "timed out", "no answer", "something went wrong", "connection"]
         .iter()
         .any(|sign| error.contains(sign))
+}
+
+/// GitHub gives a query about ten seconds and answers 502 past that, and the fields of each pull
+/// request, its checks and reviews most of all, are what cost. Batches of 5 came back in about
+/// three seconds; batches of 10 took a second or two longer than running twice as many of 5.
+const BATCH_SIZE: usize = 5;
+/// How many batches are asked for at once, so a long list does not open dozens of requests.
+const PARALLEL_BATCHES: usize = 8;
+
+/// The fields of each pull request by node ID. Review threads cost the most to ask for and only
+/// say something about the user's own pull requests, so only `own` asks for them.
+fn fetch_nodes(
+    own: &[String],
+    others: &[String],
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    let batches: Vec<(bool, &[String])> = own
+        .chunks(BATCH_SIZE)
+        .map(|ids| (true, ids))
+        .chain(others.chunks(BATCH_SIZE).map(|ids| (false, ids)))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let fetched: Vec<Result<Vec<serde_json::Value>, String>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..PARALLEL_BATCHES.min(batches.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut nodes = Vec::new();
+                    while let Some((own, ids)) =
+                        batches.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        let fields = PR_FIELDS
+                            .replace("$own", if *own { "true" } else { "false" })
+                            .replace("$files", &FILES_FETCHED.to_string());
+                        let ids = serde_json::to_string(ids).expect("serialize ids");
+                        let query =
+                            format!("query {{ nodes(ids: {ids}) {{ ...PrFields }} }}{fields}");
+                        let mut data = fetch_graphql(&query).or_else(|error| {
+                            if is_transient(&error) { fetch_graphql(&query) } else { Err(error) }
+                        })?;
+                        let serde_json::Value::Array(batch) = data["nodes"].take() else {
+                            return Err("GitHub did not return the pull requests".to_string());
+                        };
+                        nodes.extend(batch);
+                    }
+                    Ok(nodes)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| {
+                w.join()
+                    .unwrap_or_else(|_| Err("A GitHub request stopped unexpectedly".to_string()))
+            })
+            .collect()
+    });
+    let mut by_id = std::collections::HashMap::new();
+    for nodes in fetched {
+        for node in nodes? {
+            if let Some(id) = node["id"].as_str() {
+                by_id.insert(id.to_owned(), node);
+            }
+        }
+    }
+    Ok(by_id)
 }
 
 fn fetch_graphql(query: &str) -> Result<serde_json::Value, String> {
@@ -1297,23 +1374,6 @@ pub fn update_branch(repo: &str, number: u64, head: &str) -> Result<(), String> 
         .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
 }
 
-/// Runs the failed jobs of these GitHub Actions runs again. A failure says how many had already
-/// started, so a partial rerun is not mistaken for none.
-pub fn rerun_failed(runs: &[(String, u64)]) -> Result<(), String> {
-    for (started, (repo, run)) in runs.iter().enumerate() {
-        gh_api_write("POST", &format!("repos/{repo}/actions/runs/{run}/rerun-failed-jobs"), &[])
-            .map_err(|e| {
-                let error = e.unwrap_or_else(|| "GitHub would not run these checks again".to_owned());
-                if started == 0 {
-                    error
-                } else {
-                    format!("{started} of {} runs started again; the next would not: {error}", runs.len())
-                }
-            })?;
-    }
-    Ok(())
-}
-
 /// A REST call that changes something and returns nothing worth reading. The error is the first
 /// line gh printed, when it printed one.
 fn gh_api_write(method: &str, path: &str, fields: &[String]) -> Result<(), Option<String>> {
@@ -1459,8 +1519,6 @@ mod tests {
         assert_eq!(cut.unanswered_threads, None);
         let failed: Vec<&str> = pr.failing_checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(failed, ["lint", "ci/vendor"]);
-        // Only the GitHub Actions run can be run again from here.
-        assert_eq!(pr.rerunnable(), [("o/r".to_owned(), 55)]);
         assert_eq!(pr.blockers(), [crate::model::Blocker::ChecksFailing]);
 
         // Asked by name on the 12th, after reviewing on the 10th: a second round.

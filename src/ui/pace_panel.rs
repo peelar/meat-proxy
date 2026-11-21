@@ -226,7 +226,7 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
         .justify_between()
         .hover_group()
         .role("button")
-        .label(if collapsed { "Show Pace" } else { "Hide Pace" })
+        .label(if collapsed { "Show Scoreboard" } else { "Hide Scoreboard" })
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(|s: &mut App, tx: &mut Tx| {
             tx.motion_curve(rune::Curve::tween(0.16, rune::Easing::cubic(0.2, 0.0, 0.0, 1.0)));
@@ -237,7 +237,7 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
                 .center_y()
                 .gap(8.0)
                 .child(rune::icon(&BOLT, 14.0).color(mint(k)).a11y_hidden())
-                .child(text("Pace").font(k.ty.ui_medium).color(c.text_base))
+                .child(text("Scoreboard").font(k.ty.ui_medium).color(c.text_base))
                 .child(el().size(1.0, 10.0).fill(c.border_base))
                 .child(caption),
         )
@@ -575,18 +575,18 @@ pub(crate) fn pace_section(s: &App, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
-        .child(text("Pace").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(text("Scoreboard").font(SECTION_TITLE).color(k.c.text_base))
         .child(
-            text("Keeps score of approvals and merges you make from here, and celebrates the quick ones. A big pull request approved faster than it reads earns no medal.")
+            text("Counts the pull requests you approve and merge from here, says on the row when one was quick, and shows your streak and median time to merge in a Scoreboard above the Inbox. A big pull request approved faster than it can be read earns no credit. Off, nothing is counted, flagged or shown.")
                 .wrap()
                 .font(k.ty.small)
                 .color(k.c.text_faint),
         )
         .child(setup_row(
             k,
-            "Show my pace",
+            "Enable scoreboard",
             Switch::new(s.pace_enabled)
-                .label("Show my pace")
+                .label("Enable scoreboard")
                 .hide_label()
                 .on_toggle(|s: &mut App| s.toggle_pace())
                 .build(k)

@@ -136,6 +136,20 @@ pub(crate) const COPY: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M7.2 5.6h4.2a1.6 1.6 0 0 1 1.6 1.6v4.2a1.6 1.6 0 0 1-1.6 1.6H7.2a1.6 1.6 0 0 1-1.6-1.6V7.2a1.6 1.6 0 0 1 1.6-1.6ZM10.4 3.9v-.3a1.2 1.2 0 0 0-1.2-1.2H4A1.6 1.6 0 0 0 2.4 4v5.2a1.2 1.2 0 0 0 1.2 1.2h.3"/>"#,
 };
 
+/// Claude Code: the spark.
+pub(crate) const CLAUDE: rune::Icon = rune::Icon {
+    name: "agent-claude",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M8 1.6v3.6M8 10.8v3.6M1.6 8h3.6M10.8 8h3.6M3.5 3.5l2.4 2.4M10.1 10.1l2.4 2.4M12.5 3.5l-2.4 2.4M5.9 10.1l-2.4 2.4"/>"#,
+};
+
+/// Codex: a prompt.
+pub(crate) const CODEX: rune::Icon = rune::Icon {
+    name: "agent-codex",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M3 4.6 6.6 8 3 11.4M8.4 11.6H13"/>"#,
+};
+
 /// The colour of the buttons that clear a blocker: a calm blue, apart from Approve's mint and
 /// Merge's violet.
 pub(crate) fn unblock_tone(k: &Kit) -> Color {

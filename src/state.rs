@@ -37,8 +37,6 @@ pub(crate) const PACE_FLASH_SECS: f32 = 3.2;
 pub enum Unblock {
     /// Bring the branch up to date with its base.
     UpdateBranch,
-    /// Run the failed GitHub Actions jobs again.
-    Rerun,
 }
 
 pub(crate) fn current_epoch_hour() -> u64 {
@@ -172,6 +170,11 @@ pub struct App {
     /// Actions already taken (`autonomy::key`) with when, so each happens once per commit.
     pub autonomy_done: std::collections::HashMap<String, i64>,
     pub autonomy_worker: Latest<Vec<autonomy::Outcome>>,
+    /// Settings › Fix with an agent, the model as typed, and the pull request an agent is on.
+    pub agent: agent::Config,
+    pub agent_model: TextEdit,
+    pub agent_running: Option<String>,
+    pub agent_worker: Latest<(String, Result<agent::Outcome, String>)>,
     /// Pace: the score of quick approvals and merges, on unless switched off in Settings; its
     /// panel above the Inbox, and whether it is folded.
     pub pace_enabled: bool,
@@ -320,6 +323,10 @@ pub(crate) fn init() -> App {
         unblocking: Vec::new(),
         heard: Vec::new(),
         copied: None,
+        agent: agent::Config::default(),
+        agent_model: TextEdit::new(""),
+        agent_running: None,
+        agent_worker: Latest::default(),
         autonomy_branches: false,
         autonomy_reviewers: false,
         autonomy_done: std::collections::HashMap::new(),
@@ -440,6 +447,8 @@ impl App {
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
         self.ai.enabled = snap.ai_enabled;
+        self.agent_model = TextEdit::new(&snap.agent.model);
+        self.agent = snap.agent;
         self.autonomy_branches = snap.autonomy_branches;
         self.autonomy_reviewers = snap.autonomy_reviewers;
         self.autonomy_done = snap.autonomy_done;
@@ -964,14 +973,58 @@ impl App {
                     (id, what, github::update_branch(&repo, number, &head))
                 });
             }
-            Unblock::Rerun if !pr.rerunnable().is_empty() => {
-                let runs = pr.rerunnable();
-                self.unblock_worker
-                    .request((), move |()| (id, what, github::rerun_failed(&runs)));
-            }
             _ => return,
         }
         self.unblocking.push(pr_id.to_owned());
+    }
+
+    /// Whether the Fix button is on offer: the setting is on and nothing else is running.
+    pub fn agent_ready(&self) -> bool {
+        self.agent.enabled && !self.preview && self.allow_os_side_effects
+    }
+
+    /// Start the configured agent on a pull request's prompt, detached. One at a time.
+    pub fn press_fix(&mut self, pr_id: &str) {
+        if !self.agent_ready() || self.agent_running.is_some() {
+            return;
+        }
+        let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
+            return;
+        };
+        let Some(prompt) = pr.agent_prompt() else {
+            return;
+        };
+        let (pr, cfg) = (pr.clone(), self.agent.clone());
+        self.agent_running = Some(pr.id.clone());
+        self.agent_worker.request((), move |()| {
+            let result = agent::run(&pr, &prompt, &cfg);
+            (pr.id.clone(), result)
+        });
+    }
+
+    fn save_setting(&self, key: &str, value: &str) {
+        if let Some(db) = self.db() {
+            let _ = db.set_setting(key, value);
+        }
+    }
+
+    pub fn toggle_agent(&mut self) {
+        self.agent.enabled = !self.agent.enabled;
+        self.save_flag("agent_enabled", self.agent.enabled);
+    }
+
+    pub fn pick_agent_provider(&mut self, provider: agent::Provider) {
+        self.agent.provider = provider;
+        self.save_setting("agent_provider", provider.id());
+    }
+
+    /// The model is typed in Settings; keep it once it differs from what is in effect.
+    pub(crate) fn apply_agent_model(&mut self) {
+        let typed = self.agent_model.text.trim().to_owned();
+        if typed != self.agent.model {
+            self.save_setting("agent_model", &typed);
+            self.agent.model = typed;
+        }
     }
 
     /// What pressing the auto-merge button does: Some(true) turns it on, Some(false) turns it off,

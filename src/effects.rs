@@ -52,6 +52,7 @@ pub(crate) fn setup(s: &mut App, waker: rune::Waker) {
     s.approve_worker.set_waker(waker.clone());
     s.unblock_worker.set_waker(waker.clone());
     s.autonomy_worker.set_waker(waker.clone());
+    s.agent_worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
@@ -120,7 +121,7 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
 /// Applies what was typed in Settings once the typing has paused.
 fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    let typed = [&s.max_age_input, &s.ai.url, &s.ai.model, &s.ai.key]
+    let typed = [&s.max_age_input, &s.ai.url, &s.ai.model, &s.ai.key, &s.agent_model]
         .map(|field| field.text.as_str())
         .join("\u{1f}");
     if s.typed.as_ref().is_none_or(|(seen, _)| *seen != typed) {
@@ -135,6 +136,7 @@ fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
             changed = true;
         }
         changed |= s.apply_ai_fields();
+        s.apply_agent_model();
     }
     changed
 }
@@ -522,10 +524,37 @@ fn on_actions(s: &mut App) -> bool {
                     "Could not {}. {error}",
                     match what {
                         Unblock::UpdateBranch => "update the branch",
-                        Unblock::Rerun => "run the checks again",
                     }
                 ));
             }
+        }
+        changed = true;
+    }
+    if let Some((id, result)) = s.agent_worker.take() {
+        s.agent_running = None;
+        let name = s.prs.iter().find(|p| p.id == id).cloned();
+        let sound_on = s.native_notifications && s.allow_os_side_effects;
+        match (result, name) {
+            (Ok(outcome), Some(pr)) => {
+                notify::post(&format!("agent-{id}"), "meat proxy", &outcome.announce(&pr), Some(&pr.url), sound_on);
+                match outcome {
+                    agent::Outcome::Pushed => s.trigger_sync(),
+                    agent::Outcome::NothingPushed { said, folder } => {
+                        s.status_banner = Some(format!(
+                            "The agent pushed nothing to {}#{}. {said} (clone kept in {})",
+                            pr.repo,
+                            pr.number,
+                            folder.display()
+                        ));
+                    }
+                }
+            }
+            (Err(error), pr) => {
+                let at = pr.map_or(String::new(), |p| format!(" on {}#{}", p.repo, p.number));
+                notify::post(&format!("agent-{id}"), "meat proxy", &format!("The agent failed{at}"), None, sound_on);
+                s.status_banner = Some(format!("Fix failed{at}. {error}"));
+            }
+            (Ok(_), None) => {}
         }
         changed = true;
     }
