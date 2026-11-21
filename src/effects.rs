@@ -88,7 +88,38 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         return false;
     }
     let mut changed = false;
+    changed |= apply_typed(s, tx);
+    changed |= on_boot(s);
+    changed |= on_setup(s, tx);
+    changed |= on_sync(s, clock);
+    changed |= tick_intro(s, tx);
+    changed |= on_judgments(s);
+    on_notifications(s, clock);
+    run_timers(s, clock);
+    changed |= on_autonomy(s);
+    changed |= on_actions(s);
+    changed |= tick_buttons(s, tx);
+    let label = s.sync_label();
+    if label != s.sync_label_shown {
+        s.sync_label_shown = label;
+        changed = true;
+    }
+    if s.onboarded {
+        // Wake each second at most, so "Synced 12s ago" keeps counting.
+        tx.wake_after(std::time::Duration::from_secs_f64(
+            (s.next_fast_poll_at.min(s.next_full_sync_at) - clock).clamp(0.01, 1.0),
+        ));
+    }
 
+    if s.page == Page::Inbox {
+        changed |= s.avatars.poll(&s.prs);
+    }
+    changed
+}
+
+/// Applies what was typed in Settings once the typing has paused.
+fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
+    let mut changed = false;
     let typed = [&s.max_age_input, &s.ai_url, &s.ai_model, &s.ai_key]
         .map(|field| field.text.as_str())
         .join("\u{1f}");
@@ -105,7 +136,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         }
         changed |= s.apply_ai_fields();
     }
+    changed
+}
 
+/// The saved data, read at launch.
+fn on_boot(s: &mut App) -> bool {
+    let mut changed = false;
     if let Some(snapshot) = s.boot_worker.take() {
         s.loading = false;
         match snapshot {
@@ -124,7 +160,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.trigger_discovery();
         changed = true;
     }
+    changed
+}
 
+/// Setup's workers: repositories found, one added by name, and signing in.
+fn on_setup(s: &mut App, tx: &mut Tx) -> bool {
+    let mut changed = false;
     if let Some(result) = s.discovery_worker.take() {
         match result {
             Ok(found) => {
@@ -172,7 +213,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         let printed = s.auth_lines.lock().map_or(0, |lines| lines.len());
         changed |= printed != std::mem::replace(&mut s.auth_lines_shown, printed);
     }
+    changed
+}
 
+/// A sync landed: the new lists, what they notify, and what is saved.
+fn on_sync(s: &mut App, clock: f64) -> bool {
+    let mut changed = false;
     if let Some(result) = s.sync_worker.take() {
         match result {
             Ok(mut out) => {
@@ -241,7 +287,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
+    changed
+}
 
+/// The intro and rows sliding in, a frame at a time.
+fn tick_intro(s: &mut App, tx: &mut Tx) -> bool {
+    let mut changed = false;
     if let Some(at) = s.intro {
         if at.elapsed().as_secs_f32() >= INTRO_SECS {
             s.intro = None;
@@ -260,7 +311,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         tx.wake_after(std::time::Duration::from_millis(16));
         changed = true;
     }
+    changed
+}
 
+/// The model's verdicts landed.
+fn on_judgments(s: &mut App) -> bool {
+    let mut changed = false;
     if let Some(batch) = s.judge_worker.take() {
         s.judge_spent += batch.usage.cost_usd;
         s.judge_off |= batch.fatal;
@@ -270,7 +326,11 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.store_judgments(batch.judged);
         changed = true;
     }
+    changed
+}
 
+/// GitHub's notifications feed answered.
+fn on_notifications(s: &mut App, clock: f64) {
     if let Some(Ok(notifications)) = s.fast_notif_worker.take() {
         s.notification_interval = notifications.interval;
         s.next_fast_poll_at = clock + s.notification_interval as f64;
@@ -301,7 +361,10 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             s.last_notif_modified = Some(modified);
         }
     }
+}
 
+/// Starts the notifications poll and the full sync when they are due.
+fn run_timers(s: &mut App, clock: f64) {
     if clock >= s.next_fast_poll_at {
         s.next_fast_poll_at = clock + s.notification_interval as f64;
         if s.onboarded
@@ -321,6 +384,11 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             s.trigger_sync();
         }
     }
+}
+
+/// What the Autonomous switches did on GitHub.
+fn on_autonomy(s: &mut App) -> bool {
+    let mut changed = false;
     if let Some(results) = s.autonomy_worker.take() {
         let mut errors = Vec::new();
         let now = chrono::Utc::now().timestamp();
@@ -357,6 +425,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.trigger_sync();
         changed = true;
     }
+    changed
+}
+
+/// The row buttons' jobs landed: auto-merge, resolve, merge, unblock and approve.
+fn on_actions(s: &mut App) -> bool {
+    let mut changed = false;
     if let Some((id, enable, result)) = s.auto_merge_worker.take() {
         s.auto_merging.retain(|x| *x != id);
         match result {
@@ -472,6 +546,12 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
+    changed
+}
+
+/// Armed buttons, washes, pace flashes and celebrations, a frame at a time.
+fn tick_buttons(s: &mut App, tx: &mut Tx) -> bool {
+    let mut changed = false;
     if s.approve_armed
         .as_ref()
         .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > ARMED_SECS)
@@ -526,21 +606,6 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         }
         tx.wake_after(std::time::Duration::from_millis(16));
         changed = true;
-    }
-    let label = s.sync_label();
-    if label != s.sync_label_shown {
-        s.sync_label_shown = label;
-        changed = true;
-    }
-    if s.onboarded {
-        // Wake each second at most, so "Synced 12s ago" keeps counting.
-        tx.wake_after(std::time::Duration::from_secs_f64(
-            (s.next_fast_poll_at.min(s.next_full_sync_at) - clock).clamp(0.01, 1.0),
-        ));
-    }
-
-    if s.page == Page::Inbox {
-        changed |= s.avatars.poll(&s.prs);
     }
     changed
 }
