@@ -449,6 +449,9 @@ pub struct PullRequest {
     /// People whose latest deciding review asks for changes, with when they sent it.
     #[serde(skip)]
     pub changes_requested: Vec<(String, String)>,
+    /// When the last approval still standing was sent (UTC, RFC 3339); empty when none is known.
+    #[serde(skip)]
+    pub approved_at: String,
 }
 
 /// Hours as a short span: 5h, 3d, 6mo, 2y.
@@ -1041,6 +1044,7 @@ mod tests {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         }
     }
 

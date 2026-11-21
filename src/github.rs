@@ -933,6 +933,12 @@ fn parse_graphql_pr(
         .filter(|(_, state, _)| state == "APPROVED")
         .map(|(who, _, _)| who.clone())
         .collect();
+    let approved_at = verdicts
+        .iter()
+        .filter(|(_, state, _)| state == "APPROVED")
+        .map(|(_, _, at)| at.clone())
+        .max()
+        .unwrap_or_default();
     let changes_requested: Vec<(String, String)> = verdicts
         .into_iter()
         .filter(|(_, state, at)| state == "CHANGES_REQUESTED" && !at.is_empty())
@@ -1040,6 +1046,7 @@ fn parse_graphql_pr(
             .to_owned(),
         requested_reviewers,
         changes_requested,
+        approved_at,
     })
 }
 
@@ -1250,6 +1257,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         PullRequest {
             id: "acme/engine#412".to_string(),
@@ -1292,6 +1300,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         PullRequest {
             id: "acme/engine#397".to_string(),
@@ -1334,6 +1343,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         PullRequest {
             id: "acme/engine#421".to_string(),
@@ -1376,6 +1386,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -1419,6 +1430,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         PullRequest {
             id: "acme/cli#889".to_string(),
@@ -1461,6 +1473,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         PullRequest {
             id: "acme/cli#908".to_string(),
@@ -1503,6 +1516,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         // --- acme/inbox (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -1547,6 +1561,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
         PullRequest {
             id: "acme/inbox#19".to_string(),
@@ -1590,6 +1605,7 @@ pub fn demo_prs() -> Vec<PullRequest> {
             last_commit_at: String::new(),
             requested_reviewers: Vec::new(),
             changes_requested: Vec::new(),
+            approved_at: String::new(),
         },
     ];
     for pr in &mut prs {

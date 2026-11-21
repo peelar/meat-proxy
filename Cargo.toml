@@ -11,7 +11,7 @@ rune-mac = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d
 rusqlite = "0.32.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = { version = "0.4", default-features = false, features = ["now"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

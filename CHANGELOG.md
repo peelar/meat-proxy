@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.7
+
+### Pace
+- A panel above the Inbox keeps score: your streak of days with an approval or merge, quick approvals and quick merges in the last 7 days, the median time from approval to merge, and a GitHub-style grid of the last 18 weeks. Click its header to fold it to one line; it stays folded.
+- Under the quick approvals and quick merges, the fastest of the week. Beat it and the row's pill says New best, with a cup, and so does the panel. Bold approvals never count as fastest.
+- When one lands, its number rolls up, today's cell pops and rings, and the row's pill catches the light. The grid is inked against your own usual pace, so its darkest cells stay rare; today stays dashed until you clear one.
+- Quick means within the hour: of being asked, for an approval; of the approval (or a later push), for a merge. A row says so for a moment when its approval or merge lands.
+- A pull request over 400 lines is never a quick approval, and one approved faster than 100 lines a minute is called bold: counted, no medal, and drawn as a dashed outline instead of ink.
+- Only what you approve or merge from meat proxy counts. Turn it all off in Settings › Pace; nothing is counted while it is off.
+
 ## 0.3.6
 
 ### Autonomous

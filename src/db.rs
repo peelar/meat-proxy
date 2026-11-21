@@ -36,6 +36,11 @@ pub struct AppSnapshot {
     pub autonomy_reviewers: bool,
     /// Actions already taken, one per pull request, action and commit.
     pub autonomy_done: std::collections::HashSet<String>,
+    /// Pace: keep score of quick approvals and merges (on unless switched off), whether its
+    /// panel is folded, and what it has counted.
+    pub pace_enabled: bool,
+    pub pace_collapsed: bool,
+    pub pace_events: Vec<crate::pace::Event>,
     /// Pull requests the user moved to Ignored.
     pub ignored: std::collections::HashSet<String>,
     /// Pull requests with auto-merge on, and what became of them.
@@ -216,6 +221,16 @@ impl Database {
             );",
         )?;
         self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pace_events (
+                at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                pr_id TEXT NOT NULL,
+                wait_minutes INTEGER,
+                lines INTEGER NOT NULL,
+                verdict TEXT NOT NULL
+            );",
+        )?;
+        self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS ignored_prs (
                 pr_id TEXT PRIMARY KEY,
                 ignored_at INTEGER NOT NULL
@@ -333,6 +348,9 @@ impl Database {
                 .lines()
                 .map(str::to_owned)
                 .collect(),
+            pace_enabled: self.flag("pace_enabled")?,
+            pace_collapsed: self.get_setting("pace_collapsed")?.is_some_and(|v| v == "1"),
+            pace_events: self.load_pace_events()?,
             layout_key: self.get_setting("inbox_layout")?,
             ignored: self.load_ignored()?,
             tracked: self.load_tracked()?,
@@ -384,6 +402,35 @@ impl Database {
     pub fn delete_tracked(&self, pr_id: &str) -> Result<(), rusqlite::Error> {
         self.conn
             .execute("DELETE FROM auto_merges WHERE pr_id = ?1", params![pr_id])?;
+        Ok(())
+    }
+
+    /// The last year of what Pace counted, oldest first.
+    pub fn load_pace_events(&self) -> Result<Vec<crate::pace::Event>, rusqlite::Error> {
+        let since = chrono::Utc::now().timestamp() - 366 * 86_400;
+        let mut stmt = self.conn.prepare(
+            "SELECT at, kind, pr_id, wait_minutes, lines, verdict FROM pace_events
+             WHERE at >= ?1 ORDER BY at",
+        )?;
+        let rows = stmt.query_map(params![since], |row| {
+            Ok(crate::pace::Event {
+                at: row.get(0)?,
+                kind: crate::pace::Kind::from_db(&row.get::<_, String>(1)?),
+                pr_id: row.get(2)?,
+                wait_minutes: row.get(3)?,
+                lines: row.get(4)?,
+                verdict: crate::pace::Verdict::from_db(&row.get::<_, String>(5)?),
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn add_pace_event(&self, e: &crate::pace::Event) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO pace_events (at, kind, pr_id, wait_minutes, lines, verdict)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![e.at, e.kind.as_str(), e.pr_id, e.wait_minutes, e.lines, e.verdict.as_str()],
+        )?;
         Ok(())
     }
 
@@ -560,6 +607,7 @@ impl Database {
                 last_commit_at: String::new(),
                 requested_reviewers: Vec::new(),
                 changes_requested: Vec::new(),
+                approved_at: String::new(),
             })
         })?;
         let mut out = Vec::new();
