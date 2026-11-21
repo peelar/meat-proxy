@@ -42,6 +42,8 @@ const ARRIVAL_STAGGER_SECS: f32 = 0.07;
 /// The first-launch intro: the button springs in, a finger presses it, the name appears, then the
 /// setup screen fades in. A click or Escape skips it; Reduce Motion never plays it.
 const INTRO_SECS: f32 = 5.0;
+/// How long typing in Settings pauses before what was typed applies.
+const TYPING_SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
 /// When the finger reaches the button.
 const INTRO_HIT: f32 = 1.45;
 
@@ -174,6 +176,10 @@ pub struct App {
     pub ai_key: TextEdit,
     /// The three AI fields as last applied, to notice an edit.
     ai_applied: (String, String, String),
+    /// What the typed settings (the age limit and the AI fields) held when last seen, and since
+    /// when: they apply once the typing stops, not on each keystroke, so "14" never applies "1"
+    /// and a half-typed address never gets the key.
+    typed: Option<(String, std::time::Instant)>,
     /// Pull requests moved to the Ignored section, and whether that section is open.
     pub ignored: std::collections::HashSet<String>,
     pub ignored_open: bool,
@@ -289,6 +295,7 @@ fn init() -> App {
             judge::DECISIONS_MODEL.into(),
             String::new(),
         ),
+        typed: None,
         ignored: std::collections::HashSet::new(),
         ignored_open: false,
         judgments: std::collections::HashMap::new(),
@@ -584,7 +591,7 @@ impl App {
         {
             let _ = db.set_setting("ai_enabled", if self.ai_enabled { "1" } else { "0" });
         }
-        // Private pull requests become (or stop being) candidates: ask again on the next sync.
+        // Review requests become (or stop being) candidates: ask again on the next sync.
         self.queue_judgments();
     }
 
@@ -1567,15 +1574,22 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     }
     let mut changed = false;
 
-    // The age limit is typed in Settings; apply it once it parses as a number.
-    if let Ok(days) = s.max_age_input.text.trim().parse::<u32>()
-        && days != s.sync_options.max_age_days
-    {
-        s.set_max_age_days(days);
-        changed = true;
+    let typed = [&s.max_age_input, &s.ai_url, &s.ai_model, &s.ai_key]
+        .map(|field| field.text.as_str())
+        .join("\u{1f}");
+    if s.typed.as_ref().is_none_or(|(seen, _)| *seen != typed) {
+        s.typed = Some((typed, std::time::Instant::now()));
+        tx.wake_after(TYPING_SETTLES);
+    } else if s.typed.as_ref().is_some_and(|(_, at)| at.elapsed() >= TYPING_SETTLES) {
+        // The age limit applies once it parses as a number.
+        if let Ok(days) = s.max_age_input.text.trim().parse::<u32>()
+            && days != s.sync_options.max_age_days
+        {
+            s.set_max_age_days(days);
+            changed = true;
+        }
+        changed |= s.apply_ai_fields();
     }
-
-    changed |= s.apply_ai_fields();
 
     if let Some(snapshot) = s.boot_worker.take() {
         s.loading = false;
@@ -5747,6 +5761,16 @@ fn seed_preview(s: &mut App) {
 /// `meat-proxy --judge-eval`: fetch the real pull requests (read only), judge them the way the app
 /// does, and print what each would get. Point MEAT_PROXY_DB at a copy of the database.
 fn judge_eval() {
+    // It sends what the app would: only with the feature shown and AI sorting switched on.
+    if !judge::feature_enabled() {
+        return eprintln!("The AI feature is hidden: run with MEAT_PROXY_AI=1.");
+    }
+    if !Database::open_default()
+        .and_then(|db| db.load_snapshot())
+        .is_ok_and(|snap| snap.ai_enabled)
+    {
+        return eprintln!("AI sorting is off: switch it on in Settings › AI first.");
+    }
     let Some(mut cfg) = judge::JudgeConfig::load() else {
         eprintln!("No judge config: put an api_key in ~/.config/meat-proxy/judge.json");
         return;

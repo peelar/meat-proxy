@@ -297,10 +297,9 @@ impl Layout {
 
 pub fn is_bot(author: &str) -> bool {
     let author = author.to_ascii_lowercase();
+    // Exact names: anyone can sign up as renovate-dev.
     author.ends_with("[bot]")
-        || author.contains("dependabot")
-        || author.contains("renovate")
-        || author == "github-actions"
+        || matches!(author.as_str(), "dependabot" | "renovate" | "github-actions")
 }
 
 fn is_reserved(id: &str) -> bool {
