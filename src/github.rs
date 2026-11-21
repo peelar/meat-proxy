@@ -41,6 +41,68 @@ fn gh_command() -> Command {
     cmd
 }
 
+/// How long one gh call may take. GitHub stops a query after about ten seconds; past a minute gh
+/// is stuck (a dead network, a prompt no one sees), and a stuck call would hold up every later
+/// sync, which waits for the one before it.
+const GH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+trait RunGh {
+    /// Runs gh to the end and returns what it printed, or stops it after `GH_TIMEOUT`.
+    fn run_gh(&mut self) -> Result<std::process::Output, String>;
+}
+
+impl RunGh for Command {
+    fn run_gh(&mut self) -> Result<std::process::Output, String> {
+        use std::io::Read;
+        use std::process::Stdio;
+        let mut child = self
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Could not run gh: {e}"))?;
+        // Read both pipes while waiting, so a long answer cannot fill one and stall gh.
+        fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut buf);
+                }
+                buf
+            })
+        }
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        let deadline = std::time::Instant::now() + GH_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| format!("Could not run gh: {e}"))? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("gh gave no answer in {} seconds", GH_TIMEOUT.as_secs()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
+    }
+}
+
+/// The first line gh printed to stderr, or `fallback` when it printed nothing.
+fn gh_error(out: &std::process::Output, fallback: &str) -> String {
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
 /// Signs the GitHub CLI in through the browser without a terminal. Each line gh prints is
 /// appended to `lines` as it arrives, and the device page opens once gh shows its one-time code
 /// (which `--clipboard` copies). Returns when gh finishes.
@@ -113,7 +175,7 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
     if let Some(lm) = last_modified {
         cmd.args(["-H", &format!("If-Modified-Since: {lm}")]);
     }
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    let out = cmd.run_gh()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let (headers, body) = stdout
         .split_once("\r\n\r\n")
@@ -348,10 +410,14 @@ pub fn verify_repo(input: &str) -> Result<String, String> {
             "--jq",
             ".full_name",
         ])
-        .output()
-        .map_err(|e| format!("Could not run gh: {e}"))?;
+        .run_gh()?;
     if !out.status.success() {
-        return Err(format!("GitHub can't find {owner}/{repo}."));
+        // Only a 404 means the name is wrong; a lapsed login or a dead network says so itself.
+        let error = gh_error(&out, "");
+        if error.is_empty() || error.contains("Not Found") || error.contains("404") {
+            return Err(format!("GitHub can't find {owner}/{repo}."));
+        }
+        return Err(error);
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
@@ -779,16 +845,10 @@ fn fetch_graphql(query: &str) -> Result<serde_json::Value, String> {
             "-f",
             &format!("query={query}"),
         ])
-        .output()
-        .map_err(|e| format!("Could not run gh: {e}"))?;
+        .run_gh()?;
 
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(stderr
-            .lines()
-            .next()
-            .unwrap_or("GitHub request failed")
-            .to_owned());
+        return Err(gh_error(&out, "GitHub request failed"));
     }
 
     let mut response: serde_json::Value =
@@ -1061,26 +1121,18 @@ pub fn set_auto_merge(url: &str, method: MergeMethod, enable: bool) -> Result<()
         command.arg("--disable-auto");
     }
     let out = command
-        .output()
-        .map_err(|e| format!("Could not run gh: {e}"))?;
+        .run_gh()?;
     if out.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("GitHub would not change auto-merge on this pull request")
-        .trim()
-        .to_owned())
+    Err(gh_error(&out, "GitHub would not change auto-merge on this pull request"))
 }
 
 /// OPEN, MERGED or CLOSED, for a pull request that has left the lists.
 pub fn pr_state(url: &str) -> Result<String, String> {
     let out = gh_command()
         .args(["pr", "view", url, "--json", "state", "-q", ".state"])
-        .output()
-        .map_err(|e| format!("Could not run gh: {e}"))?;
+        .run_gh()?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
@@ -1091,35 +1143,21 @@ pub fn pr_state(url: &str) -> Result<String, String> {
 pub fn approve_pr(url: &str) -> Result<(), String> {
     let out = gh_command()
         .args(["pr", "review", url, "--approve"])
-        .output()
-        .map_err(|e| format!("Could not run gh: {e}"))?;
+        .run_gh()?;
     if out.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("GitHub would not take this approval")
-        .trim()
-        .to_owned())
+    Err(gh_error(&out, "GitHub would not take this approval"))
 }
 
 pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
     let out = gh_command()
         .args(["pr", "merge", url, method.flag()])
-        .output()
-        .map_err(|e| format!("Could not run gh: {e}"))?;
+        .run_gh()?;
     if out.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("GitHub would not merge this pull request")
-        .trim()
-        .to_owned())
+    Err(gh_error(&out, "GitHub would not merge this pull request"))
 }
 
 /// Asks these people to review the pull request again, as the re-request arrows on GitHub do.
@@ -1156,16 +1194,11 @@ fn gh_api_write(method: &str, path: &str, fields: &[String]) -> Result<(), Optio
     for field in fields {
         command.args(["-f", field]);
     }
-    let out = command
-        .output()
-        .map_err(|e| Some(format!("Could not run gh: {e}")))?;
+    let out = command.run_gh().map_err(Some)?;
     if out.status.success() {
         return Ok(());
     }
-    Err(String::from_utf8_lossy(&out.stderr)
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_owned()))
+    Err(Some(gh_error(&out, "")).filter(|e| !e.is_empty()))
 }
 
 fn estimate_hours_since_iso8601(iso: &str) -> u64 {
