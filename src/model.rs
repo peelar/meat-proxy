@@ -693,56 +693,6 @@ impl PullRequest {
         )
     }
 
-    /// Detailed status pill text for the row.
-    pub fn status_badge(
-        &self,
-        draft_stale_hours: u64,
-        open_stale_hours: u64,
-        now_hour: u64,
-    ) -> String {
-        match self.attention(draft_stale_hours, open_stale_hours, now_hour) {
-            PrAttention::IncomingAssigned => "ASSIGNED TO YOU".to_string(),
-            PrAttention::IncomingViaTeam => "TEAM REVIEW REQUESTED".to_string(),
-            PrAttention::IncomingWatched => {
-                if let Some(r) = &self.matched_rule {
-                    format!("WATCHED · {r}")
-                } else {
-                    "WATCHED REPO".to_string()
-                }
-            }
-            PrAttention::MyDraftNeedsNudge => {
-                let d = (self.idle_hours / 24).max(1);
-                format!("DRAFT · {d}d IDLE — NUDGE")
-            }
-            PrAttention::MyDraftActive => {
-                if self.is_snoozed(now_hour) {
-                    "DRAFT · SNOOZED".to_string()
-                } else {
-                    "DRAFT".to_string()
-                }
-            }
-            PrAttention::MyOpenNeedsNudge => {
-                if self.reviewers.is_empty() {
-                    "OPEN · NO REVIEWER — NUDGE".to_string()
-                } else {
-                    let d = (self.unreviewed_hours / 24).max(1);
-                    format!("OPEN · {d}d UNREVIEWED — NUDGE")
-                }
-            }
-            PrAttention::MyOpenChangesRequested => "OPEN · CHANGES REQ".to_string(),
-            PrAttention::MyOpenBlocked => "OPEN · BLOCKED".to_string(),
-            PrAttention::MyOpenApproved => "OPEN · APPROVED".to_string(),
-            PrAttention::MyOpenWaiting => {
-                if self.is_snoozed(now_hour) {
-                    "OPEN · SNOOZED".to_string()
-                } else if !self.reviewers.is_empty() {
-                    format!("WAITING ON @{}", self.reviewers[0])
-                } else {
-                    "OPEN · WAITING".to_string()
-                }
-            }
-        }
-    }
 }
 
 /// Per-repository configuration & smart importance telemetry.

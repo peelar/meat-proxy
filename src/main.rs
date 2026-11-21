@@ -26,7 +26,6 @@ use model::{
     RepoConfig, WatchRule,
 };
 
-/// The Inbox tab's groups, most urgent first, until the user drags them elsewhere.
 /// How long a pressed Merge button waits for its confirming press.
 const ARMED_SECS: f32 = 4.0;
 /// How long a row stays washed in its button's colour after an approve or merge lands.
@@ -840,9 +839,6 @@ impl App {
         self.trigger_sync();
     }
 
-    /// A drag ended: `order` is the displayed repositories, pinned first, and the dragged one
-    /// moved from `from` to `to`. Dropping among the pinned ones pins it there; dragging a pinned
-    /// one below them unpins it. The automatic section can't be reordered by hand.
     /// Shown the first time notifications are on, and whenever they are switched back on, so
     /// the user sees what to expect and macOS asks for permission right then.
     pub fn send_welcome_notification(&self) {
@@ -1188,6 +1184,9 @@ impl App {
         }
     }
 
+    /// A drag ended: `order` is the displayed repositories, pinned first, and the dragged one
+    /// moved from `from` to `to`. Dropping among the pinned ones pins it there; dragging a pinned
+    /// one below them unpins it. The automatic section can't be reordered by hand.
     pub fn drop_repo(&mut self, order: &[String], from: usize, to: usize) {
         if from >= order.len() || to >= order.len() || from == to {
             return;
