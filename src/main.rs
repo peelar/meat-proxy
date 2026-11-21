@@ -153,6 +153,9 @@ pub struct App {
     pub new_rule_exclude_drafts: bool,
     pub new_rule_exclude_mine: bool,
     pub status_banner: Option<String>,
+    /// The saved data could not be read at launch. Setup must not run over it then: finishing
+    /// setup replaces the saved pull requests.
+    pub boot_failed: bool,
     pub boot_worker: Latest<Result<db::AppSnapshot, rusqlite::Error>>,
     pub sync_worker: Latest<Result<SyncOutput, String>>,
     /// A sync was asked for while one ran; it starts when that one lands.
@@ -277,6 +280,7 @@ fn init() -> App {
         new_rule_exclude_drafts: true,
         new_rule_exclude_mine: true,
         status_banner: None,
+        boot_failed: false,
         boot_worker: Latest::default(),
         sync_worker: Latest::default(),
         sync_again: false,
@@ -1314,6 +1318,9 @@ impl App {
     }
 
     pub fn complete_onboarding(&mut self) {
+        if self.boot_failed {
+            return;
+        }
         if !matches!(self.sync_status, SyncStatus::Connected { .. }) {
             self.page = Page::Onboarding;
             return;
@@ -1455,7 +1462,15 @@ impl App {
                 Some("Enter both a rule name and a GitHub filter query.".to_string());
             return;
         }
-        let id = format!("rule-custom-{}", self.rules.len() + 1);
+        // One past the highest number in use: after a rule is removed, the count is taken.
+        let next = self
+            .rules
+            .iter()
+            .filter_map(|r| r.id.strip_prefix("rule-custom-")?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let id = format!("rule-custom-{next}");
         let rule = WatchRule {
             id,
             name: name.clone(),
@@ -1595,7 +1610,12 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.loading = false;
         match snapshot {
             Ok(snap) => s.apply_snapshot(snap),
-            Err(error) => s.status_banner = Some(format!("Could not read saved settings. {error}")),
+            Err(error) => {
+                s.boot_failed = true;
+                s.status_banner = Some(format!(
+                    "Could not read saved settings, so nothing will be saved over them. Quit and open meat proxy again. {error}"
+                ));
+            }
         }
         if !s.onboarded {
             s.intro = Some(std::time::Instant::now());
@@ -1679,6 +1699,11 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
                 s.sync_status = out.status;
                 s.last_synced = Some(std::time::Instant::now());
+                // The list now says what GitHub thinks of each approval, so an approval made here
+                // stops holding its button once its wash is over: a push that dismissed it can
+                // be approved again.
+                s.approved
+                    .retain(|(_, at)| at.elapsed().as_secs_f32() < INK_WASH_SECS);
                 s.repos = github::infer_repos_from_prs(&out.prs, &s.repos);
                 s.note_arrivals(&out.prs);
                 s.prs = out.prs;
@@ -1934,6 +1959,18 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             Err(error) => s.status_banner = Some(format!("Could not approve. {error}")),
         }
         changed = true;
+    }
+    // A job that panicked settles with nothing to land; its button must not stay busy for good.
+    for (pending, busy) in [
+        (s.merge_worker.is_pending(), &mut s.merging),
+        (s.approve_worker.is_pending(), &mut s.approving),
+        (s.unblock_worker.is_pending(), &mut s.unblocking),
+        (s.auto_merge_worker.is_pending(), &mut s.auto_merging),
+    ] {
+        if !pending && !busy.is_empty() {
+            busy.clear();
+            changed = true;
+        }
     }
     if s.approve_armed
         .as_ref()
@@ -6951,6 +6988,26 @@ mod tests {
         // The automatic zone can't be reordered by hand.
         state.drop_repo(&names(&state), 2, 3);
         assert_eq!(names(&state), ["o/b", "o/a", "o/d", "o/c"]);
+    }
+
+    #[test]
+    fn a_new_rule_never_takes_the_id_of_one_still_there() {
+        let mut state = init();
+        state.preview = true;
+        for name in ["one", "two"] {
+            state.new_rule_name = TextEdit::new(name);
+            state.new_rule_query = TextEdit::new("is:pr label:x");
+            state.add_custom_rule();
+        }
+        state.rules.retain(|r| r.name != "one");
+        state.new_rule_name = TextEdit::new("three");
+        state.new_rule_query = TextEdit::new("is:pr label:y");
+        state.add_custom_rule();
+        let mut ids: Vec<&str> = state.rules.iter().map(|r| r.id.as_str()).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "{ids:?}");
     }
 
     #[test]
