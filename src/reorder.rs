@@ -9,18 +9,11 @@ pub struct Reorder {
     to: usize,
     dy: f32,
     pitch: f32,
-    gap: f32,
 }
 
 impl Reorder {
     pub fn new() -> Reorder {
         Reorder::default()
-    }
-
-    /// Points between rows, so a row steps aside by its height plus this.
-    pub fn gap(mut self, points: f32) -> Self {
-        self.gap = points.max(0.0);
-        self
     }
 
     pub fn dragging(&self) -> Option<usize> {
@@ -34,7 +27,7 @@ impl Reorder {
                 return;
             }
             self.from = Some(index);
-            self.pitch = (height + self.gap).max(1.0);
+            self.pitch = height.max(1.0);
         }
         self.dy = dy;
         let to = index as f32 + (dy / self.pitch).round();
@@ -70,14 +63,14 @@ mod tests {
 
     #[test]
     fn rows_between_the_place_and_the_target_step_aside() {
-        let mut r = Reorder::new().gap(4.0);
+        let mut r = Reorder::new();
         r.follow(1, 5, 3.0, 32.0);
         assert_eq!(r.dragging(), None, "inside the slop it's still a press");
-        r.follow(1, 5, 80.0, 32.0);
+        r.follow(1, 5, 70.0, 32.0);
         assert_eq!(r.dragging(), Some(1));
-        assert_eq!(r.shift(1), 80.0);
-        assert_eq!(r.shift(2), -36.0);
-        assert_eq!(r.shift(3), -36.0);
+        assert_eq!(r.shift(1), 70.0);
+        assert_eq!(r.shift(2), -32.0);
+        assert_eq!(r.shift(3), -32.0);
         assert_eq!(r.shift(4), 0.0);
         assert_eq!(r.end(false), Some((1, 3)));
         r.follow(2, 5, 60.0, 32.0);

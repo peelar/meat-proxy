@@ -779,34 +779,6 @@ impl Database {
         Ok(out)
     }
 
-    pub fn upsert_rule(&self, rule: &WatchRule) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "INSERT INTO rules (id, name, query, exclude_drafts, exclude_mine, enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                query = excluded.query,
-                exclude_drafts = excluded.exclude_drafts,
-                exclude_mine = excluded.exclude_mine,
-                enabled = excluded.enabled",
-            params![
-                rule.id,
-                rule.name,
-                rule.query,
-                i64::from(rule.exclude_drafts),
-                i64::from(rule.exclude_mine),
-                i64::from(rule.enabled),
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_rule(&self, id: &str) -> Result<(), rusqlite::Error> {
-        self.conn
-            .execute("DELETE FROM rules WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
     pub fn load_notifications(&self) -> Result<Vec<NotificationEvent>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, body, pr_url, kind, timestamp_label, unread

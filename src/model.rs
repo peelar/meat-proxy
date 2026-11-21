@@ -128,38 +128,6 @@ pub enum PrAttention {
 }
 
 impl PrAttention {
-    /// Lower rank sorts higher inside a repository section.
-    pub fn urgency_rank(self) -> u8 {
-        match self {
-            PrAttention::IncomingAssigned => 0,
-            PrAttention::MyOpenNeedsNudge => 1,
-            PrAttention::MyOpenChangesRequested => 2,
-            PrAttention::MyOpenBlocked => 3,
-            PrAttention::MyDraftNeedsNudge => 4,
-            PrAttention::MyOpenApproved => 5,
-            PrAttention::IncomingViaTeam => 6,
-            PrAttention::IncomingWatched => 7,
-            PrAttention::MyOpenWaiting => 8,
-            PrAttention::MyDraftActive => 9,
-        }
-    }
-
-    /// Which "what do I do" group the Inbox tab files this under: its position and heading.
-    pub fn action_group(self) -> (u8, &'static str) {
-        match self {
-            PrAttention::IncomingAssigned => (0, "Review these"),
-            PrAttention::MyOpenChangesRequested => (1, "Address feedback"),
-            PrAttention::MyOpenApproved => (2, "Merge these"),
-            PrAttention::IncomingViaTeam => (3, "Team reviews"),
-            PrAttention::MyOpenBlocked => (4, "Unblock"),
-            PrAttention::MyOpenNeedsNudge => (5, "Get a reviewer"),
-            PrAttention::MyDraftNeedsNudge => (6, "Finish or close"),
-            PrAttention::IncomingWatched
-            | PrAttention::MyOpenWaiting
-            | PrAttention::MyDraftActive => (7, "Other"),
-        }
-    }
-
     pub fn requires_action(self) -> bool {
         matches!(
             self,
@@ -173,12 +141,6 @@ impl PrAttention {
         )
     }
 
-    pub fn is_nudge(self) -> bool {
-        matches!(
-            self,
-            PrAttention::MyOpenNeedsNudge | PrAttention::MyDraftNeedsNudge
-        )
-    }
 }
 
 /// Something that keeps a pull request from merging and that its author can clear without anyone
@@ -468,29 +430,6 @@ pub fn span(hours: u64) -> String {
 }
 
 impl PullRequest {
-    /// How much this PR deserves a place near the top of the Inbox tab. Someone waiting on you
-    /// comes first, then your own PRs that are blocked or ready to ship, then nudges; the longer
-    /// a PR has waited, the higher it climbs within its group.
-    pub fn importance(&self, draft_stale_hours: u64, open_stale_hours: u64, now_hour: u64) -> u32 {
-        let base: u32 = match self.attention(draft_stale_hours, open_stale_hours, now_hour) {
-            PrAttention::IncomingAssigned => 100,
-            PrAttention::MyOpenChangesRequested => 80,
-            PrAttention::MyOpenBlocked => 75,
-            PrAttention::MyOpenApproved => 70,
-            PrAttention::IncomingViaTeam => 55,
-            PrAttention::MyOpenNeedsNudge => 50,
-            PrAttention::MyDraftNeedsNudge => 40,
-            PrAttention::IncomingWatched => 20,
-            PrAttention::MyOpenWaiting => 10,
-            PrAttention::MyDraftActive => 5,
-        };
-        let waited_days = (self.unreviewed_hours.max(self.idle_hours) / 24).min(12) as u32;
-        let ci =
-            u32::from(self.ci_status == CiStatus::Failing && self.ownership == Ownership::Mine)
-                * 10;
-        base + waited_days * 2 + ci
-    }
-
     pub fn is_snoozed(&self, now_hour: u64) -> bool {
         self.snoozed_until_hour > now_hour
     }
@@ -1058,7 +997,6 @@ mod tests {
         let (named, team) = (named.attention(72, 48, 0), team.attention(72, 48, 0));
         assert_eq!(named, PrAttention::IncomingAssigned);
         assert_eq!(team, PrAttention::IncomingViaTeam);
-        assert!(named.urgency_rank() < team.urgency_rank());
         assert!(
             team.requires_action(),
             "still shows in the Inbox tab, just lower"
@@ -1071,45 +1009,6 @@ mod tests {
 
     fn team_reason() -> IncomingReason {
         IncomingReason::TeamReviewRequested
-    }
-
-    #[test]
-    fn inbox_ranks_people_waiting_on_you_before_your_own_prs() {
-        let mut named = my_pr("org/a", 1, 1);
-        named.ownership = Ownership::Theirs;
-        named.incoming_reason = IncomingReason::AssignedOrReviewRequested;
-        let mut team = named.clone();
-        team.incoming_reason = IncomingReason::TeamReviewRequested;
-        let mut changes = my_pr("org/a", 2, 1);
-        changes.review_state = ReviewState::ChangesRequested;
-        let mut approved = my_pr("org/a", 3, 1);
-        approved.review_state = ReviewState::Approved;
-        let score = |p: &PullRequest| p.importance(72, 48, 0);
-        assert!(score(&named) > score(&changes));
-        assert!(score(&changes) > score(&approved));
-        assert!(score(&approved) > score(&team));
-        let mut old_team = team.clone();
-        old_team.idle_hours = 24 * 9;
-        old_team.unreviewed_hours = 24 * 9;
-        assert!(score(&old_team) > score(&team), "waiting longer climbs");
-    }
-
-    #[test]
-    fn every_attention_has_an_action_group_and_the_groups_follow_priority() {
-        use PrAttention::*;
-        let order = [
-            IncomingAssigned,
-            MyOpenChangesRequested,
-            MyOpenApproved,
-            IncomingViaTeam,
-            MyOpenNeedsNudge,
-            MyDraftNeedsNudge,
-        ];
-        let groups: Vec<u8> = order.iter().map(|a| a.action_group().0).collect();
-        assert!(groups.windows(2).all(|w| w[0] < w[1]), "{groups:?}");
-        for a in [IncomingWatched, MyOpenWaiting, MyDraftActive] {
-            assert!(!a.requires_action());
-        }
     }
 
     #[test]
