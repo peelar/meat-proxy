@@ -54,13 +54,25 @@ pub fn default_db_path() -> PathBuf {
     if let Ok(custom) = std::env::var("MEAT_PROXY_DB") {
         return PathBuf::from(custom);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let dir = PathBuf::from(home).join(".config/meat-proxy");
-        let _ = std::fs::create_dir_all(&dir);
-        return dir.join("meat-proxy.sqlite3");
+    // A test that reaches a write must never touch the developer's own data.
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("meat-proxy-test-{}.sqlite3", std::process::id()));
+    #[cfg(not(test))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = PathBuf::from(home).join(".config/meat-proxy");
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            return dir.join("meat-proxy.sqlite3");
+        }
+        PathBuf::from("meat-proxy.sqlite3")
     }
-    PathBuf::from("meat-proxy.sqlite3")
 }
+
+/// Raise it with each change to the schema, and add the change to `migrate`.
+const SCHEMA_VERSION: i64 = 1;
 
 pub struct Database {
     conn: Connection,
@@ -81,18 +93,52 @@ impl Database {
     }
 
     pub fn open(path: &PathBuf) -> Result<Self, rusqlite::Error> {
+        // It holds titles and verdicts from private repositories: the owner's alone. SQLite gives
+        // its -wal and -shm files the database file's permissions.
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path);
+        }
         let conn = Connection::open(path)?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
     }
 
+    /// Settings for this connection, then the schema brought up to `SCHEMA_VERSION` once: a
+    /// database already there costs one read.
     fn init_schema(&self) -> Result<(), rusqlite::Error> {
+        // A second copy of the app (or `--judge-eval`) waits its turn instead of failing.
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        self.conn
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        let version = |conn: &Connection| {
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+        };
+        if version(&self.conn)? >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        // One writer at a time, all or nothing: whoever comes second finds it done.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if version(&tx)? < SCHEMA_VERSION {
+            self.migrate()?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        tx.commit()
+    }
+
+    /// Every schema change, each safe to run on a database that already has it (version 1 is the
+    /// schema from before versions were kept, so it meets every older shape).
+    fn migrate(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute_batch(
             "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -152,65 +198,36 @@ impl Database {
             );
             ",
         )?;
-        let migrated: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('pull_requests') WHERE name='stack_base')", [], |r| r.get(0))?;
-        if !migrated {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &self.conn,
-                rusqlite::TransactionBehavior::Immediate,
+        let has = |table: &str, column: &str| -> Result<bool, rusqlite::Error> {
+            self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+                [table, column],
+                |r| r.get(0),
+            )
+        };
+        if !has("pull_requests", "stack_base")? {
+            self.conn.execute_batch(
+                "ALTER TABLE pull_requests ADD COLUMN head_repo TEXT;
+                 ALTER TABLE pull_requests ADD COLUMN stack_base TEXT;",
             )?;
-            let already_done: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('pull_requests') WHERE name='stack_base')", [], |r| r.get(0))?;
-            if !already_done {
-                tx.execute_batch(
-                    "ALTER TABLE pull_requests ADD COLUMN head_repo TEXT;
-                                  ALTER TABLE pull_requests ADD COLUMN stack_base TEXT;",
-                )?;
-            }
-            tx.commit()?;
         }
-        let has_opened: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pull_requests') WHERE name='opened_hours')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_opened {
+        if !has("pull_requests", "opened_hours")? {
             self.conn.execute(
                 "ALTER TABLE pull_requests ADD COLUMN opened_hours INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
-        let has_approvers: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pull_requests') WHERE name='approved_by')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_approvers {
+        if !has("pull_requests", "approved_by")? {
             self.conn.execute(
                 "ALTER TABLE pull_requests ADD COLUMN approved_by TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
         }
-        let has_removed: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repos') WHERE name='removed')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_removed {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &self.conn,
-                rusqlite::TransactionBehavior::Immediate,
+        if !has("repos", "removed")? {
+            self.conn.execute_batch(
+                "ALTER TABLE repos ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE repos ADD COLUMN activity INTEGER NOT NULL DEFAULT 0;",
             )?;
-            let already_done: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repos') WHERE name='removed')",
-                [],
-                |r| r.get(0),
-            )?;
-            if !already_done {
-                tx.execute_batch(
-                    "ALTER TABLE repos ADD COLUMN removed INTEGER NOT NULL DEFAULT 0;
-                     ALTER TABLE repos ADD COLUMN activity INTEGER NOT NULL DEFAULT 0;",
-                )?;
-            }
-            tx.commit()?;
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS auto_merges (
@@ -239,12 +256,7 @@ impl Database {
         )?;
         // Judgments keep one answer per question, so questions can be added in the config. The
         // earlier fixed columns are dropped: the cache is cheap to fill again.
-        let fixed_columns: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('judgments') WHERE name='trivial')",
-            [],
-            |r| r.get(0),
-        )?;
-        if fixed_columns {
+        if has("judgments", "trivial")? {
             self.conn.execute("DROP TABLE judgments", [])?;
         }
         self.conn.execute_batch(
@@ -625,21 +637,23 @@ impl Database {
     }
 
     pub fn save_prs(&self, prs: &[PullRequest]) -> Result<(), rusqlite::Error> {
-        // Preserve existing snoozed_until_hour if already snoozed in DB
         let tx = self.conn.unchecked_transaction()?;
         self.replace_prs(prs)?;
         tx.commit()
     }
 
+    /// Replaces the saved pull requests, keeping a snooze already saved for one.
     fn replace_prs(&self, prs: &[PullRequest]) -> Result<(), rusqlite::Error> {
-        let existing = self.load_prs()?;
+        let snoozed: std::collections::HashMap<String, u64> = self
+            .load_prs()?
+            .into_iter()
+            .map(|e| (e.id, e.snoozed_until_hour))
+            .collect();
         self.conn.execute("DELETE FROM pull_requests", [])?;
         for pr in prs {
-            let snooze = existing
-                .iter()
-                .find(|e| e.id == pr.id)
-                .map(|e| e.snoozed_until_hour.max(pr.snoozed_until_hour))
-                .unwrap_or(pr.snoozed_until_hour);
+            let snooze = snoozed
+                .get(&pr.id)
+                .map_or(pr.snoozed_until_hour, |s| (*s).max(pr.snoozed_until_hour));
             let reviewers_json =
                 serde_json::to_string(&pr.reviewers).unwrap_or_else(|_| "[]".to_string());
             self.conn.execute(
@@ -850,5 +864,56 @@ impl Database {
         }
         self.set_setting("onboarded", "1")?;
         tx.commit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_old_database_is_brought_up_to_date_once_and_keeps_its_data() {
+        let dir = std::env::temp_dir().join(format!("meat-proxy-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        // The shape an early version left: no versions kept, columns added later missing.
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO settings VALUES ('onboarded', '1');
+             CREATE TABLE repos (name TEXT PRIMARY KEY, manual_rank INTEGER NOT NULL,
+                 pinned INTEGER NOT NULL DEFAULT 0, my_pr_volume INTEGER NOT NULL DEFAULT 0,
+                 assigned_review_volume INTEGER NOT NULL DEFAULT 0, collapsed INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO repos (name, manual_rank) VALUES ('o/r', 1);
+             CREATE TABLE judgments (pr_id TEXT PRIMARY KEY, trivial REAL);",
+        )
+        .unwrap();
+        drop(old);
+
+        let db = Database::open(&path).unwrap();
+        let snap = db.load_snapshot().unwrap();
+        assert!(snap.onboarded);
+        assert_eq!(snap.repos.len(), 1);
+        assert!(!snap.repos[0].removed);
+        let version: i64 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        // Opening again finds it done and leaves what was saved since.
+        db.set_setting("organization", "acme").unwrap();
+        drop(db);
+        let again = Database::open(&path).unwrap();
+        assert_eq!(again.get_setting("organization").unwrap().as_deref(), Some("acme"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_database_is_the_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("meat-proxy-perm-{}.sqlite3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Database::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_file(&path);
     }
 }
