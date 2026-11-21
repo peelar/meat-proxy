@@ -215,6 +215,15 @@ impl Layout {
             .position(|s| s.when.iter().all(|c| self.holds(c, subject)))
     }
 
+    /// Whether any section depends on a question: `needed_questions` is not empty. Asked for every
+    /// row on every frame, so it allocates nothing.
+    pub fn asks_anything(&self) -> bool {
+        self.sections
+            .iter()
+            .flat_map(|s| &s.when)
+            .any(|cond| matches!(&cond.term, Term::Question(id) | Term::Level(id, ..) if self.questions.iter().any(|q| q.id == *id)))
+    }
+
     /// The questions something in the layout depends on. Without any, no model is ever asked.
     pub fn needed_questions(&self) -> Vec<Question> {
         let mut used: Vec<&str> = Vec::new();
@@ -456,6 +465,7 @@ mod tests {
         assert_eq!(layout.sections.len(), 13);
         assert_eq!(layout.sections[0].name, "Merge these");
         assert_eq!(layout.needed_questions().len(), 2);
+        assert!(layout.asks_anything());
         assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());
     }
 

@@ -153,7 +153,13 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let now = chrono::Local::now().fixed_offset();
     let today = now.date_naive();
-    let stats = pace::Stats::new(&s.pace_events, now);
+    let last = s.pace_events.last().map_or(0, |e| e.at);
+    let key = (s.pace_events.len(), last, now.timestamp() / 60);
+    let stats = match &*s.pace_stats.borrow() {
+        Some((at, stats)) if *at == key => stats.clone(),
+        _ => pace::Stats::new(&s.pace_events, now),
+    };
+    *s.pace_stats.borrow_mut() = Some((key, stats.clone()));
     let landing = pace_landing(s, now);
     let age = landing.as_ref().map_or(f32::MAX, |(age, _, _)| *age);
     let before = |f: &dyn Fn(&pace::Stats) -> String| landing.as_ref().map(|(_, _, b)| f(b));

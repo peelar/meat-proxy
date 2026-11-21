@@ -145,6 +145,9 @@ pub struct App {
     /// when: they apply once the typing stops, not on each keystroke, so "14" never applies "1"
     /// and a half-typed address never gets the key.
     pub(crate) typed: Option<(String, std::time::Instant)>,
+    /// The Pace panel's numbers, with the events (count, newest) and minute they were worked out for: the
+    /// panel is drawn every frame while something animates, and they change far less often.
+    pub(crate) pace_stats: std::cell::RefCell<Option<(PaceKey, pace::Stats)>>,
     /// Pull requests moved to the Ignored section, and whether that section is open.
     pub ignored: std::collections::HashSet<String>,
     pub ignored_open: bool,
@@ -177,6 +180,9 @@ pub struct App {
     /// What was just counted, and when: the row says so, and the panel's number pulses.
     pub pace_flash: Vec<(pace::Event, std::time::Instant)>,
 }
+
+/// What the Pace panel's numbers depend on: how many events, the newest one's time, the minute.
+pub(crate) type PaceKey = (usize, i64, i64);
 
 /// The AI feature, apart from the rest of the app: hidden unless `MEAT_PROXY_AI=1`.
 pub struct Ai {
@@ -289,6 +295,7 @@ pub(crate) fn init() -> App {
         show_team_reviews: false,
         ai: Ai::new(),
         typed: None,
+        pace_stats: std::cell::RefCell::new(None),
         ignored: std::collections::HashSet::new(),
         ignored_open: false,
         auth_worker: Latest::default(),
@@ -486,7 +493,7 @@ impl App {
         self.ai.feature
             && self.ai.enabled
             && (self.ai.config.is_some() || !self.ai.judgments.is_empty())
-            && !self.layout.needed_questions().is_empty()
+            && self.layout.asks_anything()
     }
 
     /// Sorting with the model's verdicts. The user's choice wins; without one, the model is used
