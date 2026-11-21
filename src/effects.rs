@@ -277,6 +277,7 @@ fn on_sync(s: &mut App, clock: f64) -> bool {
                     if let Some(db) = s.db() {
                         let _ = db.save_prs(&s.prs);
                         let _ = db.save_repos(&s.repos);
+                        let _ = db.prune();
                     }
                 }
             }

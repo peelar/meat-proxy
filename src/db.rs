@@ -444,6 +444,23 @@ impl Database {
         rows.collect()
     }
 
+    /// Keeps the history from growing without end. Pace looks back a year, so older events go.
+    /// A notification's id is what stops it being shown twice, so every one about a pull request
+    /// still saved stays; of the rest, the newest 500 stay.
+    pub fn prune(&self) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM pace_events WHERE at < ?1",
+            params![chrono::Utc::now().timestamp() - 366 * 86_400],
+        )?;
+        self.conn.execute(
+            "DELETE FROM notifications
+             WHERE pr_url NOT IN (SELECT url FROM pull_requests)
+               AND rowid NOT IN (SELECT rowid FROM notifications ORDER BY rowid DESC LIMIT 500)",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn add_pace_event(&self, e: &crate::pace::Event) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO pace_events (at, kind, pr_id, wait_minutes, lines, verdict)
@@ -859,6 +876,46 @@ mod tests {
         let again = Database::open(&path).unwrap();
         assert_eq!(again.get_setting("organization").unwrap().as_deref(), Some("acme"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pruning_keeps_what_stops_a_notification_repeating() {
+        let db = Database::open_in_memory().unwrap();
+        let mut open = crate::scenes::demo_prs().remove(0);
+        open.url = "https://github.com/o/r/pull/1".into();
+        db.save_prs(&[open.clone()]).unwrap();
+        let event = |id: String, url: &str| NotificationEvent {
+            id,
+            title: String::new(),
+            body: String::new(),
+            pr_url: url.into(),
+            kind: NotificationKind::ReviewActivity,
+            timestamp_label: String::new(),
+            unread: false,
+        };
+        // The oldest notification is about a pull request still open; 600 more are about gone ones.
+        db.insert_notification(&event("assign-open".into(), &open.url)).unwrap();
+        for n in 0..600 {
+            db.insert_notification(&event(format!("gone-{n}"), "https://github.com/o/r/pull/9")).unwrap();
+        }
+        let now = chrono::Utc::now().timestamp();
+        for at in [now - 400 * 86_400, now - 10 * 86_400] {
+            db.add_pace_event(&crate::pace::Event {
+                at,
+                kind: crate::pace::Kind::Approve,
+                pr_id: "o/r#1".into(),
+                wait_minutes: Some(3),
+                lines: 10,
+                verdict: crate::pace::Verdict::Quick,
+            })
+            .unwrap();
+        }
+        db.prune().unwrap();
+        let count = |sql: &str| db.conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert!(!db.insert_notification(&event("assign-open".into(), &open.url)).unwrap(), "still known");
+        assert_eq!(count("SELECT COUNT(*) FROM notifications"), 501);
+        assert_eq!(count("SELECT COUNT(*) FROM notifications WHERE id = 'gone-0'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM pace_events"), 1);
     }
 
     #[test]
