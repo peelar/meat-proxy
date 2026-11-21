@@ -85,6 +85,90 @@ mod tests {
     use super::*;
     use rune::{Env, Runtime};
 
+    /// An app past setup that runs `poll` without any timer, notification or OS side effect due.
+    fn live_app() -> App {
+        let mut s = init();
+        s.loading = false;
+        s.onboarded = true;
+        s.allow_os_side_effects = false;
+        s.next_fast_poll_at = f64::MAX;
+        s.next_full_sync_at = f64::MAX;
+        s
+    }
+
+    /// Waits for a worker's job, then runs `poll` once so it lands.
+    fn land(s: &mut App, pending: impl Fn(&App) -> bool) {
+        while pending(s) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        poll(s, 0.0, &mut Tx::default());
+    }
+
+    #[test]
+    fn a_sync_landing_keeps_snoozes_drops_removed_repos_and_names_failed_rules() {
+        let mut s = live_app();
+        let demo = scenes::demo_prs();
+        let (kept, gone) = (demo[0].clone(), demo.iter().find(|p| p.repo != demo[0].repo).unwrap().clone());
+        let mut snoozed = kept.clone();
+        snoozed.snoozed_until_hour = u64::MAX;
+        s.prs = vec![snoozed];
+        s.repos = vec![model::RepoConfig {
+            name: gone.repo.clone(),
+            manual_rank: 0,
+            pinned: false,
+            my_pr_volume: 0,
+            assigned_review_volume: 0,
+            collapsed: false,
+            removed: true,
+            activity: 0,
+        }];
+        let out = SyncOutput {
+            status: SyncStatus::Connected { username: "me".into() },
+            prs: vec![kept.clone(), gone],
+            failed_rules: vec!["Release blockers: Bad query".into()],
+        };
+        s.sync_worker.request((), move |()| Ok(out));
+        land(&mut s, |s| s.sync_worker.is_pending());
+        assert_eq!(s.prs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [kept.id.as_str()]);
+        assert_eq!(s.prs[0].snoozed_until_hour, u64::MAX, "the snooze outlives the sync");
+        assert!(s.status_banner.as_deref().is_some_and(|b| b.contains("Release blockers")));
+    }
+
+    #[test]
+    fn a_sync_asked_for_while_one_runs_waits_for_it_instead_of_dropping_it() {
+        let mut s = live_app();
+        let first = scenes::demo_prs();
+        let expected = first.len();
+        s.sync_worker.request((), move |()| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(SyncOutput {
+                status: SyncStatus::Connected { username: "me".into() },
+                prs: first,
+                failed_rules: Vec::new(),
+            })
+        });
+        s.trigger_sync();
+        assert!(s.sync_again, "queued behind the running sync");
+        while s.sync_worker.is_pending() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let landed = s.sync_worker.take().expect("the running sync's answer is kept");
+        assert_eq!(landed.unwrap().prs.len(), expected);
+    }
+
+    #[test]
+    fn unreadable_saved_data_blocks_setup_and_fetches_nothing() {
+        let mut s = live_app();
+        s.onboarded = false;
+        s.sync_status = SyncStatus::Connected { username: "me".into() };
+        s.boot_worker.request((), |()| Err(rusqlite::Error::InvalidQuery));
+        land(&mut s, |s| s.boot_worker.is_pending());
+        assert!(s.boot_failed);
+        assert!(!s.sync_worker.is_pending() && !s.discovery_worker.is_pending());
+        s.complete_onboarding();
+        assert!(!s.onboarded, "finishing setup would replace the saved pull requests");
+    }
+
     #[test]
     fn teammates_sort_ahead_of_outsiders_then_newest_first() {
         let mut s = init();

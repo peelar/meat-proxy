@@ -156,8 +156,11 @@ fn on_boot(s: &mut App) -> bool {
         if !s.onboarded {
             s.intro = Some(std::time::Instant::now());
         }
-        s.trigger_sync();
-        s.trigger_discovery();
+        // Setup can't be finished over unreadable data, so there is nothing to fetch for.
+        if !s.boot_failed {
+            s.trigger_sync();
+            s.trigger_discovery();
+        }
         changed = true;
     }
     changed
