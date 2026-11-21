@@ -1109,14 +1109,24 @@ fn parse_graphql_pr(
     })
 }
 
-/// Merges the PR with `gh`, the way the repository prefers.
-/// Turn auto-merge on (merging with `method`) or off. GitHub merges by itself once the checks and
-/// reviews the repository asks for are in.
-pub fn set_auto_merge(url: &str, method: MergeMethod, enable: bool) -> Result<(), String> {
+/// Every write that approves, merges or moves a branch names `head`, the commit the list showed, and
+/// GitHub refuses it once the branch has moved on, so nothing acts on code the user has not seen.
+/// Saved data has no commit until the first sync.
+fn require_head(head: &str) -> Result<(), String> {
+    if head.is_empty() {
+        return Err("Wait for the next sync: GitHub has not said which commit this is yet.".into());
+    }
+    Ok(())
+}
+
+/// Turn auto-merge on (merging with `method`, and only while the head is `head`) or off. GitHub
+/// merges by itself once the checks and reviews the repository asks for are in.
+pub fn set_auto_merge(url: &str, method: MergeMethod, enable: bool, head: &str) -> Result<(), String> {
     let mut command = gh_command();
     command.args(["pr", "merge", url]);
     if enable {
-        command.args(["--auto", method.flag()]);
+        require_head(head)?;
+        command.args(["--auto", method.flag(), "--match-head-commit", head]);
     } else {
         command.arg("--disable-auto");
     }
@@ -1139,20 +1149,35 @@ pub fn pr_state(url: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// Approves the PR with `gh`, with no comment.
-pub fn approve_pr(url: &str) -> Result<(), String> {
+/// Approves the PR at `head`, with no comment. GitHub's review API takes an approval of an older
+/// commit without complaint, so the head is checked first, and the approval names the commit.
+pub fn approve_pr(repo: &str, number: u64, head: &str) -> Result<(), String> {
+    require_head(head)?;
+    let path = format!("repos/{repo}/pulls/{number}");
     let out = gh_command()
-        .args(["pr", "review", url, "--approve"])
+        .args(["api", "--hostname", "github.com", &path, "--jq", ".head.sha"])
         .run_gh()?;
-    if out.status.success() {
-        return Ok(());
+    if !out.status.success() {
+        return Err(gh_error(&out, "GitHub would not say which commit this is"));
     }
-    Err(gh_error(&out, "GitHub would not take this approval"))
+    if String::from_utf8_lossy(&out.stdout).trim() != head {
+        return Err(MOVED_ON.to_owned());
+    }
+    gh_api_write(
+        "POST",
+        &format!("{path}/reviews"),
+        &["event=APPROVE".to_owned(), format!("commit_id={head}")],
+    )
+    .map_err(|e| e.unwrap_or_else(|| "GitHub would not take this approval".to_owned()))
 }
 
-pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
+/// What a write says when the branch has a newer commit than the list showed.
+const MOVED_ON: &str = "New commits arrived since the list was loaded. Look again after the sync.";
+
+pub fn merge_pr(url: &str, method: MergeMethod, head: &str) -> Result<(), String> {
+    require_head(head)?;
     let out = gh_command()
-        .args(["pr", "merge", url, method.flag()])
+        .args(["pr", "merge", url, method.flag(), "--match-head-commit", head])
         .run_gh()?;
     if out.status.success() {
         return Ok(());
@@ -1171,9 +1196,15 @@ pub fn request_reviewers(repo: &str, number: u64, logins: &[String]) -> Result<(
     .map_err(|e| e.unwrap_or_else(|| "GitHub would not ask for another review".to_owned()))
 }
 
-/// Brings the branch up to date with its base, the way GitHub's "Update branch" button does.
-pub fn update_branch(repo: &str, number: u64) -> Result<(), String> {
-    gh_api_write("PUT", &format!("repos/{repo}/pulls/{number}/update-branch"), &[])
+/// Brings the branch up to date with its base, the way GitHub's "Update branch" button does, while
+/// its head is still `head`.
+pub fn update_branch(repo: &str, number: u64, head: &str) -> Result<(), String> {
+    require_head(head)?;
+    gh_api_write(
+        "PUT",
+        &format!("repos/{repo}/pulls/{number}/update-branch"),
+        &[format!("expected_head_sha={head}")],
+    )
         .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
 }
 
@@ -1743,6 +1774,20 @@ pub fn demo_prs() -> Vec<PullRequest> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn writes_refuse_a_pull_request_whose_commit_is_not_known() {
+        // Saved data has no head commit; acting on it would act on whatever GitHub has now.
+        let url = "https://github.com/o/r/pull/1";
+        for result in [
+            merge_pr(url, MergeMethod::Squash, ""),
+            approve_pr("o/r", 1, ""),
+            update_branch("o/r", 1, ""),
+            set_auto_merge(url, MergeMethod::Squash, true, ""),
+        ] {
+            assert!(result.unwrap_err().starts_with("Wait for the next sync"));
+        }
+    }
 
     #[test]
     fn a_pull_request_carries_what_stands_between_it_and_its_merge() {

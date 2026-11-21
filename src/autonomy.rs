@@ -103,8 +103,8 @@ pub fn plan(
 /// Does it on GitHub, through the GitHub CLI.
 pub fn perform(pr: &PullRequest, action: &Action) -> Result<(), String> {
     match action {
-        Action::UpdateBranch => crate::github::update_branch(&pr.repo, pr.number),
-        Action::EnableAutoMerge => crate::github::set_auto_merge(&pr.url, pr.merge_method, true),
+        Action::UpdateBranch => crate::github::update_branch(&pr.repo, pr.number, &pr.head_oid),
+        Action::EnableAutoMerge => crate::github::set_auto_merge(&pr.url, pr.merge_method, true, &pr.head_oid),
         Action::RerequestReview(who) => crate::github::request_reviewers(&pr.repo, pr.number, who),
     }
 }

@@ -911,9 +911,10 @@ impl App {
         }
         self.merge_armed = None;
         self.merging.push(pr_id.to_owned());
-        let (id, url, method) = (pr.id.clone(), pr.url.clone(), pr.merge_method);
+        let (id, url, method, head) =
+            (pr.id.clone(), pr.url.clone(), pr.merge_method, pr.head_oid.clone());
         self.merge_worker
-            .request((), move |()| (id, github::merge_pr(&url, method)));
+            .request((), move |()| (id, github::merge_pr(&url, method, &head)));
     }
 
     pub fn toggle_expanded(&mut self, pr_id: &str) {
@@ -943,9 +944,10 @@ impl App {
             return;
         }
         self.approving.push(pr_id.to_owned());
-        let (id, url) = (pr.id.clone(), pr.url.clone());
+        let (id, repo, number, head) =
+            (pr.id.clone(), pr.repo.clone(), pr.number, pr.head_oid.clone());
         self.approve_worker
-            .request((), move |()| (id, github::approve_pr(&url)));
+            .request((), move |()| (id, github::approve_pr(&repo, number, &head)));
     }
 
     /// Clear what blocks a pull request. One press is enough, unlike Merge and Approve: both
@@ -960,9 +962,9 @@ impl App {
         let id = pr.id.clone();
         match what {
             Unblock::UpdateBranch if pr.can_update_branch => {
-                let (repo, number) = (pr.repo.clone(), pr.number);
+                let (repo, number, head) = (pr.repo.clone(), pr.number, pr.head_oid.clone());
                 self.unblock_worker.request((), move |()| {
-                    (id, what, github::update_branch(&repo, number))
+                    (id, what, github::update_branch(&repo, number, &head))
                 });
             }
             Unblock::Rerun if !pr.rerunnable().is_empty() => {
@@ -997,9 +999,10 @@ impl App {
             return;
         };
         self.auto_merging.push(pr_id.to_owned());
-        let (id, url, method) = (pr.id.clone(), pr.url.clone(), pr.merge_method);
+        let (id, url, method, head) =
+            (pr.id.clone(), pr.url.clone(), pr.merge_method, pr.head_oid.clone());
         self.auto_merge_worker.request((), move |()| {
-            (id, enable, github::set_auto_merge(&url, method, enable))
+            (id, enable, github::set_auto_merge(&url, method, enable, &head))
         });
     }
 
