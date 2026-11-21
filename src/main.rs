@@ -5525,12 +5525,13 @@ fn settings_modal(s: &App, k: &Kit) -> El {
                         .gap(10.0)
                         .child(
                             text("Settings")
-                                .font(TextStyle::new(22.0, 650.0))
+                                .font(TextStyle::new(22.0, 650.0).lh(28.0))
                                 .color(k.c.text_base),
                         )
                         .child(
+                            // The same line height as the title, so both centre on one line.
                             text(format!("v{}", app_version()))
-                                .font(TextStyle::new(11.0, 450.0))
+                                .font(TextStyle::new(11.0, 450.0).lh(28.0))
                                 .color(k.c.text_faint)
                                 .key("app-version"),
                         ),
