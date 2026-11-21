@@ -1,9 +1,13 @@
 use std::process::Command;
 
 use crate::model::{
-    IncomingReason, NotificationEvent, NotificationKind, Ownership, PrAttention, PullRequest,
-    ReviewState,
+    AutoMerge, CiStatus, IncomingReason, MergeReadiness, NotificationEvent, NotificationKind,
+    Ownership, PrAttention, PullRequest, ReviewState,
 };
+
+/// A second review round notifies only while the request is this fresh. An older one is in the
+/// Inbox when the app opens, which is when it would have been noticed anyway.
+const ASKED_AGAIN_FRESH_HOURS: u64 = 24;
 
 /// A short system sound, for moments worth a little celebration.
 pub fn play_sound(name: &str, allow_os: bool) {
@@ -138,9 +142,15 @@ pub fn open_url_in_browser(url: &str, allow_os_open: bool) {
 }
 
 /// Compares previous PR snapshot with new PR snapshot + thresholds to generate notification events:
-/// 1. Instant Assignment: any incoming PR newly assigned / review-requested to you.
+/// 1. Instant Assignment: any incoming PR newly assigned / review-requested to you, and each later
+///    round in which you are asked again after reviewing.
 /// 2. My Open PR Nudge: your open PR has no reviewer or no review activity for `>= open_stale_hours`.
 /// 3. My Draft PR Nudge: your draft PR has been untouched for `>= draft_stale_hours`.
+/// 4. Your open PR moved away from or toward its merge: checks failed, conflicts appeared, comments
+///    wait for an answer, or it became mergeable.
+///
+/// What can happen to a pull request more than once carries the hour in its id, so the next time
+/// notifies too.
 pub fn evaluate_inbox_notifications(
     previous_prs: &[PullRequest],
     current_prs: &[PullRequest],
@@ -163,7 +173,7 @@ pub fn evaluate_inbox_notifications(
         {
             for login in pr.approved_by.iter().filter(|l| !prev.approved_by.contains(l)) {
                 approved_now = true;
-                let notif_id = format!("approved-{}-{login}", pr.id);
+                let notif_id = format!("approved-{}-{login}-{now_hour}", pr.id);
                 if !existing_notifications.iter().any(|n| n.id == notif_id) {
                     events.push(NotificationEvent {
                         id: notif_id,
@@ -178,7 +188,89 @@ pub fn evaluate_inbox_notifications(
             }
         }
 
+        if pr.ownership == Ownership::Mine
+            && !pr.is_draft
+            && let Some(prev) = was_present
+        {
+            let name = format!("{}#{}", pr.repo, pr.number);
+            let mut moved = |what: &str, title: String, body: String| {
+                events.push(NotificationEvent {
+                    id: format!("{what}-{}-{now_hour}", pr.id),
+                    title,
+                    body,
+                    pr_url: pr.url.clone(),
+                    kind: NotificationKind::ReviewActivity,
+                    timestamp_label: "just now".to_string(),
+                    unread: true,
+                });
+            };
+            if pr.ci_status == CiStatus::Failing && prev.ci_status != CiStatus::Failing {
+                let checks: Vec<&str> = pr.failing_checks.iter().map(|c| c.name.as_str()).collect();
+                let body = if checks.is_empty() {
+                    pr.title.clone()
+                } else {
+                    format!("{} · {}", checks.join(", "), pr.title)
+                };
+                moved("ci-failed", format!("Checks failed on {name}"), body);
+            }
+            // Saved data does not say whether there were conflicts, so the first sync of a run
+            // cannot tell that they are new.
+            if pr.merge_readiness == MergeReadiness::Conflicts
+                && !matches!(
+                    prev.merge_readiness,
+                    MergeReadiness::Conflicts | MergeReadiness::Unknown
+                )
+            {
+                moved("conflicts", format!("{name} has conflicts"), pr.title.clone());
+            }
+            if let (Some(before), Some(now)) = (prev.unanswered_threads, pr.unanswered_threads)
+                && now > before
+            {
+                let title = if now == 1 {
+                    format!("A comment waits for your answer on {name}")
+                } else {
+                    format!("{now} comments wait for your answer on {name}")
+                };
+                moved("comments", title, pr.title.clone());
+            }
+            let can_merge = |p: &PullRequest| {
+                p.merge_readiness.is_ready()
+                    && p.attention(draft_stale_hours, open_stale_hours, now_hour)
+                        == PrAttention::MyOpenApproved
+            };
+            // An approval that makes it mergeable is announced as the approval, above.
+            if can_merge(pr)
+                && pr.auto_merge != AutoMerge::On
+                && prev.merge_readiness != MergeReadiness::Unknown
+                && !can_merge(prev)
+                && !approved_now
+            {
+                moved("can-merge", format!("{name} can merge"), pr.title.clone());
+            }
+        }
+
         match att {
+            // Asked again after reviewing: the first request's notification was sent long ago.
+            PrAttention::IncomingAssigned
+                if pr
+                    .asked
+                    .as_ref()
+                    .is_some_and(|ask| ask.again && ask.hours_ago <= ASKED_AGAIN_FRESH_HOURS) =>
+            {
+                let at = pr.asked.as_ref().map_or("", |ask| ask.at.as_str());
+                let notif_id = format!("asked-again-{}-{at}", pr.id);
+                if !existing_notifications.iter().any(|n| n.id == notif_id) {
+                    events.push(NotificationEvent {
+                        id: notif_id,
+                        title: format!("{}#{} is back for your thumb", pr.repo, pr.number),
+                        body: format!("@{}: {}", pr.author, pr.title),
+                        pr_url: pr.url.clone(),
+                        kind: NotificationKind::InstantAssigned,
+                        timestamp_label: pr.activity_label(),
+                        unread: true,
+                    });
+                }
+            }
             PrAttention::IncomingAssigned => {
                 let is_newly_assigned = match was_present {
                     None => true,
@@ -244,7 +336,11 @@ pub fn evaluate_inbox_notifications(
                     && prev.review_state != pr.review_state
                     && !(approved_now && pr.review_state == ReviewState::Approved)
                 {
-                    let notif_id = format!("review-state-{}-{}", pr.id, pr.review_state.as_str());
+                    let notif_id = format!(
+                        "review-state-{}-{}-{now_hour}",
+                        pr.id,
+                        pr.review_state.as_str()
+                    );
                     if !existing_notifications.iter().any(|n| n.id == notif_id) {
                         events.push(NotificationEvent {
                             id: notif_id,
@@ -314,6 +410,79 @@ mod tests {
         theirs.incoming_reason = IncomingReason::SubscribedRule;
         let mut asked = theirs.clone();
         asked.incoming_reason = IncomingReason::AssignedOrReviewRequested;
-        assert!(titles(&[theirs], &[asked]).iter().any(|t| t.starts_with("Assigned to review")));
+        assert!(titles(&[theirs], &[asked.clone()]).iter().any(|t| t.starts_with("Assigned to review")));
+
+        // Asked again after you reviewed: a new notification per round, while the request is fresh.
+        let round = |at: &str, hours_ago| {
+            let mut pr = asked.clone();
+            pr.asked = Some(crate::model::Ask {
+                at: at.into(),
+                hours_ago,
+                again: true,
+            });
+            pr
+        };
+        let first = evaluate_inbox_notifications(&[asked.clone()], &[round("2026-11-20T10:00:00Z", 1)], &[], 72, 48, 0);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].title.ends_with("is back for your thumb"));
+        let same = evaluate_inbox_notifications(&[asked.clone()], &[round("2026-11-20T10:00:00Z", 2)], &first, 72, 48, 0);
+        assert!(same.is_empty(), "the same request does not notify twice");
+        let next = evaluate_inbox_notifications(&[asked.clone()], &[round("2026-11-21T09:00:00Z", 0)], &first, 72, 48, 0);
+        assert_eq!(next.len(), 1, "the next round does");
+        assert!(titles(&[asked.clone()], &[round("2026-11-17T10:00:00Z", 96)]).is_empty());
+    }
+
+    #[test]
+    fn your_pull_request_moving_away_from_or_toward_its_merge_notifies() {
+        let mut mine = crate::github::demo_prs()
+            .into_iter()
+            .find(|p| p.ownership == Ownership::Mine && !p.is_draft)
+            .unwrap();
+        mine.review_state = ReviewState::Approved;
+        mine.approved_by = vec!["kai".into()];
+        mine.ci_status = CiStatus::Pending;
+        mine.merge_readiness = MergeReadiness::NeedsReview;
+        mine.unanswered_threads = Some(0);
+        let name = format!("{}#{}", mine.repo, mine.number);
+
+        let mut failed = mine.clone();
+        failed.ci_status = CiStatus::Failing;
+        failed.failing_checks = vec![crate::model::Check {
+            name: "lint".into(),
+            url: String::new(),
+        }];
+        let events = evaluate_inbox_notifications(&[mine.clone()], &[failed.clone()], &[], 72, 48, 7);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, format!("Checks failed on {name}"));
+        assert!(events[0].body.starts_with("lint · "));
+        // Still failing an hour later is not news; failing again after a green run is.
+        assert!(evaluate_inbox_notifications(&[failed.clone()], &[failed.clone()], &events, 72, 48, 8).is_empty());
+        let again = evaluate_inbox_notifications(&[mine.clone()], &[failed.clone()], &events, 72, 48, 9);
+        assert_eq!(again.len(), 1);
+        assert_ne!(again[0].id, events[0].id);
+
+        let mut ready = mine.clone();
+        ready.ci_status = CiStatus::Passing;
+        ready.merge_readiness = MergeReadiness::Ready;
+        assert_eq!(titles(&[mine.clone()], &[ready.clone()]), vec![format!("{name} can merge")]);
+        // With auto-merge on GitHub merges it; and what was saved by an earlier run says nothing
+        // about merge state, so the first sync of a run announces neither readiness nor conflicts.
+        let mut auto = ready.clone();
+        auto.auto_merge = AutoMerge::On;
+        assert!(titles(&[mine.clone()], &[auto]).is_empty());
+        let mut saved = mine.clone();
+        saved.merge_readiness = MergeReadiness::Unknown;
+        assert!(titles(&[saved.clone()], &[ready]).is_empty());
+        let mut conflicted = mine.clone();
+        conflicted.merge_readiness = MergeReadiness::Conflicts;
+        assert!(titles(&[saved], &[conflicted.clone()]).is_empty());
+        assert_eq!(titles(&[mine.clone()], &[conflicted]), vec![format!("{name} has conflicts")]);
+
+        let mut commented = mine.clone();
+        commented.unanswered_threads = Some(2);
+        assert_eq!(
+            titles(&[mine], &[commented]),
+            vec![format!("2 comments wait for your answer on {name}")]
+        );
     }
 }

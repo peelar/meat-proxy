@@ -20,8 +20,8 @@ mod stacks;
 use db::Database;
 use github::{SyncOutput, SyncStatus};
 use model::{
-    CiStatus, InboxFilter, NotificationEvent, Ownership, PrAttention, PullRequest, RepoConfig,
-    WatchRule,
+    Blocker, CiStatus, InboxFilter, NotificationEvent, Ownership, PrAttention, PullRequest,
+    RepoConfig, WatchRule,
 };
 
 /// The Inbox tab's groups, most urgent first, until the user drags them elsewhere.
@@ -45,6 +45,20 @@ const INTRO_HIT: f32 = 1.45;
 
 /// The section ignored pull requests move to, always last and folded until opened.
 const IGNORED_GROUP: u8 = 255;
+/// How long after the notifications feed announced a review request the sync keeps quiet about
+/// the same request, which it sees as a second round.
+const HEARD_SECS: u64 = 300;
+/// How long a Copy prompt button says "Copied".
+const COPIED_SECS: f32 = 1.6;
+
+/// What a button can do to clear what blocks a pull request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unblock {
+    /// Bring the branch up to date with its base.
+    UpdateBranch,
+    /// Run the failed GitHub Actions jobs again.
+    Rerun,
+}
 
 fn current_epoch_hour() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64 / 3600
@@ -88,6 +102,13 @@ pub struct App {
     /// Approved from here, and when; the button stays done until a sync moves the row.
     pub approved: Vec<(String, std::time::Instant)>,
     pub approve_worker: Latest<(String, Result<(), String>)>,
+    /// Updating a branch or running failed checks again: the pull request, which, and how it went.
+    pub unblock_worker: Latest<(String, Unblock, Result<(), String>)>,
+    pub unblocking: Vec<String>,
+    /// Review requests the notifications feed announced, by URL, and when.
+    heard: Vec<(String, std::time::Instant)>,
+    /// The pull request whose agent prompt was just copied, and when: its button says so briefly.
+    pub copied: Option<(String, std::time::Instant)>,
     /// PRs just merged, with the moment they were: the row celebrates, then leaves the list.
     pub celebrations: Vec<(String, std::time::Instant)>,
     /// Pull requests a sync just brought in, with when each starts to appear.
@@ -269,6 +290,10 @@ fn init() -> App {
         notification_interval: github::DEFAULT_POLL_INTERVAL,
         next_full_sync_at: 60.0,
         allow_os_side_effects: !headless_or_silent,
+        unblock_worker: Latest::default(),
+        unblocking: Vec::new(),
+        heard: Vec::new(),
+        copied: None,
     }
 }
 
@@ -789,6 +814,33 @@ impl App {
         let (id, url) = (pr.id.clone(), pr.url.clone());
         self.approve_worker
             .request((), move |()| (id, github::approve_pr(&url)));
+    }
+
+    /// Clear what blocks a pull request. One press is enough, unlike Merge and Approve: both
+    /// actions only start the checks over, and either can be done again.
+    pub fn press_unblock(&mut self, pr_id: &str, what: Unblock) {
+        if self.preview || !self.unblocking.is_empty() {
+            return;
+        }
+        let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
+            return;
+        };
+        let id = pr.id.clone();
+        match what {
+            Unblock::UpdateBranch if pr.can_update_branch => {
+                let (repo, number) = (pr.repo.clone(), pr.number);
+                self.unblock_worker.request((), move |()| {
+                    (id, what, github::update_branch(&repo, number))
+                });
+            }
+            Unblock::Rerun if !pr.rerunnable().is_empty() => {
+                let runs = pr.rerunnable();
+                self.unblock_worker
+                    .request((), move |()| (id, what, github::rerun_failed(&runs)));
+            }
+            _ => return,
+        }
+        self.unblocking.push(pr_id.to_owned());
     }
 
     /// What pressing the auto-merge button does: Some(true) turns it on, Some(false) turns it off,
@@ -1335,23 +1387,28 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.auto_merge_worker.set_waker(waker.clone());
     s.resolve_worker.set_waker(waker.clone());
     s.approve_worker.set_waker(waker.clone());
+    s.unblock_worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
     });
 }
 
-fn deliver_events(s: &mut App, events: Vec<NotificationEvent>) -> bool {
+/// Records the events that are new and, unless `quiet`, shows each as a notification. Returns the
+/// pull requests the new ones are about.
+fn deliver_events(s: &mut App, events: Vec<NotificationEvent>, quiet: bool) -> Vec<String> {
     if !s.onboarded || !s.native_notifications || !s.allow_os_side_effects || events.is_empty() {
-        return false;
+        return Vec::new();
     }
-    let mut delivered = false;
+    let mut delivered = Vec::new();
     if let Ok(db) = Database::open_default() {
         for event in events {
             if db.insert_notification(&event).unwrap_or(false) {
-                notify::dispatch_system_notification(&event, true);
+                if !quiet {
+                    notify::dispatch_system_notification(&event, true);
+                }
+                delivered.push(event.pr_url.clone());
                 s.notifications.insert(0, event);
-                delivered = true;
             }
         }
     }
@@ -1471,7 +1528,16 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     .filter(|e| !s.is_ignored_url(&e.pr_url))
                     .collect();
                 if s.onboarded {
-                    deliver_events(s, events);
+                    // A request the notifications feed announced a moment ago looks like a second
+                    // round to the sync when the user had reviewed before: it is the same one.
+                    s.heard
+                        .retain(|(_, at)| at.elapsed().as_secs() < HEARD_SECS);
+                    let (heard, events): (Vec<_>, Vec<_>) = events.into_iter().partition(|e| {
+                        e.id.starts_with("asked-again-")
+                            && s.heard.iter().any(|(url, _)| *url == e.pr_url)
+                    });
+                    deliver_events(s, heard, true);
+                    deliver_events(s, events, false);
                     if let Ok(db) = Database::open_default() {
                         let _ = db.save_prs(&s.prs);
                         let _ = db.save_repos(&s.repos);
@@ -1527,9 +1593,12 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             })
             .filter(|e| !s.is_ignored_url(&e.pr_url))
             .collect();
-        if deliver_events(s, events) && !s.sync_worker.is_pending() {
+        let announced = deliver_events(s, events, false);
+        if !announced.is_empty() && !s.sync_worker.is_pending() {
             s.trigger_sync();
         }
+        let now = std::time::Instant::now();
+        s.heard.extend(announced.into_iter().map(|url| (url, now)));
         if let Some(modified) = notifications.modified
             && s.last_notif_modified.as_ref() != Some(&modified)
         {
@@ -1620,6 +1689,35 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
+    if let Some((id, what, result)) = s.unblock_worker.take() {
+        s.unblocking.retain(|u| *u != id);
+        match result {
+            Ok(()) => {
+                // GitHub starts the checks over; until the next sync says how they went, the
+                // pull request is no longer blocked by what the button cleared.
+                if let Some(pr) = s.prs.iter_mut().find(|p| p.id == id) {
+                    pr.ci_status = CiStatus::Pending;
+                    pr.failing_checks.clear();
+                    if what == Unblock::UpdateBranch {
+                        pr.can_update_branch = false;
+                        if pr.merge_readiness == model::MergeReadiness::Behind {
+                            pr.merge_readiness = model::MergeReadiness::Unknown;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                s.status_banner = Some(format!(
+                    "Could not {}. {error}",
+                    match what {
+                        Unblock::UpdateBranch => "update the branch",
+                        Unblock::Rerun => "run the checks again",
+                    }
+                ));
+            }
+        }
+        changed = true;
+    }
     if let Some((id, result)) = s.approve_worker.take() {
         s.approving.retain(|a| *a != id);
         match result {
@@ -1645,9 +1743,18 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.merge_armed = None;
         changed = true;
     }
+    if s
+        .copied
+        .as_ref()
+        .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > COPIED_SECS)
+    {
+        s.copied = None;
+        changed = true;
+    }
     // Redraw every frame while an armed button's bar drains or a fresh approval's row washes.
     if s.approve_armed.is_some()
         || s.merge_armed.is_some()
+        || s.copied.is_some()
         || s.approved.iter().any(|(_, at)| at.elapsed().as_secs_f32() < INK_WASH_SECS)
     {
         tx.wake_after(std::time::Duration::from_millis(16));
@@ -2625,6 +2732,26 @@ const RESET: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5M3 2.6v2.6h2.6"/>"#,
 };
 
+/// Update branch: two arrows chasing each other.
+const UPDATE: rune::Icon = rune::Icon {
+    name: "update-branch",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M12.9 7a5 5 0 0 0-8.7-2.3M3.1 9a5 5 0 0 0 8.7 2.3M4 2.3v2.6h2.6M12 13.7v-2.6H9.4"/>"#,
+};
+
+/// Copy: one sheet over another.
+const COPY: rune::Icon = rune::Icon {
+    name: "copy-prompt",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M7.2 5.6h4.2a1.6 1.6 0 0 1 1.6 1.6v4.2a1.6 1.6 0 0 1-1.6 1.6H7.2a1.6 1.6 0 0 1-1.6-1.6V7.2a1.6 1.6 0 0 1 1.6-1.6ZM10.4 3.9v-.3a1.2 1.2 0 0 0-1.2-1.2H4A1.6 1.6 0 0 0 2.4 4v5.2a1.2 1.2 0 0 0 1.2 1.2h.3"/>"#,
+};
+
+/// The colour of the buttons that clear a blocker: a calm blue, apart from Approve's mint and
+/// Merge's violet.
+fn unblock_tone(k: &Kit) -> Color {
+    oklch(if k.dark { 0.74 } else { 0.55 }, 0.13, 245.0)
+}
+
 /// The color of anything a model decided, so it reads as one thing apart from the rules.
 fn model_ink(k: &Kit) -> Color {
     // Quiet on purpose: a hint of violet, close to the muted text, so it never competes with a status.
@@ -2705,22 +2832,76 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         current_epoch_hour(),
     );
 
-    let (status, tone) = match att {
-        PrAttention::IncomingAssigned => ("Review requested".to_owned(), mint(k)),
-        PrAttention::IncomingViaTeam => ("Team review requested".to_owned(), c.text_muted),
+    // The status, its colour, and what a tooltip adds to it.
+    let (status, tone, why) = match att {
+        PrAttention::IncomingAssigned => match &pr.asked {
+            // A day or more: say how long it has waited, and warn once it is as stale as the
+            // user lets their own pull requests get.
+            Some(ask) if ask.hours_ago >= 24 => (
+                format!("Waiting on you {}", model::span(ask.hours_ago)),
+                if ask.hours_ago >= s.open_stale_hours {
+                    c.warning.fg
+                } else {
+                    mint(k)
+                },
+                if ask.again {
+                    "Asked again after your last review"
+                } else {
+                    "Since your review was requested"
+                },
+            ),
+            Some(ask) if ask.again => (
+                "Review requested again".to_owned(),
+                mint(k),
+                "You reviewed this before; the author asked for another look",
+            ),
+            _ => ("Review requested".to_owned(), mint(k), ""),
+        },
+        PrAttention::IncomingViaTeam => ("Team review requested".to_owned(), c.text_muted, ""),
         PrAttention::MyOpenNeedsNudge if pr.reviewers.is_empty() => {
-            ("Needs reviewer".to_owned(), c.warning.fg)
+            ("Needs reviewer".to_owned(), c.warning.fg, "")
         }
         PrAttention::MyOpenNeedsNudge => (
             format!("Unreviewed {}d", (pr.unreviewed_hours / 24).max(1)),
             c.warning.fg,
+            "",
         ),
-        PrAttention::MyDraftNeedsNudge => ("Stale draft".to_owned(), c.warning.fg),
-        PrAttention::MyOpenChangesRequested => ("Changes requested".to_owned(), c.danger.fg),
-        PrAttention::MyOpenApproved => (pr.approval_label(), mint(k)),
-        PrAttention::MyOpenWaiting => ("Waiting for review".to_owned(), c.text_muted),
-        PrAttention::MyDraftActive => ("Draft".to_owned(), c.text_muted),
-        PrAttention::IncomingWatched => ("Watching".to_owned(), c.text_muted),
+        PrAttention::MyDraftNeedsNudge => ("Stale draft".to_owned(), c.warning.fg, ""),
+        PrAttention::MyOpenChangesRequested
+            if pr.review_state != model::ReviewState::ChangesRequested =>
+        {
+            (
+                comments_to_answer(pr.unanswered()),
+                c.warning.fg,
+                "Review threads still open, where the last word is not yours",
+            )
+        }
+        PrAttention::MyOpenChangesRequested => ("Changes requested".to_owned(), c.danger.fg, ""),
+        PrAttention::MyOpenBlocked => match pr.blockers().first() {
+            Some(Blocker::Behind) => (
+                Blocker::Behind.label().to_owned(),
+                c.warning.fg,
+                "The repository merges only branches that are up to date with their base",
+            ),
+            Some(Blocker::ChecksFailing) => (pr.failing_label(), c.danger.fg, ""),
+            _ => (
+                Blocker::Conflicts.label().to_owned(),
+                c.danger.fg,
+                "It conflicts with its base branch",
+            ),
+        },
+        PrAttention::MyOpenApproved => (pr.approval_label(), mint(k), ""),
+        PrAttention::MyOpenWaiting => match pr.reviewers.as_slice() {
+            [] => ("Waiting for review".to_owned(), c.text_muted, ""),
+            [one] => (format!("Waiting on {one}"), c.text_muted, ""),
+            [one, rest @ ..] => (
+                format!("Waiting on {one} +{}", rest.len()),
+                c.text_muted,
+                "",
+            ),
+        },
+        PrAttention::MyDraftActive => ("Draft".to_owned(), c.text_muted, ""),
+        PrAttention::IncomingWatched => ("Watching".to_owned(), c.text_muted, ""),
     };
     let pr_url_open = pr.url.clone();
     let id_toggle = pr.id.clone();
@@ -2758,7 +2939,18 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         right_side = right_side.child(approve_control(s, k, pr));
     }
     if pr.ownership == Ownership::Mine && !pr.is_draft && s.page == Page::Inbox {
-        right_side = right_side.child(merge_control(s, k, pr));
+        let unblock = unblock_control(s, k, pr, att);
+        // In Unblock the status says why it cannot merge; a Merge button that can do nothing
+        // only says it again.
+        let merge_is_dead =
+            !pr.merge_readiness.is_ready() && s.auto_merge_target(&pr.id).is_none();
+        let shows_merge = !(merge_is_dead && att == PrAttention::MyOpenBlocked);
+        if let Some((button, _)) = unblock {
+            right_side = right_side.child(button);
+        }
+        if shows_merge {
+            right_side = right_side.child(merge_control(s, k, pr));
+        }
     }
     let celebrating = s
         .celebrations
@@ -2784,7 +2976,10 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
                 .help(pr.age_detail()),
         )
         .child(el().size(1.0, 10.0).fill(c.border_base))
-        .child(text(status).font(k.ty.small_medium).color(tone));
+        .child({
+            let label = text(status.clone()).font(k.ty.small_medium).color(tone);
+            if why.is_empty() { label } else { label.help(why) }
+        });
     // A brain marks what the model judged; a rule's verdict needs none. In the Inbox the section
     // already says what it means, so the questions that came out yes are named only elsewhere.
     if s.smart_active()
@@ -2819,12 +3014,9 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
                 .help(format!("Stacked on #{parent}")),
         );
     }
-    if pr.ci_status == CiStatus::Failing {
-        metadata = metadata.child(
-            text("CI failing")
-                .font(k.ty.small_medium)
-                .color(c.danger.fg),
-        );
+    for (label, tone, why) in blocker_chips(pr, &status, k) {
+        let chip = text(label).font(k.ty.small_medium).color(tone);
+        metadata = metadata.child(if why.is_empty() { chip } else { chip.help(why) });
     }
     let mut line = row()
         .key(format!("pr-row-{}", pr.id))
@@ -2900,9 +3092,290 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         return col()
             .w_full()
             .child(line)
+            .child(merge_path(s, k, pr, indent))
             .child(description(s, k, pr, indent));
     }
     line
+}
+
+fn comments_to_answer(n: u32) -> String {
+    if n == 1 {
+        "1 comment to answer".to_owned()
+    } else {
+        format!("{n} comments to answer")
+    }
+}
+
+/// What the row says after its status about the way to the merge: each thing in it, its colour
+/// and a tooltip. On someone else's pull request these are the author's to clear: they are said
+/// quietly, and the tooltip says whose move it is.
+fn blocker_chips(pr: &PullRequest, status: &str, k: &Kit) -> Vec<(String, Color, String)> {
+    let c = &k.c;
+    let mine = pr.ownership == Ownership::Mine;
+    let mut chips = Vec::new();
+    for blocker in pr.blockers() {
+        let (tone, why) = match blocker {
+            Blocker::Conflicts if mine => (c.danger.fg, "It conflicts with its base branch"),
+            Blocker::Conflicts => (c.text_muted, "The author has conflicts to resolve first"),
+            Blocker::Behind if mine => (
+                c.warning.fg,
+                "The repository merges only branches that are up to date with their base",
+            ),
+            Blocker::Behind => (c.text_muted, "The author has to update the branch first"),
+            // Named below, whether or not GitHub holds the merge for it.
+            Blocker::ChecksFailing => continue,
+        };
+        chips.push((blocker.label().to_owned(), tone, why.to_owned()));
+    }
+    if pr.ci_status == CiStatus::Failing {
+        let names: Vec<&str> = pr.failing_checks.iter().map(|c| c.name.as_str()).collect();
+        let why = match (names.is_empty(), mine) {
+            (true, true) => String::new(),
+            (true, false) => "The author has failing checks to fix first".to_owned(),
+            (false, _) => format!("Failed: {}", names.join(", ")),
+        };
+        let tone = if mine { c.danger.fg } else { c.text_muted };
+        chips.push(("CI failing".to_owned(), tone, why));
+    }
+    if mine && pr.unanswered() > 0 {
+        chips.push((
+            comments_to_answer(pr.unanswered()),
+            c.warning.fg,
+            "Review threads still open, where the last word is not yours".to_owned(),
+        ));
+    }
+    // The status already says the first of these.
+    chips.retain(|(label, _, _)| !status.starts_with(label.as_str()));
+    chips
+}
+
+/// The button for what holds up one of the user's pull requests, and whether it shows at rest.
+/// Conflicts and failed checks take code to clear, so their button copies a prompt for a coding
+/// agent; a branch that is only behind is updated from here. It shows at rest when it answers the
+/// row's status, and waits for the pointer anywhere else.
+fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttention) -> Option<(El, bool)> {
+    let blockers = pr.blockers();
+    let first = (att == PrAttention::MyOpenBlocked)
+        .then(|| blockers.first().copied())
+        .flatten();
+    let busy = s.unblocking.contains(&pr.id);
+    let key = format!("unblock-{}", pr.id);
+    let tone = unblock_tone(k);
+    let id = pr.id.clone();
+    // While GitHub holds the merge for a branch that is behind, updating it comes first: the
+    // checks run again on the result.
+    let update_first = blockers.contains(&Blocker::Behind) && pr.can_update_branch;
+    let prompt = if update_first { None } else { pr.agent_prompt() };
+    let (button, why, at_rest) = if let Some(prompt) = prompt {
+        let copied = s
+            .copied
+            .as_ref()
+            .filter(|(copied, _)| *copied == pr.id)
+            .map(|(_, at)| at.elapsed().as_secs_f32());
+        let button = match copied {
+            Some(age) => ink_button(
+                k,
+                tone,
+                &rune_kit::glyphs::CHECK,
+                "Copied",
+                Ink::Done(age),
+                key,
+            ),
+            None => ink_button(k, tone, &COPY, "Copy prompt", Ink::Rest, key).on_press_tx(
+                move |s: &mut App, tx: &mut Tx| {
+                    tx.copy(prompt.clone());
+                    s.copied = Some((id.clone(), std::time::Instant::now()));
+                },
+            ),
+        };
+        let conflicts = blockers.contains(&Blocker::Conflicts);
+        let why = match (conflicts, pr.ci_status == CiStatus::Failing) {
+            (true, true) => {
+                "Copy a prompt for your coding agent: resolve the conflicts and fix the failed checks"
+            }
+            (true, false) => "Copy a prompt for your coding agent: resolve the conflicts",
+            _ => "Copy a prompt for your coding agent: fix the failed checks",
+        };
+        (
+            button,
+            why,
+            first.is_some_and(|blocker| blocker != Blocker::Behind) || copied.is_some(),
+        )
+    } else if pr.can_update_branch {
+        let (label, ink) = if busy {
+            ("Updating…", Ink::Busy)
+        } else {
+            ("Update branch", Ink::Rest)
+        };
+        (
+            ink_button(k, tone, &UPDATE, label, ink, key)
+                .on_press(move |s: &mut App| s.press_unblock(&id, Unblock::UpdateBranch)),
+            "Merge the base branch into this one, as Update branch does on GitHub",
+            first == Some(Blocker::Behind),
+        )
+    } else {
+        return None;
+    };
+    let wrap = row().center_y().hover_group().help(why).child(button);
+    Some(if at_rest || busy {
+        (wrap, true)
+    } else {
+        (wrap.group_opacity(0.0, 1.0), false)
+    })
+}
+
+/// Under an opened row, above the description: where the pull request stands on its way to the
+/// merge. Checks that failed link to their logs, and the user's own can be run again from here.
+fn merge_path(s: &App, k: &Kit, pr: &PullRequest, indent: f32) -> El {
+    let c = &k.c;
+    let fact = |label: &str, value: El| {
+        row()
+            .w_full()
+            .gap(10.0)
+            .child(text(label.to_owned()).font(k.ty.small).color(c.text_faint).w(52.0))
+            .child(value.grow(1.0).min_w(0.0))
+    };
+    let plain = |value: String, tone: Color| text(value).font(k.ty.small).color(tone).wrap();
+    let mut facts: Vec<El> = Vec::new();
+
+    if !pr.failing_checks.is_empty() {
+        let mut line = String::new();
+        let mut links = Vec::new();
+        for check in &pr.failing_checks {
+            if !line.is_empty() {
+                line.push_str("  ·  ");
+            }
+            let start = line.len();
+            line.push_str(&check.name);
+            if !check.url.is_empty() {
+                links.push(
+                    rune::Link::new(start..line.len(), check.url.clone())
+                        .hover(rune::LinkPaint::new().underline(c.danger.fg))
+                        .help("Open this check"),
+                );
+            }
+        }
+        let mut names = plain(line, c.danger.fg);
+        for link in links {
+            names = names.link(link);
+        }
+        let names = names.on_link(|s: &mut App, url: &str, _: &mut Tx| {
+            notify::open_url_in_browser(url, s.allow_os_side_effects)
+        });
+        // Running the failed jobs again only helps when the failure was a fluke, so it is offered
+        // here and not as the row's button.
+        let can_rerun = pr.ownership == Ownership::Mine
+            && !pr.rerunnable().is_empty()
+            && !s.unblocking.contains(&pr.id);
+        let failed = if can_rerun {
+            let label = "Run the failed jobs again";
+            let id = pr.id.clone();
+            col().gap(3.0).child(names).child(
+                text(label)
+                    .key(format!("rerun-{}", pr.id))
+                    .font(k.ty.small)
+                    .color(unblock_tone(k))
+                    .link(
+                        rune::Link::new(0..label.len(), "rerun")
+                            .hover(rune::LinkPaint::new().underline(unblock_tone(k)))
+                            .help("Runs the failed GitHub Actions jobs again, which helps when the failure was a fluke"),
+                    )
+                    .on_link(move |s: &mut App, _: &str, _: &mut Tx| {
+                        s.press_unblock(&id, Unblock::Rerun)
+                    }),
+            )
+        } else {
+            names
+        };
+        facts.push(fact("Failed", failed));
+    } else {
+        match pr.ci_status {
+            CiStatus::Failing => facts.push(fact("Checks", plain("Failing".into(), c.danger.fg))),
+            CiStatus::Pending => facts.push(fact("Checks", plain("Running".into(), c.text_muted))),
+            CiStatus::Passing => facts.push(fact("Checks", plain("Passing".into(), c.text_muted))),
+            CiStatus::None => {}
+        }
+    }
+
+    match pr.merge_readiness {
+        model::MergeReadiness::Conflicts => {
+            facts.push(fact("Branch", plain("Conflicts with its base".into(), c.danger.fg)))
+        }
+        model::MergeReadiness::Behind => facts.push(fact(
+            "Branch",
+            plain("Behind its base, which has to be merged in first".into(), c.warning.fg),
+        )),
+        _ if pr.can_update_branch => {
+            facts.push(fact("Branch", plain("Behind its base".into(), c.text_muted)))
+        }
+        _ => {}
+    }
+
+    let mut reviews: Vec<String> = Vec::new();
+    if !pr.approved_by.is_empty() {
+        reviews.push(pr.approval_label());
+    }
+    let pending: Vec<&str> = pr
+        .reviewers
+        .iter()
+        .filter(|r| !pr.approved_by.contains(r))
+        .map(String::as_str)
+        .collect();
+    if !pending.is_empty() {
+        reviews.push(format!("waiting on {}", pending.join(", ")));
+    }
+    if pr.unanswered() > 0 {
+        reviews.push(comments_to_answer(pr.unanswered()));
+    }
+    if let Some(ask) = &pr.asked {
+        reviews.push(format!(
+            "you were asked {}{} ago",
+            if ask.again { "again " } else { "" },
+            model::span(ask.hours_ago)
+        ));
+    }
+    if !reviews.is_empty() {
+        facts.push(fact("Reviews", plain(reviews.join("  ·  "), c.text_muted)));
+    }
+
+    if !pr.files.is_empty() {
+        const SHOWN: usize = 6;
+        let mut list = col().gap(2.0).child(plain(
+            format!("+{} −{}", pr.additions, pr.deletions),
+            c.text_muted,
+        ));
+        for path in pr.files.iter().take(SHOWN) {
+            list = list.child(
+                text(path.clone())
+                    .font(k.ty.mono)
+                    .color(c.text_muted)
+                    .truncate_head(),
+            );
+        }
+        if pr.files.len() >= github::FILES_FETCHED {
+            list = list.child(plain("and more".into(), c.text_faint));
+        } else if pr.files.len() > SHOWN {
+            list = list.child(plain(
+                format!("and {} more", pr.files.len() - SHOWN),
+                c.text_faint,
+            ));
+        }
+        facts.push(fact("Files", list));
+    }
+
+    let mut block = col()
+        .key(format!("pr-path-{}", pr.id))
+        .w_full()
+        .pl(indent)
+        .pr(14.0)
+        .gap(5.0);
+    if !facts.is_empty() {
+        block = block.pb(10.0);
+    }
+    for fact in facts {
+        block = block.child(fact);
+    }
+    block
 }
 
 /// The PR description as Markdown, under its row.
@@ -4694,6 +5167,78 @@ fn main() {
             s.approved = vec![("acme/cli#904".into(), ago(0.6))];
             s.merge_armed = Some(("acme/cli#908".into(), ago(1.0)));
         }),
+        // Pull requests held up on their way to the merge: yours, with the button that clears each,
+        // and other people's, where it is the author's to clear.
+        ("unblock", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.filter = InboxFilter::Inbox;
+            let check = |name: &str, run: u64| model::Check {
+                name: name.into(),
+                url: format!("https://github.com/acme/cli/actions/runs/{run}/job/1"),
+            };
+            let asked = |hours_ago, again| {
+                Some(model::Ask {
+                    at: "2026-11-18T09:00:00Z".into(),
+                    hours_ago,
+                    again,
+                })
+            };
+            for pr in &mut s.prs {
+                match pr.id.as_str() {
+                    "acme/cli#908" => {
+                        pr.merge_readiness = model::MergeReadiness::Behind;
+                        pr.can_update_branch = true;
+                    }
+                    "acme/cli#889" => {
+                        pr.ci_status = CiStatus::Failing;
+                        pr.merge_readiness = model::MergeReadiness::NeedsReview;
+                        pr.failing_checks = vec![check("lint", 71), check("e2e (chromium)", 72)];
+                        pr.files = ["src/cli/args.rs", "src/cli/complete.rs", "tests/complete.rs"]
+                            .map(String::from)
+                            .to_vec();
+                    }
+                    "acme/engine#412" => pr.merge_readiness = model::MergeReadiness::Conflicts,
+                    "acme/inbox#14" => pr.unanswered_threads = Some(2),
+                    "acme/engine#418" => pr.asked = asked(74, false),
+                    "acme/cli#904" => {
+                        pr.ci_status = CiStatus::Failing;
+                        pr.merge_readiness = model::MergeReadiness::Conflicts;
+                        pr.asked = asked(5, true);
+                    }
+                    _ => {}
+                }
+            }
+        }),
+        ("unblock-open", |s| {
+            seed_preview(s);
+            s.page = Page::Inbox;
+            s.filter = InboxFilter::Inbox;
+            if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/cli#889") {
+                pr.ci_status = CiStatus::Failing;
+                pr.merge_readiness = model::MergeReadiness::NeedsReview;
+                pr.can_update_branch = true;
+                pr.unanswered_threads = Some(0);
+                pr.failing_checks = ["lint", "e2e (chromium)", "e2e (webkit)"]
+                    .iter()
+                    .zip(71..)
+                    .map(|(name, run)| model::Check {
+                        name: (*name).into(),
+                        url: format!("https://github.com/acme/cli/actions/runs/{run}/job/1"),
+                    })
+                    .collect();
+                pr.files = [
+                    "src/cli/args.rs",
+                    "src/cli/complete.rs",
+                    "src/cli/complete/zsh.rs",
+                    "tests/complete.rs",
+                ]
+                .map(String::from)
+                .to_vec();
+                pr.description = "Completes subcommands and flags in zsh.".into();
+            }
+            s.expanded.insert("acme/cli#889".into());
+        }),
         ("action-needed", |s| {
             seed_preview(s);
             s.page = Page::Inbox;
@@ -4877,10 +5422,10 @@ mod tests {
         assert_eq!(state.group_rank(1), 1, "then the next section in the file");
         // Groups 0, 3 and 6 are on screen; drag the last to the top.
         state.drop_group(&[0, 3, 6], 2, 0);
-        assert_eq!(state.group_order, [6, 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]);
+        assert_eq!(state.group_order, [6, 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]);
         // Drag the first to the bottom of what is shown: it lands after group 3.
         state.drop_group(&[6, 0, 3], 0, 2);
-        assert_eq!(state.group_order, [0, 1, 2, 3, 6, 4, 5, 7, 8, 9, 10, 11]);
+        assert_eq!(state.group_order, [0, 1, 2, 3, 6, 4, 5, 7, 8, 9, 10, 11, 12]);
         // Reordering is undone by the reset, which is only on offer while the order differs.
         assert!(!state.group_order_is_default());
         state.reset_group_order();
@@ -5297,6 +5842,83 @@ mod tests {
         rt.frame(0.5);
         rt.frame(1.0);
         assert_eq!(opacity(&rt), Some(1.0));
+    }
+
+    #[test]
+    fn a_blocked_pull_request_goes_to_unblock_with_the_button_that_clears_it() {
+        let mut state = init();
+        state.preview = true;
+        seed_preview(&mut state);
+        state.page = Page::Inbox;
+        let approved = "acme/cli#908";
+        let set = |state: &mut App, readiness, can_update| {
+            let pr = state.prs.iter_mut().find(|p| p.id == approved).unwrap();
+            pr.merge_readiness = readiness;
+            pr.can_update_branch = can_update;
+        };
+        let section = |state: &App| {
+            section_name(state, state.prs.iter().find(|p| p.id == approved).unwrap())
+        };
+        let opacity = |rt: &Runtime<App>, key: &str| {
+            rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .map(|e| e.opacity)
+        };
+        let (unblock, merge) = (format!("unblock-{approved}"), format!("merge-{approved}"));
+
+        // Mergeable: no button but Merge.
+        set(&mut state, model::MergeReadiness::Ready, false);
+        assert_eq!(section(&state).as_deref(), Some("Merge these"));
+        let mut rt = Runtime::new(state, view, (1000.0, 800.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert_eq!(opacity(&rt, &unblock), None);
+        assert_eq!(opacity(&rt, &merge), Some(1.0));
+
+        // Behind its base without that holding the merge: Update branch waits for the pointer.
+        set(&mut rt.state, model::MergeReadiness::Ready, true);
+        rt.update(|_, _| {});
+        rt.frame(1.0);
+        rt.frame(2.0);
+        assert_eq!(section(&rt.state).as_deref(), Some("Merge these"));
+        assert_eq!(opacity(&rt, &unblock), Some(0.0));
+        assert_eq!(opacity(&rt, &merge), Some(1.0));
+
+        // GitHub holds the merge until the branch is up to date: the row moves to Unblock, and
+        // Update branch takes the place of a Merge button that could do nothing.
+        set(&mut rt.state, model::MergeReadiness::Behind, true);
+        rt.update(|_, _| {});
+        rt.frame(3.0);
+        rt.frame(4.0);
+        assert_eq!(section(&rt.state).as_deref(), Some("Unblock"));
+        assert_eq!(opacity(&rt, &unblock), Some(1.0));
+        assert_eq!(opacity(&rt, &merge), None);
+    }
+
+    #[test]
+    fn conflicts_copy_a_prompt_for_an_agent() {
+        let mut state = init();
+        state.preview = true;
+        seed_preview(&mut state);
+        state.page = Page::Inbox;
+        let conflicted = "acme/engine#412";
+        let pr = state.prs.iter_mut().find(|p| p.id == conflicted).unwrap();
+        pr.merge_readiness = model::MergeReadiness::Conflicts;
+        let url = pr.url.clone();
+        let clipboard = rune::clipboard::memory();
+        let mut rt = Runtime::new(state, view, (1000.0, 1600.0), Env::new(true, 1.0));
+        rt.use_clipboard(&clipboard);
+        rt.frame(0.0);
+        let (x, y) = rt.find(&format!("unblock-{conflicted}")).unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+        let copied = clipboard.text().expect("a prompt on the clipboard");
+        assert!(copied.contains(&format!("gh pr checkout {url}")), "{}", *copied);
+        assert!(copied.contains("resolve the conflicts"));
+        // The button says so, and the press did not open the row.
+        assert_eq!(rt.state.copied.as_ref().map(|(id, _)| id.as_str()), Some(conflicted));
+        assert!(!rt.state.expanded.contains(conflicted));
     }
 
     #[test]

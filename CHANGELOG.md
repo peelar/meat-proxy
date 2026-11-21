@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.5
+
+### Unblock
+- A new Inbox section, Unblock, holds your open pull requests that cannot merge until you clear something: conflicts, a branch behind its base, or failing checks. An approved pull request in that state leaves Merge these until it is cleared. The sections you dragged go back to the default order once, because the list of sections changed.
+- Each row there has a button for it. Update branch brings a branch up to date with its base. Conflicts and failed checks take code to clear, so their button is Copy prompt: it copies a short prompt to paste to your coding agent, naming the pull request, the failed checks with links to their logs, and what to do. In other sections the same buttons show while the pointer is on the row.
+- The row names the first failed check ("CI failing: lint +2"). An opened row lists the failed checks as links to their logs, with a link that runs the failed GitHub Actions jobs again, whether the branch is behind or in conflict, who approved and who is still to review, and the changed files.
+- Review comments waiting for your answer count as feedback: the pull request goes to Address feedback and says how many ("2 comments to answer"), until someone approves. Threads you answered last, resolved threads and bots' threads do not count.
+
+### Review requests
+- A request that has waited a day or more says for how long ("Waiting on you 3d"), in amber once it is as old as your own nudge limit. One made after you already reviewed says "Review requested again".
+- Conflicts and failing checks on someone else's pull request are shown in grey, with a tooltip saying they are the author's to clear.
+- Your own pull request waiting for review names who it waits on ("Waiting on kai +1").
+
+### Notifications
+- New ones for your pull requests: checks failed (naming them), conflicts appeared, comments wait for your answer, and "can merge" when an approved pull request becomes mergeable.
+- Being asked to review again after you reviewed notifies again ("acme/cli#904 is back for your thumb"), and so do a second approval by the same person and a second round of changes requested. Before, each of these notified once per pull request.
+
+### Sync
+- A sync asks GitHub for 10 pull requests at a time instead of 30, and asks once more for a page that failed. With checks and review threads included, pages of 30 ran into GitHub's ten-second limit. A long list of review requests takes more round trips, so its sync takes longer.
+
 ## 0.3.4
 
 - Approve and Merge are quieter at rest: no fill, only the icon in green or violet. The first press fills the button and a thin bar drains until the second press times out; when it lands, "Approved" or "Merged" pops in once and the row washes in its color for a moment.

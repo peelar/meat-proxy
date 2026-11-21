@@ -535,6 +535,10 @@ impl Database {
                 labels: Vec::new(),
                 private_repo: false,
                 files: Vec::new(),
+                failing_checks: Vec::new(),
+                can_update_branch: false,
+                unanswered_threads: None,
+                asked: None,
             })
         })?;
         let mut out = Vec::new();

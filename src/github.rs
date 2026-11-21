@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use crate::model::{
-    AutoMerge, CiStatus, IncomingReason, MergeMethod, MergeReadiness, NotificationEvent,
+    Ask, AutoMerge, Check, CiStatus, IncomingReason, MergeMethod, MergeReadiness, NotificationEvent,
     NotificationKind, Ownership, PullRequest, RepoConfig, ReviewState, WatchRule,
 };
 
@@ -375,12 +375,14 @@ const PR_FIELDS: &str = r#"
       bodyText
       body
       labels(first: 6) { nodes { name } }
-      files(first: 40) { nodes { path } }
+      files(first: $files) { nodes { path } }
       state
       mergeable
       mergeStateStatus
       autoMergeRequest { enabledAt }
       viewerCanEnableAutoMerge
+      viewerCanUpdateBranch
+      viewerLatestReview { submittedAt }
       repository { nameWithOwner isArchived isPrivate viewerDefaultMergeMethod defaultBranchRef { name } }
       reviewDecision
       reviewRequests(first: 6) {
@@ -404,17 +406,41 @@ const PR_FIELDS: &str = r#"
           submittedAt
         }
       }
+      asks: timelineItems(last: 10, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+        nodes {
+          ... on ReviewRequestedEvent {
+            createdAt
+            requestedReviewer { ... on User { login } }
+          }
+        }
+      }
+      reviewThreads(last: 20) @include(if: $own) {
+        nodes {
+          isResolved
+          comments(last: 1) { nodes { author { __typename login } } }
+        }
+      }
       commits(last: 1) {
         nodes {
           commit {
             statusCheckRollup {
               state
+              contexts(first: 20) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name conclusion detailsUrl }
+                  ... on StatusContext { context state targetUrl }
+                }
+              }
             }
           }
         }
       }
     }
     "#;
+
+/// How many changed file paths a sync asks for per pull request; one with this many has more.
+pub const FILES_FETCHED: usize = 40;
 
 struct Search {
     query: String,
@@ -562,6 +588,8 @@ pub fn fetch_live(
             if !pr.within_days(options.max_age_days) {
                 continue;
             }
+            let mut pr = pr;
+            pr.asked = asked(node, &viewer);
             if search.tracked_only && !repos.iter().any(|r| !r.removed && r.name == pr.repo) {
                 continue;
             }
@@ -600,7 +628,81 @@ fn requested_by_name(node: &serde_json::Value, login: &str) -> bool {
         })
 }
 
-const PAGE_SIZE: u32 = 30;
+/// The last time `login` was asked by name to review this pull request.
+fn asked(node: &serde_json::Value, login: &str) -> Option<Ask> {
+    let at = node["asks"]["nodes"]
+        .as_array()?
+        .iter()
+        .filter(|ask| {
+            ask["requestedReviewer"]["login"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(login))
+        })
+        .filter_map(|ask| ask["createdAt"].as_str())
+        .max()?;
+    Some(Ask {
+        at: at.to_owned(),
+        hours_ago: estimate_hours_since_iso8601(at),
+        // Both are UTC timestamps in one format, so they compare as text.
+        again: node["viewerLatestReview"]["submittedAt"]
+            .as_str()
+            .is_some_and(|reviewed| reviewed < at),
+    })
+}
+
+/// The checks of the last commit that ended badly, with where to read why.
+fn failing_checks(node: &serde_json::Value) -> Vec<Check> {
+    let Some(contexts) =
+        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"].as_array()
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<Check> = Vec::new();
+    for context in contexts {
+        // A check run has a conclusion and a status context a state; one of the two is set.
+        let (name, verdict, url) = if context["__typename"].as_str() == Some("CheckRun") {
+            (&context["name"], &context["conclusion"], &context["detailsUrl"])
+        } else {
+            (&context["context"], &context["state"], &context["targetUrl"])
+        };
+        let failed = matches!(
+            verdict.as_str(),
+            Some("FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED")
+        );
+        if let Some(name) = name.as_str().filter(|_| failed)
+            && !out.iter().any(|known| known.name == name)
+        {
+            out.push(Check {
+                name: name.to_owned(),
+                url: url.as_str().unwrap_or_default().to_owned(),
+            });
+        }
+    }
+    out
+}
+
+/// Review threads still open whose last comment is neither the author's nor a bot's: the ones
+/// waiting for the author. None when the threads were not asked for.
+fn unanswered_threads(node: &serde_json::Value, author: &str) -> Option<u32> {
+    let threads = node["reviewThreads"]["nodes"].as_array()?;
+    let waiting = threads
+        .iter()
+        .filter(|thread| thread["isResolved"].as_bool() == Some(false))
+        .filter(|thread| {
+            let last = &thread["comments"]["nodes"][0]["author"];
+            last["__typename"].as_str() != Some("Bot")
+                && last["login"]
+                    .as_str()
+                    .is_some_and(|login| login != author && !crate::sections::is_bot(login))
+        })
+        .count();
+    Some(waiting as u32)
+}
+
+/// GitHub gives a query about ten seconds and answers 502 past that. With the checks and review
+/// threads of each pull request, pages of 30 ran over when measured on a long list of review
+/// requests; pages of 10 took between five and eight seconds.
+const PAGE_SIZE: u32 = 10;
 
 /// Every page of one search, with the signed-in account's login.
 fn fetch_search(
@@ -626,14 +728,21 @@ fn fetch_search(
     let term = serde_json::to_string(&format!("{}{archived}{recent}", search.query))
         .expect("serialize search");
 
+    // Review threads cost the most to ask for and only say something about the user's own pull
+    // requests, so only that search asks.
+    let own = search.reason == IncomingReason::NotIncoming;
+    let fields = PR_FIELDS
+        .replace("$own", if own { "true" } else { "false" })
+        .replace("$files", &FILES_FETCHED.to_string());
     let mut nodes = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let after = serde_json::to_string(&cursor).expect("serialize cursor");
         let query = format!(
-            "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {PAGE_SIZE}, after: {after}) {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }} }}{PR_FIELDS}"
+            "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {PAGE_SIZE}, after: {after}) {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }} }}{fields}"
         );
-        let data = fetch_graphql(&query)?;
+        // A page GitHub was too slow for once usually comes back the second time.
+        let data = fetch_graphql(&query).or_else(|_| fetch_graphql(&query))?;
         let viewer = data["viewer"]["login"]
             .as_str()
             .ok_or_else(|| "GitHub did not return the signed-in account".to_string())?
@@ -820,6 +929,7 @@ fn parse_graphql_pr(
         .filter_map(|(who, approved)| approved.then_some(who))
         .collect();
 
+    let unanswered_threads = unanswered_threads(node, &author);
     let updated_at = node
         .get("updatedAt")
         .and_then(|v| v.as_str())
@@ -900,6 +1010,10 @@ fn parse_graphql_pr(
                     .collect()
             })
             .unwrap_or_default(),
+        failing_checks: failing_checks(node),
+        can_update_branch: node["viewerCanUpdateBranch"].as_bool() == Some(true),
+        unanswered_threads,
+        asked: None,
     })
 }
 
@@ -974,6 +1088,37 @@ pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
         .unwrap_or("GitHub would not merge this pull request")
         .trim()
         .to_owned())
+}
+
+/// Brings the branch up to date with its base, the way GitHub's "Update branch" button does.
+pub fn update_branch(repo: &str, number: u64) -> Result<(), String> {
+    gh_api_write("PUT", &format!("repos/{repo}/pulls/{number}/update-branch"))
+        .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
+}
+
+/// Runs the failed jobs of these GitHub Actions runs again.
+pub fn rerun_failed(runs: &[(String, u64)]) -> Result<(), String> {
+    for (repo, run) in runs {
+        gh_api_write("POST", &format!("repos/{repo}/actions/runs/{run}/rerun-failed-jobs"))
+            .map_err(|e| e.unwrap_or_else(|| "GitHub would not run these checks again".to_owned()))?;
+    }
+    Ok(())
+}
+
+/// A REST call that changes something and returns nothing worth reading. The error is the first
+/// line gh printed, when it printed one.
+fn gh_api_write(method: &str, path: &str) -> Result<(), Option<String>> {
+    let out = gh_command()
+        .args(["api", "--hostname", "github.com", "--silent", "-X", method, path])
+        .output()
+        .map_err(|e| Some(format!("Could not run gh: {e}")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_owned()))
 }
 
 fn estimate_hours_since_iso8601(iso: &str) -> u64 {
@@ -1056,6 +1201,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         PullRequest {
             id: "acme/engine#412".to_string(),
@@ -1090,6 +1239,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         PullRequest {
             id: "acme/engine#397".to_string(),
@@ -1124,6 +1277,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         PullRequest {
             id: "acme/engine#421".to_string(),
@@ -1158,6 +1315,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -1193,6 +1354,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         PullRequest {
             id: "acme/cli#889".to_string(),
@@ -1227,6 +1392,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         PullRequest {
             id: "acme/cli#908".to_string(),
@@ -1261,6 +1430,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         // --- acme/inbox (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -1297,6 +1470,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
         PullRequest {
             id: "acme/inbox#19".to_string(),
@@ -1332,6 +1509,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         },
     ];
     for pr in &mut prs {
@@ -1431,6 +1612,74 @@ pub fn demo_prs() -> Vec<PullRequest> {
         15,
     ));
     prs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_pull_request_carries_what_stands_between_it_and_its_merge() {
+        let thread = |resolved: bool, kind: &str, login: &str| {
+            json!({ "isResolved": resolved, "comments": { "nodes": [{ "author": { "__typename": kind, "login": login } }] } })
+        };
+        let node = json!({
+            "number": 7, "title": "t", "url": "https://github.com/o/r/pull/7", "state": "OPEN",
+            "repository": { "nameWithOwner": "o/r" },
+            "author": { "login": "me" },
+            "createdAt": "2026-11-01T00:00:00Z", "updatedAt": "2026-11-01T00:00:00Z",
+            "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
+            "viewerCanUpdateBranch": true,
+            "viewerLatestReview": { "submittedAt": "2026-11-10T00:00:00Z" },
+            "asks": { "nodes": [
+                { "createdAt": "2026-11-05T00:00:00Z", "requestedReviewer": { "login": "Me" } },
+                { "createdAt": "2026-11-12T00:00:00Z", "requestedReviewer": { "login": "me" } },
+                { "createdAt": "2026-11-20T00:00:00Z", "requestedReviewer": { "login": "someone" } },
+                { "createdAt": "2026-11-21T00:00:00Z", "requestedReviewer": {} },
+            ] },
+            "reviewThreads": { "nodes": [
+                thread(false, "User", "kai"),
+                // Answered by the author, resolved, or a bot's: none of these waits for the author.
+                thread(false, "User", "me"),
+                thread(true, "User", "kai"),
+                thread(false, "Bot", "copilot-pull-request-reviewer"),
+                thread(false, "User", "dependabot"),
+            ] },
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "FAILURE", "contexts": { "nodes": [
+                { "__typename": "CheckRun", "name": "lint", "conclusion": "FAILURE", "detailsUrl": "https://github.com/o/r/actions/runs/55/job/9" },
+                { "__typename": "CheckRun", "name": "lint", "conclusion": "FAILURE", "detailsUrl": "https://github.com/o/r/actions/runs/55/job/10" },
+                { "__typename": "CheckRun", "name": "unit", "conclusion": "SUCCESS", "detailsUrl": "" },
+                { "__typename": "CheckRun", "name": "build", "conclusion": null, "detailsUrl": "" },
+                { "__typename": "StatusContext", "context": "ci/vendor", "state": "ERROR", "targetUrl": "https://ci.example.com/1" },
+                { "__typename": "StatusContext", "context": "ci/other", "state": "SUCCESS", "targetUrl": "" },
+            ] } } } }] },
+        });
+        let mut pr =
+            parse_graphql_pr(&node, Ownership::Mine, IncomingReason::NotIncoming, None, true).unwrap();
+        assert!(pr.can_update_branch);
+        assert_eq!(pr.unanswered_threads, Some(1));
+        let failed: Vec<&str> = pr.failing_checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(failed, ["lint", "ci/vendor"]);
+        // Only the GitHub Actions run can be run again from here.
+        assert_eq!(pr.rerunnable(), [("o/r".to_owned(), 55)]);
+        assert_eq!(pr.blockers(), [crate::model::Blocker::ChecksFailing]);
+
+        // Asked by name on the 12th, after reviewing on the 10th: a second round.
+        pr.asked = asked(&node, "me");
+        let ask = pr.asked.unwrap();
+        assert_eq!(ask.at, "2026-11-12T00:00:00Z");
+        assert!(ask.again);
+        // Without the threads in the answer nothing is known about them, and a first request is
+        // not a second round.
+        let mut bare = node.clone();
+        bare.as_object_mut().unwrap().remove("reviewThreads");
+        bare["viewerLatestReview"] = json!(null);
+        let theirs = parse_graphql_pr(&bare, Ownership::Theirs, IncomingReason::NotIncoming, None, true);
+        assert_eq!(theirs.unwrap().unanswered_threads, None);
+        assert!(!asked(&bare, "me").unwrap().again);
+        assert!(asked(&bare, "nobody").is_none());
+    }
 }
 
 #[cfg(test)]

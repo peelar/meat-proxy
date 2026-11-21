@@ -112,6 +112,9 @@ pub enum PrAttention {
     MyOpenChangesRequested,
     /// Your draft PR has been untouched for > draft_stale_hours
     MyDraftNeedsNudge,
+    /// Your open PR cannot merge until you clear something: conflicts, a branch behind its base, or
+    /// failing checks
+    MyOpenBlocked,
     /// Your open PR is approved and ready to merge
     MyOpenApproved,
     /// Review requested from a team you are in, not from you by name
@@ -131,12 +134,13 @@ impl PrAttention {
             PrAttention::IncomingAssigned => 0,
             PrAttention::MyOpenNeedsNudge => 1,
             PrAttention::MyOpenChangesRequested => 2,
-            PrAttention::MyDraftNeedsNudge => 3,
-            PrAttention::MyOpenApproved => 4,
-            PrAttention::IncomingViaTeam => 5,
-            PrAttention::IncomingWatched => 6,
-            PrAttention::MyOpenWaiting => 7,
-            PrAttention::MyDraftActive => 8,
+            PrAttention::MyOpenBlocked => 3,
+            PrAttention::MyDraftNeedsNudge => 4,
+            PrAttention::MyOpenApproved => 5,
+            PrAttention::IncomingViaTeam => 6,
+            PrAttention::IncomingWatched => 7,
+            PrAttention::MyOpenWaiting => 8,
+            PrAttention::MyDraftActive => 9,
         }
     }
 
@@ -147,11 +151,12 @@ impl PrAttention {
             PrAttention::MyOpenChangesRequested => (1, "Address feedback"),
             PrAttention::MyOpenApproved => (2, "Merge these"),
             PrAttention::IncomingViaTeam => (3, "Team reviews"),
-            PrAttention::MyOpenNeedsNudge => (4, "Get a reviewer"),
-            PrAttention::MyDraftNeedsNudge => (5, "Finish or close"),
+            PrAttention::MyOpenBlocked => (4, "Unblock"),
+            PrAttention::MyOpenNeedsNudge => (5, "Get a reviewer"),
+            PrAttention::MyDraftNeedsNudge => (6, "Finish or close"),
             PrAttention::IncomingWatched
             | PrAttention::MyOpenWaiting
-            | PrAttention::MyDraftActive => (6, "Other"),
+            | PrAttention::MyDraftActive => (7, "Other"),
         }
     }
 
@@ -161,6 +166,7 @@ impl PrAttention {
             PrAttention::IncomingAssigned
                 | PrAttention::MyOpenNeedsNudge
                 | PrAttention::MyOpenChangesRequested
+                | PrAttention::MyOpenBlocked
                 | PrAttention::MyDraftNeedsNudge
                 | PrAttention::MyOpenApproved
                 | PrAttention::IncomingViaTeam
@@ -172,6 +178,54 @@ impl PrAttention {
             self,
             PrAttention::MyOpenNeedsNudge | PrAttention::MyDraftNeedsNudge
         )
+    }
+}
+
+/// Something that keeps a pull request from merging and that its author can clear without anyone
+/// else: a missing review is not one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blocker {
+    Conflicts,
+    /// The repository wants the branch up to date with its base before it merges.
+    Behind,
+    /// Checks failed, and GitHub does not allow the merge as it is.
+    ChecksFailing,
+}
+
+impl Blocker {
+    pub fn label(self) -> &'static str {
+        match self {
+            Blocker::Conflicts => "Has conflicts",
+            Blocker::Behind => "Behind base",
+            Blocker::ChecksFailing => "CI failing",
+        }
+    }
+}
+
+/// A request for the user's review, by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ask {
+    /// When, as GitHub wrote it: it tells one request from the next.
+    pub at: String,
+    pub hours_ago: u64,
+    /// The user had already reviewed this pull request when they were asked: a second round.
+    pub again: bool,
+}
+
+/// A check that failed on the last commit, and where to read why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Check {
+    pub name: String,
+    pub url: String,
+}
+
+impl Check {
+    /// The GitHub Actions run behind this check, which can be run again; other providers have none.
+    pub fn actions_run(&self) -> Option<(&str, u64)> {
+        let rest = self.url.strip_prefix("https://github.com/")?;
+        let (repo, rest) = rest.split_once("/actions/runs/")?;
+        let id = rest.split(['/', '?', '#']).next()?.parse().ok()?;
+        Some((repo, id))
     }
 }
 
@@ -368,6 +422,21 @@ pub struct PullRequest {
     /// Paths of the changed files (the first few dozen), for the decision model; not stored.
     #[serde(skip)]
     pub files: Vec<String>,
+    /// The checks that failed on the last commit (the first few), fetched on every sync.
+    #[serde(skip)]
+    pub failing_checks: Vec<Check>,
+    /// GitHub would let the user bring the branch up to date with its base: it is behind, and they
+    /// may push to it.
+    #[serde(skip)]
+    pub can_update_branch: bool,
+    /// Review threads still open whose last word is someone else's (bots aside). Known only for the
+    /// user's own pull requests, and only after a sync.
+    #[serde(skip)]
+    pub unanswered_threads: Option<u32>,
+    /// The last time the user was asked by name to review; None when they were not, or it is not
+    /// known yet.
+    #[serde(skip)]
+    pub asked: Option<Ask>,
 }
 
 /// Hours as a short span: 5h, 3d, 6mo, 2y.
@@ -390,6 +459,7 @@ impl PullRequest {
         let base: u32 = match self.attention(draft_stale_hours, open_stale_hours, now_hour) {
             PrAttention::IncomingAssigned => 100,
             PrAttention::MyOpenChangesRequested => 80,
+            PrAttention::MyOpenBlocked => 75,
             PrAttention::MyOpenApproved => 70,
             PrAttention::IncomingViaTeam => 55,
             PrAttention::MyOpenNeedsNudge => 50,
@@ -433,6 +503,11 @@ impl PullRequest {
                 } else {
                     match self.review_state {
                         ReviewState::ChangesRequested => PrAttention::MyOpenChangesRequested,
+                        // Comments waiting for an answer are feedback too, until someone approves.
+                        state if state != ReviewState::Approved && self.unanswered() > 0 => {
+                            PrAttention::MyOpenChangesRequested
+                        }
+                        _ if !self.blockers().is_empty() => PrAttention::MyOpenBlocked,
                         ReviewState::Approved => PrAttention::MyOpenApproved,
                         _ => {
                             let no_reviewer = self.reviewers.is_empty();
@@ -447,6 +522,98 @@ impl PullRequest {
                 }
             }
         }
+    }
+
+    /// What keeps it from merging that its author can clear, the one to deal with first leading.
+    /// Failing checks count only while GitHub refuses the merge: a failed optional check is noise.
+    pub fn blockers(&self) -> Vec<Blocker> {
+        let mut out = Vec::new();
+        if self.merge_readiness == MergeReadiness::Conflicts {
+            out.push(Blocker::Conflicts);
+        }
+        if self.merge_readiness == MergeReadiness::Behind {
+            out.push(Blocker::Behind);
+        }
+        if self.ci_status == CiStatus::Failing && !self.merge_readiness.is_ready() {
+            out.push(Blocker::ChecksFailing);
+        }
+        out
+    }
+
+    /// Review threads waiting for the author's answer; 0 when not known.
+    pub fn unanswered(&self) -> u32 {
+        self.unanswered_threads.unwrap_or(0)
+    }
+
+    /// "CI failing: lint +2", naming the first failed check when the checks are known. Check names
+    /// run long, so the one named is cut short.
+    pub fn failing_label(&self) -> String {
+        let Some((first, rest)) = self.failing_checks.split_first() else {
+            return "CI failing".to_owned();
+        };
+        let mut name: String = first.name.chars().take(28).collect();
+        if name.len() < first.name.len() {
+            name.push('…');
+        }
+        if rest.is_empty() {
+            format!("CI failing: {name}")
+        } else {
+            format!("CI failing: {name} +{}", rest.len())
+        }
+    }
+
+    /// A prompt to paste to a coding agent, for what takes code to clear: conflicts and failed
+    /// checks. None when there is neither.
+    pub fn agent_prompt(&self) -> Option<String> {
+        let conflicts = self.merge_readiness == MergeReadiness::Conflicts;
+        let failing = self.ci_status == CiStatus::Failing;
+        let problem = match (conflicts, failing) {
+            (true, true) => "has merge conflicts with its base branch, and its checks are failing",
+            (true, false) => "has merge conflicts with its base branch",
+            (false, true) => "has failing checks",
+            (false, false) => return None,
+        };
+        let mut out = format!(
+            "The pull request {} (\"{}\") {problem}.\n\n",
+            self.url, self.title
+        );
+        if failing && !self.failing_checks.is_empty() {
+            out.push_str("Failed checks:\n");
+            for check in &self.failing_checks {
+                if check.url.is_empty() {
+                    out.push_str(&format!("- {}\n", check.name));
+                } else {
+                    out.push_str(&format!("- {}: {}\n", check.name, check.url));
+                }
+            }
+            out.push('\n');
+        }
+        out.push_str(&format!("Check it out with `gh pr checkout {}`.", self.url));
+        if conflicts {
+            out.push_str(
+                " Merge the latest base branch into it and resolve the conflicts so that the changes of both sides keep working.",
+            );
+        }
+        if failing {
+            out.push_str(if conflicts {
+                " Then read the logs of the failed checks and fix what they report."
+            } else {
+                " Read the logs of the failed checks and fix what they report."
+            });
+        }
+        out.push_str(" Run the tests, then push.");
+        Some(out)
+    }
+
+    /// The failed checks that are GitHub Actions runs, as (repository, run id), each once.
+    pub fn rerunnable(&self) -> Vec<(String, u64)> {
+        let mut runs: Vec<(String, u64)> = Vec::new();
+        for (repo, id) in self.failing_checks.iter().filter_map(Check::actions_run) {
+            if !runs.iter().any(|(_, known)| *known == id) {
+                runs.push((repo.to_owned(), id));
+            }
+        }
+        runs
     }
 
     /// Human-readable age / staleness badge text.
@@ -535,6 +702,7 @@ impl PullRequest {
                 }
             }
             PrAttention::MyOpenChangesRequested => "OPEN · CHANGES REQ".to_string(),
+            PrAttention::MyOpenBlocked => "OPEN · BLOCKED".to_string(),
             PrAttention::MyOpenApproved => "OPEN · APPROVED".to_string(),
             PrAttention::MyOpenWaiting => {
                 if self.is_snoozed(now_hour) {
@@ -600,6 +768,7 @@ impl RepoConfig {
                 PrAttention::IncomingViaTeam => 16,
                 PrAttention::MyOpenNeedsNudge => 38,
                 PrAttention::MyOpenChangesRequested => 32,
+                PrAttention::MyOpenBlocked => 30,
                 PrAttention::MyDraftNeedsNudge => 26,
                 PrAttention::MyOpenApproved => 20,
                 PrAttention::IncomingWatched => 12,
@@ -841,6 +1010,10 @@ mod tests {
             labels: Vec::new(),
             private_repo: false,
             files: Vec::new(),
+            failing_checks: Vec::new(),
+            can_update_branch: false,
+            unanswered_threads: None,
+            asked: None,
         }
     }
 
@@ -954,6 +1127,103 @@ mod tests {
         for a in [IncomingWatched, MyOpenWaiting, MyDraftActive] {
             assert!(!a.requires_action());
         }
+    }
+
+    #[test]
+    fn what_you_can_clear_yourself_comes_before_merging_and_after_feedback() {
+        let attention = |pr: &PullRequest| pr.attention(72, 48, 0);
+        let mut approved = my_pr("org/a", 1, 1);
+        approved.review_state = ReviewState::Approved;
+        approved.merge_readiness = MergeReadiness::Ready;
+        assert_eq!(attention(&approved), PrAttention::MyOpenApproved);
+
+        // Approved, but GitHub will not merge it as it is: that comes first.
+        for readiness in [MergeReadiness::Behind, MergeReadiness::Conflicts] {
+            let mut held = approved.clone();
+            held.merge_readiness = readiness;
+            assert_eq!(attention(&held), PrAttention::MyOpenBlocked, "{readiness:?}");
+            assert!(attention(&held).requires_action());
+        }
+        let mut red = approved.clone();
+        red.ci_status = CiStatus::Failing;
+        red.merge_readiness = MergeReadiness::NeedsReview;
+        assert_eq!(red.blockers(), [Blocker::ChecksFailing]);
+        assert_eq!(attention(&red), PrAttention::MyOpenBlocked);
+        // A failed check nothing requires does not hold the merge.
+        red.merge_readiness = MergeReadiness::Unstable;
+        assert!(red.blockers().is_empty());
+        assert_eq!(attention(&red), PrAttention::MyOpenApproved);
+
+        // Not yet reviewed and red: nobody reviews a red pull request, so it is yours to fix.
+        let mut waiting = my_pr("org/a", 2, 0);
+        waiting.reviewers = vec!["kai".into()];
+        assert_eq!(attention(&waiting), PrAttention::MyOpenWaiting);
+        waiting.ci_status = CiStatus::Failing;
+        assert_eq!(attention(&waiting), PrAttention::MyOpenBlocked);
+        // A draft is allowed to be red, and someone else's is theirs to clear.
+        let mut draft = waiting.clone();
+        draft.is_draft = true;
+        assert_eq!(attention(&draft), PrAttention::MyDraftActive);
+        let mut theirs = waiting.clone();
+        theirs.ownership = Ownership::Theirs;
+        theirs.incoming_reason = IncomingReason::AssignedOrReviewRequested;
+        assert_eq!(attention(&theirs), PrAttention::IncomingAssigned);
+        assert_eq!(theirs.blockers(), [Blocker::ChecksFailing]);
+
+        // Feedback outranks a blocker: answering it usually means pushing again anyway.
+        let mut asked = waiting.clone();
+        asked.review_state = ReviewState::ChangesRequested;
+        assert_eq!(attention(&asked), PrAttention::MyOpenChangesRequested);
+        // Comments waiting for an answer are feedback until someone approves.
+        let mut commented = my_pr("org/a", 3, 0);
+        commented.reviewers = vec!["kai".into()];
+        commented.unanswered_threads = Some(2);
+        assert_eq!(attention(&commented), PrAttention::MyOpenChangesRequested);
+        commented.review_state = ReviewState::Approved;
+        assert_eq!(attention(&commented), PrAttention::MyOpenApproved);
+
+        let check = |name: &str| Check {
+            name: name.into(),
+            url: String::new(),
+        };
+        red.failing_checks = vec![check("Lint, types, unit and E2E tests on every push"), check("b")];
+        assert_eq!(red.failing_label(), "CI failing: Lint, types, unit and E2E te… +1");
+    }
+
+    #[test]
+    fn the_agent_prompt_names_the_pull_request_and_what_to_fix() {
+        let mut pr = my_pr("org/a", 7, 0);
+        pr.url = "https://github.com/org/a/pull/7".into();
+        assert_eq!(pr.agent_prompt(), None);
+
+        pr.merge_readiness = MergeReadiness::Conflicts;
+        let conflicts = pr.agent_prompt().unwrap();
+        assert!(conflicts.contains("`gh pr checkout https://github.com/org/a/pull/7`"));
+        assert!(conflicts.contains("resolve the conflicts"));
+        assert!(!conflicts.contains("checks"), "{conflicts}");
+
+        // A failed check gets a prompt whether or not GitHub holds the merge for it.
+        pr.merge_readiness = MergeReadiness::Unstable;
+        pr.ci_status = CiStatus::Failing;
+        pr.failing_checks = vec![
+            Check {
+                name: "lint".into(),
+                url: "https://github.com/org/a/actions/runs/5/job/1".into(),
+            },
+            Check {
+                name: "ci/vendor".into(),
+                url: String::new(),
+            },
+        ];
+        let failing = pr.agent_prompt().unwrap();
+        assert!(failing.contains("- lint: https://github.com/org/a/actions/runs/5/job/1\n"));
+        assert!(failing.contains("- ci/vendor\n"));
+        assert!(!failing.contains("conflicts"), "{failing}");
+
+        pr.merge_readiness = MergeReadiness::Conflicts;
+        let both = pr.agent_prompt().unwrap();
+        let (merge, fix) = (both.find("resolve the conflicts"), both.find("fix what they report"));
+        assert!(merge.is_some() && merge < fix, "conflicts first: {both}");
     }
 
     #[test]

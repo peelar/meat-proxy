@@ -6,9 +6,9 @@
 //! question a model answers; those sections are sorted by AI and carry a brain.
 //!
 //! The sections are built in. The condition language is small: `any`, `asked:me`, `asked:team`,
-//! `asked:any`, `is:approved`, `is:changes-requested`, `is:unreviewed`, `is:stale-draft`, `mine`,
-//! `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`, `label:`, `title:`, or a
-//! question id; `!` in front negates.
+//! `asked:any`, `is:approved`, `is:blocked`, `is:changes-requested`, `is:unreviewed`,
+//! `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`,
+//! `label:`, `title:`, or a question id; `!` in front negates.
 
 use crate::model::{PrAttention, PullRequest};
 use serde::Deserialize;
@@ -34,6 +34,7 @@ const DEFAULT_JSON: &str = r#"{
     { "name": "Approve at will", "when": ["asked:me", "reading<0.2", "lines<400"] },
     { "name": "Big reviews", "when": ["asked:me", "lines>=600"] },
     { "name": "Review these", "when": ["asked:me"] },
+    { "name": "Unblock", "when": ["is:blocked"] },
     { "name": "Address feedback", "when": ["is:changes-requested"] },
     { "name": "Team reviews", "when": ["asked:team"] },
     { "name": "Get a reviewer", "when": ["is:unreviewed"] },
@@ -70,6 +71,7 @@ enum Cmp {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Is {
     Approved,
+    Blocked,
     ChangesRequested,
     Unreviewed,
     StaleDraft,
@@ -252,6 +254,7 @@ impl Layout {
                 PrAttention::IncomingAssigned | PrAttention::IncomingViaTeam
             ),
             Term::Is(Is::Approved) => subject.attention == PrAttention::MyOpenApproved,
+            Term::Is(Is::Blocked) => subject.attention == PrAttention::MyOpenBlocked,
             Term::Is(Is::ChangesRequested) => {
                 subject.attention == PrAttention::MyOpenChangesRequested
             }
@@ -326,6 +329,7 @@ fn parse_cond(word: &str, question_ids: &[&str]) -> Result<Cond, String> {
         "asked:team" => Term::AskedTeam,
         "asked:any" => Term::AskedAny,
         "is:approved" => Term::Is(Is::Approved),
+        "is:blocked" => Term::Is(Is::Blocked),
         "is:changes-requested" => Term::Is(Is::ChangesRequested),
         "is:unreviewed" => Term::Is(Is::Unreviewed),
         "is:stale-draft" => Term::Is(Is::StaleDraft),
@@ -450,7 +454,7 @@ mod tests {
     #[test]
     fn the_defaults_parse_and_ask_two_questions() {
         let layout = Layout::default();
-        assert_eq!(layout.sections.len(), 12);
+        assert_eq!(layout.sections.len(), 13);
         assert_eq!(layout.sections[0].name, "Merge these");
         assert_eq!(layout.needed_questions().len(), 2);
         assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());

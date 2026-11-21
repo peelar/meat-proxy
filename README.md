@@ -7,7 +7,7 @@
 
 Keep up with the pace of LLM-generated code.
 
-meat proxy is a native macOS inbox for your GitHub pull requests. It gathers the reviews requested of you and the pull requests you opened, then sorts them by what each one needs from you: merge, review, address feedback, find a reviewer, or finish a draft. Your own pull requests merge from the list once GitHub allows it, and macOS notifications tap you on the shoulder when a review lands on you or your pull request sits unreviewed. It reads GitHub through the GitHub CLI, signed in as you, so there are no tokens to paste.
+meat proxy is a native macOS inbox for your GitHub pull requests. It gathers the reviews requested of you and the pull requests you opened, then sorts them by what each one needs from you: merge, review, unblock, address feedback, find a reviewer, or finish a draft. Your own pull requests merge from the list once GitHub allows it, and what holds one up (a branch behind its base, failed checks, conflicts) has its button on the row. macOS notifications tap you on the shoulder when a review lands on you, when your pull request sits unreviewed, and when it gets stuck or becomes mergeable. It reads GitHub through the GitHub CLI, signed in as you, so there are no tokens to paste.
 
 ## Install
 
