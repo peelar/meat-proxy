@@ -454,7 +454,7 @@ const PR_FIELDS: &str = r#"
       viewerLatestReview { submittedAt }
       repository { nameWithOwner isArchived isPrivate viewerDefaultMergeMethod defaultBranchRef { name } }
       reviewDecision
-      reviewRequests(first: 6) {
+      reviewRequests(first: 20) {
         nodes {
           requestedReviewer {
             ... on User { login }
@@ -467,6 +467,7 @@ const PR_FIELDS: &str = r#"
           author { login }
           state
           submittedAt
+          commit { oid }
         }
       }
       reviews(last: 6) {
@@ -485,6 +486,7 @@ const PR_FIELDS: &str = r#"
         }
       }
       reviewThreads(last: 20) @include(if: $own) {
+        pageInfo { hasPreviousPage }
         nodes {
           isResolved
           comments(last: 1) { nodes { author { __typename login } } }
@@ -764,9 +766,11 @@ fn failing_checks(node: &serde_json::Value) -> Vec<Check> {
 }
 
 /// Review threads still open whose last comment is neither the author's nor a bot's: the ones
-/// waiting for the author. None when the threads were not asked for.
+/// waiting for the author. None when the threads were not asked for, or when there are more than
+/// were fetched and none of those waits: an older one may.
 fn unanswered_threads(node: &serde_json::Value, author: &str) -> Option<u32> {
     let threads = node["reviewThreads"]["nodes"].as_array()?;
+    let cut_off = node["reviewThreads"]["pageInfo"]["hasPreviousPage"].as_bool() == Some(true);
     let waiting = threads
         .iter()
         .filter(|thread| thread["isResolved"].as_bool() == Some(false))
@@ -778,7 +782,7 @@ fn unanswered_threads(node: &serde_json::Value, author: &str) -> Option<u32> {
                     .is_some_and(|login| login != author && !crate::sections::is_bot(login))
         })
         .count();
-    Some(waiting as u32)
+    (waiting > 0 || !cut_off).then_some(waiting as u32)
 }
 
 /// GitHub gives a query about ten seconds and answers 502 past that. With the checks and review
@@ -1010,6 +1014,10 @@ fn parse_graphql_pr(
 
     // Who approved: the people whose latest deciding review is an approval.
     let mut verdicts: Vec<(String, String, String)> = Vec::new();
+    // Whose latest verdict is on the head commit: they have seen the last push. Commit dates are
+    // the author's to set and survive a rebase, so the commit itself says it.
+    let head = node["headRefOid"].as_str().unwrap_or_default();
+    let mut seen_head: Vec<String> = Vec::new();
     if let Some(nodes) = node["decisions"]["nodes"].as_array() {
         for rev in nodes {
             let (Some(login), Some(state)) =
@@ -1021,6 +1029,10 @@ fn parse_graphql_pr(
                 continue;
             }
             verdicts.retain(|(who, _, _)| who != login);
+            seen_head.retain(|who| who != login);
+            if !head.is_empty() && rev["commit"]["oid"].as_str() == Some(head) {
+                seen_head.push(login.to_owned());
+            }
             let at = rev["submittedAt"].as_str().unwrap_or_default();
             verdicts.push((login.to_owned(), state.to_owned(), at.to_owned()));
         }
@@ -1038,7 +1050,9 @@ fn parse_graphql_pr(
         .unwrap_or_default();
     let changes_requested: Vec<(String, String)> = verdicts
         .into_iter()
-        .filter(|(_, state, at)| state == "CHANGES_REQUESTED" && !at.is_empty())
+        .filter(|(who, state, at)| {
+            state == "CHANGES_REQUESTED" && !at.is_empty() && !seen_head.contains(who)
+        })
         .map(|(who, _, at)| (who, at))
         .collect();
     let requested_reviewers: Vec<String> = node["reviewRequests"]["nodes"]
@@ -1852,6 +1866,13 @@ mod tests {
             "createdAt": "2026-11-01T00:00:00Z", "updatedAt": "2026-11-01T00:00:00Z",
             "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
             "viewerCanUpdateBranch": true,
+            "headRefOid": "h2",
+            // kai asked for changes on an older commit, mira on the head: only kai is due again,
+            // whatever dates the commits carry.
+            "decisions": { "nodes": [
+                { "author": { "login": "kai" }, "state": "CHANGES_REQUESTED", "submittedAt": "2026-11-09T00:00:00Z", "commit": { "oid": "h1" } },
+                { "author": { "login": "mira" }, "state": "CHANGES_REQUESTED", "submittedAt": "2026-11-09T00:00:00Z", "commit": { "oid": "h2" } },
+            ] },
             "viewerLatestReview": { "submittedAt": "2026-11-10T00:00:00Z" },
             "asks": { "nodes": [
                 { "createdAt": "2026-11-05T00:00:00Z", "requestedReviewer": { "login": "Me" } },
@@ -1880,6 +1901,12 @@ mod tests {
             parse_graphql_pr(&node, Ownership::Mine, IncomingReason::NotIncoming, None, true).unwrap();
         assert!(pr.can_update_branch);
         assert_eq!(pr.unanswered_threads, Some(1));
+        assert_eq!(pr.due_for_another_look(), ["kai"]);
+        // More threads than were fetched, none of those waiting: an older one may be.
+        let mut cut = node.clone();
+        cut["reviewThreads"] = json!({ "pageInfo": { "hasPreviousPage": true }, "nodes": [thread(true, "User", "kai")] });
+        let cut = parse_graphql_pr(&cut, Ownership::Mine, IncomingReason::NotIncoming, None, true).unwrap();
+        assert_eq!(cut.unanswered_threads, None);
         let failed: Vec<&str> = pr.failing_checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(failed, ["lint", "ci/vendor"]);
         // Only the GitHub Actions run can be run again from here.

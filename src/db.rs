@@ -35,7 +35,8 @@ pub struct AppSnapshot {
     pub autonomy_branches: bool,
     pub autonomy_reviewers: bool,
     /// Actions already taken, one per pull request, action and commit.
-    pub autonomy_done: std::collections::HashSet<String>,
+    /// Each action taken (`autonomy::key`), with when (Unix seconds).
+    pub autonomy_done: std::collections::HashMap<String, i64>,
     /// Pace: keep score of quick approvals and merges (on unless switched off), whether its
     /// panel is folded, and what it has counted.
     pub pace_enabled: bool,
@@ -265,6 +266,7 @@ impl Database {
     }
 
     pub fn load_snapshot(&self) -> Result<AppSnapshot, rusqlite::Error> {
+        let now = chrono::Utc::now().timestamp();
         let draft_stale_hours = self
             .get_setting("draft_stale_hours")?
             .and_then(|v| v.parse::<u64>().ok())
@@ -346,7 +348,12 @@ impl Database {
                 .get_setting("autonomy_done")?
                 .unwrap_or_default()
                 .lines()
-                .map(str::to_owned)
+                .filter(|line| !line.is_empty())
+                .map(|line| match line.split_once('\t') {
+                    Some((key, at)) => (key.to_owned(), at.parse().unwrap_or(now)),
+                    // Saved before the time was kept: as if done now.
+                    None => (line.to_owned(), now),
+                })
                 .collect(),
             pace_enabled: self.flag("pace_enabled")?,
             pace_collapsed: self.get_setting("pace_collapsed")?.is_some_and(|v| v == "1"),

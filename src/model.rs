@@ -446,7 +446,8 @@ pub struct PullRequest {
     /// People asked to review right now, by login (teams aside).
     #[serde(skip)]
     pub requested_reviewers: Vec<String>,
-    /// People whose latest deciding review asks for changes, with when they sent it.
+    /// People whose latest deciding review asks for changes on an older commit than the head, with
+    /// when they sent it.
     #[serde(skip)]
     pub changes_requested: Vec<(String, String)>,
     /// When the last approval still standing was sent (UTC, RFC 3339); empty when none is known.
@@ -620,12 +621,13 @@ impl PullRequest {
         Some(out)
     }
 
-    /// Who asked for changes before the last commit and has not been asked to look again.
+    /// Who asked for changes on an older commit and has not been asked to look again.
     pub fn due_for_another_look(&self) -> Vec<&str> {
+        if self.head_oid.is_empty() {
+            return Vec::new();
+        }
         self.changes_requested
             .iter()
-            // Both are UTC timestamps in one format, so they compare as text.
-            .filter(|(_, at)| !self.last_commit_at.is_empty() && at.as_str() < self.last_commit_at.as_str())
             .map(|(login, _)| login.as_str())
             .filter(|login| !self.requested_reviewers.iter().any(|r| r == login))
             .collect()

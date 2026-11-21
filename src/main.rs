@@ -201,8 +201,8 @@ pub struct App {
     /// Settings › Autonomous: what meat proxy does on GitHub by itself, on the user's own PRs.
     pub autonomy_branches: bool,
     pub autonomy_reviewers: bool,
-    /// Actions already taken (`autonomy::key`), so each happens once per commit.
-    pub autonomy_done: std::collections::HashSet<String>,
+    /// Actions already taken (`autonomy::key`) with when, so each happens once per commit.
+    pub autonomy_done: std::collections::HashMap<String, i64>,
     pub autonomy_worker: Latest<Vec<autonomy::Outcome>>,
     /// Pace: the score of quick approvals and merges, on unless switched off in Settings; its
     /// panel above the Inbox, and whether it is folded.
@@ -316,7 +316,7 @@ fn init() -> App {
         copied: None,
         autonomy_branches: false,
         autonomy_reviewers: false,
-        autonomy_done: std::collections::HashSet::new(),
+        autonomy_done: std::collections::HashMap::new(),
         autonomy_worker: Latest::default(),
         pace_enabled: true,
         pace_collapsed: false,
@@ -692,7 +692,7 @@ impl App {
             jobs.into_iter()
                 .map(|(pr, action)| {
                     let result = autonomy::perform(&pr, &action);
-                    (pr.id, action, result)
+                    (pr, action, result)
                 })
                 .collect()
         });
@@ -1784,12 +1784,12 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     }
     if let Some(results) = s.autonomy_worker.take() {
         let mut errors = Vec::new();
-        for (id, action, result) in results {
-            let Some(pr) = s.prs.iter().find(|p| p.id == id) else {
-                continue;
-            };
+        let now = chrono::Utc::now().timestamp();
+        // Each is keyed by the commit it ran on, which a sync that landed meanwhile may have moved.
+        for (pr, action, result) in results {
+            let pr = &pr;
             // Done or failed, once per commit: a failure would fail the same way every minute.
-            s.autonomy_done.insert(autonomy::key(pr, &action));
+            s.autonomy_done.insert(autonomy::key(pr, &action), now);
             match result {
                 Ok(()) => {
                     let body = action.announce(pr);
@@ -1804,12 +1804,11 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Err(error) => errors.push(format!("{}#{}: {error}", pr.repo, pr.number)),
             }
         }
-        // Keep only what still names a pull request in the lists.
-        let live: Vec<&str> = s.prs.iter().map(|p| p.id.as_str()).collect();
         s.autonomy_done
-            .retain(|k| live.iter().any(|id| k.starts_with(&format!("{id}:"))));
+            .retain(|_, at| now - *at < autonomy::DONE_KEPT_SECS);
         if let Ok(db) = Database::open_default() {
-            let mut done: Vec<&str> = s.autonomy_done.iter().map(String::as_str).collect();
+            let mut done: Vec<String> =
+                s.autonomy_done.iter().map(|(k, at)| format!("{k}\t{at}")).collect();
             done.sort_unstable();
             let _ = db.set_setting("autonomy_done", &done.join("\n"));
         }
@@ -6959,7 +6958,7 @@ mod tests {
             .unwrap();
         let snapshot = db.load_snapshot().unwrap();
         assert!(!snapshot.autonomy_branches && snapshot.autonomy_reviewers);
-        assert!(snapshot.autonomy_done.contains("PR_2:rerequest:def"));
+        assert!(snapshot.autonomy_done.contains_key("PR_2:rerequest:def"));
         assert_eq!(snapshot.autonomy_done.len(), 2);
 
         // Pace is on and unfolded until the user says otherwise, and keeps what it counted.
