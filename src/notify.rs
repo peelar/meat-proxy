@@ -18,7 +18,7 @@ pub fn play_sound(name: &str, allow_os: bool) {
     {
         let path = format!("/System/Library/Sounds/{name}.aiff");
         std::thread::spawn(move || {
-            let _ = Command::new("afplay").arg(path).status();
+            let _ = Command::new("/usr/bin/afplay").arg(path).status();
         });
     }
 }
@@ -127,18 +127,26 @@ mod mac {
     }
 }
 
-/// Opens a PR URL directly in the user's default browser (`open <url>` on macOS).
+/// Opens a web page in the user's default browser (`open <url>` on macOS). Nothing else opens.
 pub fn open_url_in_browser(url: &str, allow_os_open: bool) {
-    if !allow_os_open {
+    if !allow_os_open || !is_web_page(url) {
         return;
     }
     #[cfg(target_os = "macos")]
     {
         let u = url.to_owned();
         std::thread::spawn(move || {
-            let _ = Command::new("open").arg(u).status();
+            let _ = Command::new("/usr/bin/open").arg(u).status();
         });
     }
+}
+
+/// Links in a description and check links come from other people. `file:`, `smb:` or an app's own
+/// scheme would start a program or mount a share, so only https pages open.
+fn is_web_page(url: &str) -> bool {
+    url.len() > 8
+        && url.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 /// Compares previous PR snapshot with new PR snapshot + thresholds to generate notification events:
@@ -368,6 +376,25 @@ pub fn evaluate_inbox_notifications(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_https_pages_open() {
+        for url in ["https://github.com/o/r/pull/1", "HTTPS://ci.example.com/run/5"] {
+            assert!(is_web_page(url), "{url}");
+        }
+        for url in [
+            "file:///System/Applications/Utilities/Terminal.app",
+            "smb://attacker.example/share",
+            "vscode://file/etc/passwd",
+            "http://example.com",
+            "-a Terminal",
+            "https://",
+            "https://example.com/a b",
+            "/Applications/Calculator.app",
+        ] {
+            assert!(!is_web_page(url), "{url}");
+        }
+    }
 
     fn titles(before: &[PullRequest], after: &[PullRequest]) -> Vec<String> {
         evaluate_inbox_notifications(before, after, &[], 72, 48, 0)
