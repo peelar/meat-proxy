@@ -7,6 +7,7 @@ use rune_kit::{
     TextInput,
 };
 
+mod agent;
 mod autonomy;
 mod avatars;
 mod db;
@@ -202,6 +203,11 @@ pub struct App {
     /// Actions already taken (`autonomy::key`), so each happens once per commit.
     pub autonomy_done: std::collections::HashSet<String>,
     pub autonomy_worker: Latest<Vec<(String, autonomy::Action, Result<(), String>)>>,
+    /// Settings › Fix with an agent, the model as typed, and the pull request an agent is on.
+    pub agent: agent::Config,
+    pub agent_model: TextEdit,
+    pub agent_running: Option<String>,
+    pub agent_worker: Latest<(String, Result<agent::Outcome, String>)>,
     /// Pace: the score of quick approvals and merges, on unless switched off in Settings; its
     /// panel above the Inbox, and whether it is folded.
     pub pace_enabled: bool,
@@ -311,6 +317,10 @@ fn init() -> App {
         unblocking: Vec::new(),
         heard: Vec::new(),
         copied: None,
+        agent: agent::Config::default(),
+        agent_model: TextEdit::new(""),
+        agent_running: None,
+        agent_worker: Latest::default(),
         autonomy_branches: false,
         autonomy_reviewers: false,
         autonomy_done: std::collections::HashSet::new(),
@@ -414,6 +424,8 @@ impl App {
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
         self.ai_enabled = snap.ai_enabled;
+        self.agent_model = TextEdit::new(&snap.agent.model);
+        self.agent = snap.agent;
         self.autonomy_branches = snap.autonomy_branches;
         self.autonomy_reviewers = snap.autonomy_reviewers;
         self.autonomy_done = snap.autonomy_done;
@@ -975,6 +987,57 @@ impl App {
         self.unblocking.push(pr_id.to_owned());
     }
 
+    /// Whether the Fix button is on offer: the setting is on and nothing else is running.
+    pub fn agent_ready(&self) -> bool {
+        self.agent.enabled && !self.preview && self.allow_os_side_effects
+    }
+
+    /// Start the configured agent on a pull request's prompt, detached. One at a time.
+    pub fn press_fix(&mut self, pr_id: &str) {
+        if !self.agent_ready() || self.agent_running.is_some() {
+            return;
+        }
+        let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
+            return;
+        };
+        let Some(prompt) = pr.agent_prompt() else {
+            return;
+        };
+        let (pr, cfg) = (pr.clone(), self.agent.clone());
+        self.agent_running = Some(pr.id.clone());
+        self.agent_worker.request((), move |()| {
+            let result = agent::run(&pr, &prompt, &cfg);
+            (pr.id.clone(), result)
+        });
+    }
+
+    fn save_setting(&self, key: &str, value: &str) {
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting(key, value);
+        }
+    }
+
+    pub fn toggle_agent(&mut self) {
+        self.agent.enabled = !self.agent.enabled;
+        self.save_flag("agent_enabled", self.agent.enabled);
+    }
+
+    pub fn pick_agent_provider(&mut self, provider: agent::Provider) {
+        self.agent.provider = provider;
+        self.save_setting("agent_provider", provider.id());
+    }
+
+    /// The model is typed in Settings; keep it once it differs from what is in effect.
+    fn apply_agent_model(&mut self) {
+        let typed = self.agent_model.text.trim().to_owned();
+        if typed != self.agent.model {
+            self.save_setting("agent_model", &typed);
+            self.agent.model = typed;
+        }
+    }
+
     /// What pressing the auto-merge button does: Some(true) turns it on, Some(false) turns it off,
     /// None when it is not on offer (the pull request can be merged now, or GitHub does not allow it).
     pub fn auto_merge_target(&self, pr_id: &str) -> Option<bool> {
@@ -1521,6 +1584,7 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.approve_worker.set_waker(waker.clone());
     s.unblock_worker.set_waker(waker.clone());
     s.autonomy_worker.set_waker(waker.clone());
+    s.agent_worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
@@ -1563,6 +1627,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     }
 
     changed |= s.apply_ai_fields();
+    s.apply_agent_model();
 
     if let Some(snapshot) = s.boot_worker.take() {
         s.loading = false;
@@ -1890,6 +1955,34 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
+    if let Some((id, result)) = s.agent_worker.take() {
+        s.agent_running = None;
+        let name = s.prs.iter().find(|p| p.id == id).cloned();
+        let sound_on = s.native_notifications && s.allow_os_side_effects;
+        match (result, name) {
+            (Ok(outcome), Some(pr)) => {
+                notify::post(&format!("agent-{id}"), "meat proxy", &outcome.announce(&pr), Some(&pr.url), sound_on);
+                match outcome {
+                    agent::Outcome::Pushed => s.trigger_sync(),
+                    agent::Outcome::NothingPushed { said, folder } => {
+                        s.status_banner = Some(format!(
+                            "The agent pushed nothing to {}#{}. {said} (clone kept in {})",
+                            pr.repo,
+                            pr.number,
+                            folder.display()
+                        ));
+                    }
+                }
+            }
+            (Err(error), pr) => {
+                let at = pr.map_or(String::new(), |p| format!(" on {}#{}", p.repo, p.number));
+                notify::post(&format!("agent-{id}"), "meat proxy", &format!("The agent failed{at}"), None, sound_on);
+                s.status_banner = Some(format!("Fix failed{at}. {error}"));
+            }
+            (Ok(_), None) => {}
+        }
+        changed = true;
+    }
     if let Some((id, result)) = s.approve_worker.take() {
         s.approving.retain(|a| *a != id);
         match result {
@@ -2041,11 +2134,12 @@ fn brand(s: &App, k: &Kit) -> El {
                 s.selected_repo = None;
             }
         })
-        .child(keycap)
+        .child(keycap.cursor(rune::Cursor::Pointer))
         .child(
             text("meat proxy")
                 .font(TextStyle::new(14.0, 650.0))
-                .color(k.c.text_base),
+                .color(k.c.text_base)
+                .cursor(rune::Cursor::Pointer),
         )
 }
 
@@ -2931,6 +3025,20 @@ const COPY: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M7.2 5.6h4.2a1.6 1.6 0 0 1 1.6 1.6v4.2a1.6 1.6 0 0 1-1.6 1.6H7.2a1.6 1.6 0 0 1-1.6-1.6V7.2a1.6 1.6 0 0 1 1.6-1.6ZM10.4 3.9v-.3a1.2 1.2 0 0 0-1.2-1.2H4A1.6 1.6 0 0 0 2.4 4v5.2a1.2 1.2 0 0 0 1.2 1.2h.3"/>"#,
 };
 
+/// Claude Code: the spark.
+const CLAUDE: rune::Icon = rune::Icon {
+    name: "agent-claude",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M8 1.6v3.6M8 10.8v3.6M1.6 8h3.6M10.8 8h3.6M3.5 3.5l2.4 2.4M10.1 10.1l2.4 2.4M12.5 3.5l-2.4 2.4M5.9 10.1l-2.4 2.4"/>"#,
+};
+
+/// Codex: a prompt.
+const CODEX: rune::Icon = rune::Icon {
+    name: "agent-codex",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M3 4.6 6.6 8 3 11.4M8.4 11.6H13"/>"#,
+};
+
 /// The colour of the buttons that clear a blocker: a calm blue, apart from Approve's mint and
 /// Merge's violet.
 fn unblock_tone(k: &Kit) -> Color {
@@ -3280,7 +3388,6 @@ fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_repo: bool) ->
         return col()
             .w_full()
             .child(line)
-            .child(merge_path(s, k, pr, indent))
             .child(description(s, k, pr, indent));
     }
     line
@@ -3354,7 +3461,36 @@ fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttention) -> Opti
     // checks run again on the result.
     let update_first = blockers.contains(&Blocker::Behind) && pr.can_update_branch;
     let prompt = if update_first { None } else { pr.agent_prompt() };
-    let (button, why, at_rest) = if let Some(prompt) = prompt {
+    let fix = if prompt.is_some() && s.agent_ready() {
+        Some(s.agent.provider)
+    } else {
+        None
+    };
+    let (button, why, at_rest) = if let Some(provider) = fix {
+        let (glyph, tone) = match provider {
+            agent::Provider::Claude => (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0)),
+            agent::Provider::Codex => (&CODEX, tone),
+        };
+        let running = s.agent_running.as_deref();
+        let (label, ink) = if running == Some(pr.id.as_str()) {
+            ("Fixing…", Ink::Busy)
+        } else if running.is_some() {
+            ("Fix", Ink::Disabled)
+        } else {
+            ("Fix", Ink::Rest)
+        };
+        let why = format!(
+            "Run {} on this pull request in the background and say whether it pushed a fix",
+            provider.label()
+        );
+        (
+            ink_button(k, tone, glyph, label, ink, key)
+                .on_press(move |s: &mut App| s.press_fix(&id)),
+            why,
+            first.is_some_and(|blocker| blocker != Blocker::Behind)
+                || running == Some(pr.id.as_str()),
+        )
+    } else if let Some(prompt) = prompt {
         let copied = s
             .copied
             .as_ref()
@@ -3383,7 +3519,8 @@ fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttention) -> Opti
             }
             (true, false) => "Copy a prompt for your coding agent: resolve the conflicts",
             _ => "Copy a prompt for your coding agent: fix the failed checks",
-        };
+        }
+        .to_owned();
         (
             button,
             why,
@@ -3398,7 +3535,7 @@ fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttention) -> Opti
         (
             ink_button(k, tone, &UPDATE, label, ink, key)
                 .on_press(move |s: &mut App| s.press_unblock(&id, Unblock::UpdateBranch)),
-            "Merge the base branch into this one, as Update branch does on GitHub",
+            "Merge the base branch into this one, as Update branch does on GitHub".to_owned(),
             first == Some(Blocker::Behind),
         )
     } else {
@@ -3410,160 +3547,6 @@ fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttention) -> Opti
     } else {
         (wrap.group_opacity(0.0, 1.0), false)
     })
-}
-
-/// Under an opened row, above the description: where the pull request stands on its way to the
-/// merge. Checks that failed link to their logs, and the user's own can be run again from here.
-fn merge_path(s: &App, k: &Kit, pr: &PullRequest, indent: f32) -> El {
-    let c = &k.c;
-    let fact = |label: &str, value: El| {
-        row()
-            .w_full()
-            .gap(10.0)
-            .child(text(label.to_owned()).font(k.ty.small).color(c.text_faint).w(52.0))
-            .child(value.grow(1.0).min_w(0.0))
-    };
-    let plain = |value: String, tone: Color| text(value).font(k.ty.small).color(tone).wrap();
-    let mut facts: Vec<El> = Vec::new();
-
-    if !pr.failing_checks.is_empty() {
-        let mut line = String::new();
-        let mut links = Vec::new();
-        for check in &pr.failing_checks {
-            if !line.is_empty() {
-                line.push_str("  ·  ");
-            }
-            let start = line.len();
-            line.push_str(&check.name);
-            if !check.url.is_empty() {
-                links.push(
-                    rune::Link::new(start..line.len(), check.url.clone())
-                        .hover(rune::LinkPaint::new().underline(c.danger.fg))
-                        .help("Open this check"),
-                );
-            }
-        }
-        let mut names = plain(line, c.danger.fg);
-        for link in links {
-            names = names.link(link);
-        }
-        let names = names.on_link(|s: &mut App, url: &str, _: &mut Tx| {
-            notify::open_url_in_browser(url, s.allow_os_side_effects)
-        });
-        // Running the failed jobs again only helps when the failure was a fluke, so it is offered
-        // here and not as the row's button.
-        let can_rerun = pr.ownership == Ownership::Mine
-            && !pr.rerunnable().is_empty()
-            && !s.unblocking.contains(&pr.id);
-        let failed = if can_rerun {
-            let label = "Run the failed jobs again";
-            let id = pr.id.clone();
-            col().gap(3.0).child(names).child(
-                text(label)
-                    .key(format!("rerun-{}", pr.id))
-                    .font(k.ty.small)
-                    .color(unblock_tone(k))
-                    .link(
-                        rune::Link::new(0..label.len(), "rerun")
-                            .hover(rune::LinkPaint::new().underline(unblock_tone(k)))
-                            .help("Runs the failed GitHub Actions jobs again, which helps when the failure was a fluke"),
-                    )
-                    .on_link(move |s: &mut App, _: &str, _: &mut Tx| {
-                        s.press_unblock(&id, Unblock::Rerun)
-                    }),
-            )
-        } else {
-            names
-        };
-        facts.push(fact("Failed", failed));
-    } else {
-        match pr.ci_status {
-            CiStatus::Failing => facts.push(fact("Checks", plain("Failing".into(), c.danger.fg))),
-            CiStatus::Pending => facts.push(fact("Checks", plain("Running".into(), c.text_muted))),
-            CiStatus::Passing => facts.push(fact("Checks", plain("Passing".into(), c.text_muted))),
-            CiStatus::None => {}
-        }
-    }
-
-    match pr.merge_readiness {
-        model::MergeReadiness::Conflicts => {
-            facts.push(fact("Branch", plain("Conflicts with its base".into(), c.danger.fg)))
-        }
-        model::MergeReadiness::Behind => facts.push(fact(
-            "Branch",
-            plain("Behind its base, which has to be merged in first".into(), c.warning.fg),
-        )),
-        _ if pr.can_update_branch => {
-            facts.push(fact("Branch", plain("Behind its base".into(), c.text_muted)))
-        }
-        _ => {}
-    }
-
-    let mut reviews: Vec<String> = Vec::new();
-    if !pr.approved_by.is_empty() {
-        reviews.push(pr.approval_label());
-    }
-    let pending: Vec<&str> = pr
-        .reviewers
-        .iter()
-        .filter(|r| !pr.approved_by.contains(r))
-        .map(String::as_str)
-        .collect();
-    if !pending.is_empty() {
-        reviews.push(format!("waiting on {}", pending.join(", ")));
-    }
-    if pr.unanswered() > 0 {
-        reviews.push(comments_to_answer(pr.unanswered()));
-    }
-    if let Some(ask) = &pr.asked {
-        reviews.push(format!(
-            "you were asked {}{} ago",
-            if ask.again { "again " } else { "" },
-            model::span(ask.hours_ago)
-        ));
-    }
-    if !reviews.is_empty() {
-        facts.push(fact("Reviews", plain(reviews.join("  ·  "), c.text_muted)));
-    }
-
-    if !pr.files.is_empty() {
-        const SHOWN: usize = 6;
-        let mut list = col().gap(2.0).child(plain(
-            format!("+{} −{}", pr.additions, pr.deletions),
-            c.text_muted,
-        ));
-        for path in pr.files.iter().take(SHOWN) {
-            list = list.child(
-                text(path.clone())
-                    .font(k.ty.mono)
-                    .color(c.text_muted)
-                    .truncate_head(),
-            );
-        }
-        if pr.files.len() >= github::FILES_FETCHED {
-            list = list.child(plain("and more".into(), c.text_faint));
-        } else if pr.files.len() > SHOWN {
-            list = list.child(plain(
-                format!("and {} more", pr.files.len() - SHOWN),
-                c.text_faint,
-            ));
-        }
-        facts.push(fact("Files", list));
-    }
-
-    let mut block = col()
-        .key(format!("pr-path-{}", pr.id))
-        .w_full()
-        .pl(indent)
-        .pr(14.0)
-        .gap(5.0);
-    if !facts.is_empty() {
-        block = block.pb(10.0);
-    }
-    for fact in facts {
-        block = block.child(fact);
-    }
-    block
 }
 
 /// The PR description as Markdown, under its row.
@@ -4574,6 +4557,60 @@ fn sync_option_row(
     )
 }
 
+/// Settings › Fix with an agent: Copy prompt becomes Fix, which runs the prompt in a detached
+/// Claude Code or Codex session.
+fn agent_section(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let on = s.agent.enabled;
+    col()
+        .w_full()
+        .gap(10.0)
+        .child(text("Fix with an agent").font(SECTION_TITLE).color(c.text_base))
+        .child(
+            text("Instead of copying a prompt, a Fix button runs it for you: meat proxy clones the repository, checks the pull request out and starts the agent there, unattended and without asking for permissions. It says when the agent pushed, or didn't.")
+                .wrap()
+                .font(k.ty.small)
+                .color(c.text_faint),
+        )
+        .child(setup_row(
+            k,
+            "Run agents from the Fix button",
+            Switch::new(on)
+                .label("Run agents from the Fix button")
+                .hide_label()
+                .on_toggle(|s: &mut App| s.toggle_agent())
+                .build(k)
+                .key("option-agent-enabled"),
+        ))
+        .child(setup_row(
+            k,
+            "Agent",
+            SegmentedControl::new(
+                &agent::Provider::ALL.map(|p| p.label()),
+                Some(s.agent.provider.index()),
+            )
+            .label("Agent")
+            .width(Some(220.0))
+            .on_pick(|s: &mut App, idx, _| {
+                s.pick_agent_provider(agent::Provider::ALL[idx.min(1)]);
+            })
+            .build(k)
+            .key("option-agent-provider"),
+        ))
+        .child(setup_row(
+            k,
+            "Model",
+            TextInput::new(&s.agent_model)
+                .label("Agent model")
+                .disabled(!on)
+                .placeholder("The agent's default")
+                .width(Some(360.0))
+                .on_edit(|s: &mut App| &mut s.agent_model)
+                .build(k)
+                .key("option-agent-model"),
+        ))
+}
+
 /// Settings › Autonomous: two switches, by who an action reaches. What each does stays out of
 /// sight; the notification after each action says it.
 fn autonomy_section(s: &App, k: &Kit) -> El {
@@ -4592,9 +4629,9 @@ fn autonomy_section(s: &App, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
-        .child(text("Autonomous").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(text("Autonomous").font(SECTION_TITLE).color(k.c.text_base))
         .child(
-            text("Your own PRs only. You get a notification each time.")
+            text("Let meat proxy act on GitHub for you, on your own pull requests only, so they keep moving without you. Each switch below turns one action on, and you get a notification every time it acts.")
                 .wrap()
                 .font(k.ty.small)
                 .color(k.c.text_faint),
@@ -4615,6 +4652,8 @@ fn autonomy_section(s: &App, k: &Kit) -> El {
 
 // --- Pace ---
 
+/// The titles of the Settings sections.
+const SECTION_TITLE: TextStyle = TextStyle::new(17.0, 650.0).lh(24.0);
 const PACE_CELL: f32 = 12.0;
 const PACE_GAP: f32 = 3.0;
 /// The streak, the score beside it, their labels, and the grid's chrome: tabular figures, so a
@@ -4835,7 +4874,7 @@ fn pace_panel(s: &App, k: &Kit) -> El {
         .justify_between()
         .hover_group()
         .role("button")
-        .label(if collapsed { "Show Pace" } else { "Hide Pace" })
+        .label(if collapsed { "Show Scoreboard" } else { "Hide Scoreboard" })
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(|s: &mut App, tx: &mut Tx| {
             tx.motion_curve(rune::Curve::tween(0.16, rune::Easing::cubic(0.2, 0.0, 0.0, 1.0)));
@@ -4846,7 +4885,7 @@ fn pace_panel(s: &App, k: &Kit) -> El {
                 .center_y()
                 .gap(8.0)
                 .child(rune::icon(&BOLT, 14.0).color(mint(k)).a11y_hidden())
-                .child(text("Pace").font(k.ty.ui_medium).color(c.text_base))
+                .child(text("Scoreboard").font(k.ty.ui_medium).color(c.text_base))
                 .child(el().size(1.0, 10.0).fill(c.border_base))
                 .child(caption),
         )
@@ -5184,18 +5223,18 @@ fn pace_section(s: &App, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
-        .child(text("Pace").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(text("Scoreboard").font(SECTION_TITLE).color(k.c.text_base))
         .child(
-            text("Keeps score of approvals and merges you make from here, and celebrates the quick ones. A big pull request approved faster than it reads earns no medal.")
+            text("Counts the pull requests you approve and merge from here, says on the row when one was quick, and shows your streak and median time to merge in a Scoreboard above the Inbox. A big pull request approved faster than it can be read earns no credit. Off, nothing is counted, flagged or shown.")
                 .wrap()
                 .font(k.ty.small)
                 .color(k.c.text_faint),
         )
         .child(setup_row(
             k,
-            "Show my pace",
+            "Enable scoreboard",
             Switch::new(s.pace_enabled)
-                .label("Show my pace")
+                .label("Enable scoreboard")
                 .hide_label()
                 .on_toggle(|s: &mut App| s.toggle_pace())
                 .build(k)
@@ -5246,8 +5285,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            text("Notifications")
-                .font(k.ty.ui_medium)
+            text("Notifications").font(SECTION_TITLE)
                 .color(c.text_base),
         )
         .child(notifications_row)
@@ -5309,7 +5347,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
     let ai_section = col()
         .w_full()
         .gap(10.0)
-        .child(text("AI").font(k.ty.ui_medium).color(c.text_base))
+        .child(text("AI").font(SECTION_TITLE).color(c.text_base))
         .child(
             text("When on, the description and changed file paths of every PR that asks for your review, private repositories included, are sent to the model at this URL. Off, only rules sort.")
                 .wrap()
@@ -5371,8 +5409,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
         .child(
             panel(k)
                 .child(
-                    text("Pull requests")
-                        .font(k.ty.ui_medium)
+                    text("Pull requests").font(SECTION_TITLE)
                         .color(c.text_base),
                 )
                 .child(setup_row(
@@ -5423,6 +5460,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         ),
                 )),
         )
+        .child(panel(k).child(agent_section(s, k)))
         .child(panel(k).child(autonomy_section(s, k)))
         .child(panel(k).child(pace_section(s, k)))
         .children(s.ai_feature.then(|| panel(k).child(ai_section)))
@@ -5507,10 +5545,14 @@ fn settings_modal(s: &App, k: &Kit) -> El {
         .w_full()
         .h_full()
         .padding(24.0)
+        .backdrop_blur(SETTINGS_BACKDROP_BLUR)
         .fill(k.c.scrim)
         .center()
         .child(dialog)
 }
+
+/// How far the Inbox blurs behind the Settings dialog.
+const SETTINGS_BACKDROP_BLUR: f32 = 12.0;
 
 fn repositories_modal(s: &App, k: &Kit) -> El {
     let close = rune_kit::IconButton::new(k.glyph.close)

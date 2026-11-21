@@ -27,7 +27,7 @@ pub struct NotificationPoll {
     pub events: Vec<NotificationEvent>,
 }
 
-fn gh_command() -> Command {
+pub(crate) fn gh_command() -> Command {
     let mut cmd = Command::new("gh");
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths: Vec<_> = std::env::split_paths(&inherited_path).collect();

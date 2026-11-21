@@ -38,6 +38,8 @@ pub struct AppSnapshot {
     pub autonomy_done: std::collections::HashSet<String>,
     /// Pace: keep score of quick approvals and merges (on unless switched off), whether its
     /// panel is folded, and what it has counted.
+    /// Fix with an agent: on or off, which provider, which model.
+    pub agent: crate::agent::Config,
     pub pace_enabled: bool,
     pub pace_collapsed: bool,
     pub pace_events: Vec<crate::pace::Event>,
@@ -348,6 +350,13 @@ impl Database {
                 .lines()
                 .map(str::to_owned)
                 .collect(),
+            agent: crate::agent::Config {
+                enabled: self.get_setting("agent_enabled")?.is_some_and(|v| v == "1"),
+                provider: crate::agent::Provider::from_id(
+                    &self.get_setting("agent_provider")?.unwrap_or_default(),
+                ),
+                model: self.get_setting("agent_model")?.unwrap_or_default(),
+            },
             pace_enabled: self.flag("pace_enabled")?,
             pace_collapsed: self.get_setting("pace_collapsed")?.is_some_and(|v| v == "1"),
             pace_events: self.load_pace_events()?,
