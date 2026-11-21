@@ -152,6 +152,8 @@ pub struct App {
     pub new_rule_exclude_drafts: bool,
     pub new_rule_exclude_mine: bool,
     pub status_banner: Option<String>,
+    /// The saved data, opened on first use and kept open; see `App::db`.
+    db: std::cell::OnceCell<Database>,
     /// The saved data could not be read at launch. Setup must not run over it then: finishing
     /// setup replaces the saved pull requests.
     pub boot_failed: bool,
@@ -279,6 +281,7 @@ fn init() -> App {
         new_rule_exclude_drafts: true,
         new_rule_exclude_mine: true,
         status_banner: None,
+        db: std::cell::OnceCell::new(),
         boot_failed: false,
         boot_worker: Latest::default(),
         sync_worker: Latest::default(),
@@ -336,6 +339,24 @@ fn init() -> App {
 }
 
 impl App {
+    /// The saved data, for writing what the user changed. None in a preview, which never saves,
+    /// and while the database cannot be opened (tried again on the next write).
+    fn db(&self) -> Option<&Database> {
+        if self.preview {
+            return None;
+        }
+        if let Some(db) = self.db.get() {
+            return Some(db);
+        }
+        match Database::open_default() {
+            Ok(db) => Some(self.db.get_or_init(|| db)),
+            Err(error) => {
+                eprintln!("meat-proxy: could not open the saved data: {error}");
+                None
+            }
+        }
+    }
+
     /// Pinned repositories first, in the order the user dragged them; the rest by automatic rank.
     pub fn ordered_repos(&self) -> Vec<RepoConfig> {
         let live = self.repos.iter().filter(|r| !r.removed);
@@ -413,8 +434,7 @@ impl App {
             Vec::new()
         };
         if !same_layout
-            && !self.preview
-            && let Ok(db) = Database::open_default()
+            && let Some(db) = self.db()
         {
             let _ = db.set_setting("inbox_layout", &self.layout.fingerprint);
         }
@@ -498,11 +518,7 @@ impl App {
         }
         let next = !self.smart_active();
         self.smart_sort = Some(next);
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
-            let _ = db.set_setting("smart_sort", if next { "1" } else { "0" });
-        }
+        self.save_flag("smart_sort", next);
     }
 
     /// What the sorting goes by: with AI, the model's answers or a rule's; with rules alone, only
@@ -529,9 +545,7 @@ impl App {
         } else {
             self.ignored.remove(pr_id);
         }
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let _ = db.set_ignored(pr_id, now_ignored);
         }
     }
@@ -548,14 +562,7 @@ impl App {
 
     pub fn toggle_show_team_reviews(&mut self) {
         self.show_team_reviews = !self.show_team_reviews;
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
-            let _ = db.set_setting(
-                "show_team_reviews",
-                if self.show_team_reviews { "1" } else { "0" },
-            );
-        }
+        self.save_flag("show_team_reviews", self.show_team_reviews);
     }
 
     fn set_ai_fields(&mut self, url: &str, model: &str, key: &str) {
@@ -589,22 +596,14 @@ impl App {
 
     pub fn toggle_ai(&mut self) {
         self.ai_enabled = !self.ai_enabled;
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
-            let _ = db.set_setting("ai_enabled", if self.ai_enabled { "1" } else { "0" });
-        }
+        self.save_flag("ai_enabled", self.ai_enabled);
         // Review requests become (or stop being) candidates: ask again on the next sync.
         self.queue_judgments();
     }
 
     pub fn toggle_hide_external(&mut self) {
         self.hide_external = !self.hide_external;
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
-            let _ = db.set_setting("hide_external", if self.hide_external { "1" } else { "0" });
-        }
+        self.save_flag("hide_external", self.hide_external);
     }
 
     /// Flip one Autonomous switch (`true` for branches, `false` for reviewers) and act right away.
@@ -616,18 +615,12 @@ impl App {
         };
         *flag = !*flag;
         let value = *flag;
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
-            let _ = db.set_setting(key, if value { "1" } else { "0" });
-        }
+        self.save_flag(key, value);
         self.run_autonomy();
     }
 
     fn save_flag(&self, key: &str, value: bool) {
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let _ = db.set_setting(key, if value { "1" } else { "0" });
         }
     }
@@ -656,9 +649,7 @@ impl App {
             pace::Kind::Approve => pace::approval(pr, now),
             pace::Kind::Merge => pace::merge(pr, now),
         };
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let _ = db.add_pace_event(&event);
         }
         self.pace_events.push(event.clone());
@@ -804,9 +795,7 @@ impl App {
     }
 
     fn store_judgments(&mut self, judged: Vec<(String, judge::Judgment)>) {
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let live: Vec<String> = self.prs.iter().map(|p| p.id.clone()).collect();
             let _ = db.save_judgments(&judged, &live);
         }
@@ -875,7 +864,7 @@ impl App {
             return;
         }
         let join = |list: &[u8]| list.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
-        if let Ok(db) = Database::open_default() {
+        if let Some(db) = self.db() {
             let _ = db.set_setting("inbox_group_order", &join(&self.group_order));
             let _ = db.set_setting("inbox_collapsed_groups", &join(&self.collapsed_groups));
         }
@@ -1017,9 +1006,7 @@ impl App {
     }
 
     fn save_tracked_row(&self, t: &model::Tracked) {
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let _ = db.save_tracked(t);
         }
     }
@@ -1027,9 +1014,7 @@ impl App {
     /// Remove the faded row of a pull request that auto-merge finished.
     pub fn clear_tracked(&mut self, pr_id: &str) {
         self.tracked.retain(|t| t.pr.id != pr_id);
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let _ = db.delete_tracked(pr_id);
         }
     }
@@ -1064,9 +1049,7 @@ impl App {
                 (false, Some(i)) if self.tracked[i].state == model::TrackedState::Watching => {
                     // Auto-merge was turned off: nothing to follow any more.
                     let id = self.tracked.remove(i).pr.id;
-                    if !self.preview
-                        && let Ok(db) = Database::open_default()
-                    {
+                    if let Some(db) = self.db() {
                         let _ = db.delete_tracked(&id);
                     }
                     continue;
@@ -1106,9 +1089,7 @@ impl App {
         if days > 0 {
             self.prs.retain(|pr| pr.within_days(days));
         }
-        if !self.preview
-            && let Ok(db) = Database::open_default()
-        {
+        if let Some(db) = self.db() {
             let _ = db.set_setting("max_age_days", &days.to_string());
         }
         self.trigger_sync();
@@ -1299,8 +1280,7 @@ impl App {
     pub fn persist_repos(&self) {
         if self.onboarded
             && self.page == Page::Inbox
-            && !self.preview
-            && let Ok(db) = Database::open_default()
+            && let Some(db) = self.db()
         {
             let _ = db.save_repos(&self.repos);
         }
@@ -1309,7 +1289,7 @@ impl App {
     pub fn persist_thresholds(&self) {
         if self.onboarded
             && self.settings_open
-            && let Ok(db) = Database::open_default()
+            && let Some(db) = self.db()
         {
             let _ = db.set_setting("draft_stale_hours", &self.draft_stale_hours.to_string());
             let _ = db.set_setting("open_stale_hours", &self.open_stale_hours.to_string());
@@ -1325,7 +1305,7 @@ impl App {
             return;
         }
         if !self.preview {
-            let saved = Database::open_default().and_then(|db| {
+            let saved = self.db().ok_or("the saved data could not be opened".to_owned()).and_then(|db| {
                 db.save_onboarding(
                     &self.repos,
                     &self.prs,
@@ -1340,6 +1320,7 @@ impl App {
                         ),
                     ],
                 )
+                .map_err(|e| e.to_string())
             });
             if let Err(error) = saved {
                 self.status_banner = Some(format!("Could not save setup. {error}"));
@@ -1386,7 +1367,7 @@ impl App {
         }
         self.drop_removed_prs();
         self.persist_repos_now();
-        if let Ok(db) = Database::open_default() {
+        if let Some(db) = self.db() {
             let _ = db.save_prs(&self.prs);
         }
     }
@@ -1440,7 +1421,7 @@ impl App {
         if self.preview {
             return;
         }
-        if let Ok(db) = Database::open_default() {
+        if let Some(db) = self.db() {
             let _ = db.save_repos(&self.repos);
             let _ = db.set_setting("organization", self.organization.text.trim());
         }
@@ -1478,7 +1459,7 @@ impl App {
             exclude_mine: self.new_rule_exclude_mine,
             enabled: true,
         };
-        if let Ok(db) = Database::open_default() {
+        if let Some(db) = self.db() {
             let _ = db.upsert_rule(&rule);
         }
         self.rules.push(rule);
@@ -1491,15 +1472,16 @@ impl App {
     pub fn toggle_rule(&mut self, rule_id: &str) {
         if let Some(r) = self.rules.iter_mut().find(|r| r.id == rule_id) {
             r.enabled = !r.enabled;
-            if let Ok(db) = Database::open_default() {
-                let _ = db.upsert_rule(r);
+            let r = r.clone();
+            if let Some(db) = self.db() {
+                let _ = db.upsert_rule(&r);
             }
         }
     }
 
     pub fn remove_rule(&mut self, rule_id: &str) {
         self.rules.retain(|r| r.id != rule_id);
-        if let Ok(db) = Database::open_default() {
+        if let Some(db) = self.db() {
             let _ = db.delete_rule(rule_id);
         }
     }
@@ -1567,17 +1549,21 @@ fn deliver_events(s: &mut App, events: Vec<NotificationEvent>, quiet: bool) -> V
     if !s.onboarded || !s.native_notifications || !s.allow_os_side_effects || events.is_empty() {
         return Vec::new();
     }
+    let Some(db) = s.db() else {
+        return Vec::new();
+    };
+    // Saving an event first is what makes it new: one already saved was shown before.
+    let new: Vec<NotificationEvent> = events
+        .into_iter()
+        .filter(|event| db.insert_notification(event).unwrap_or(false))
+        .collect();
     let mut delivered = Vec::new();
-    if let Ok(db) = Database::open_default() {
-        for event in events {
-            if db.insert_notification(&event).unwrap_or(false) {
-                if !quiet {
-                    notify::dispatch_system_notification(&event, true);
-                }
-                delivered.push(event.pr_url.clone());
-                s.notifications.insert(0, event);
-            }
+    for event in new {
+        if !quiet {
+            notify::dispatch_system_notification(&event, true);
         }
+        delivered.push(event.pr_url.clone());
+        s.notifications.insert(0, event);
     }
     delivered
 }
@@ -1727,7 +1713,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     });
                     deliver_events(s, heard, true);
                     deliver_events(s, events, false);
-                    if let Ok(db) = Database::open_default() {
+                    if let Some(db) = s.db() {
                         let _ = db.save_prs(&s.prs);
                         let _ = db.save_repos(&s.repos);
                     }
@@ -1794,7 +1780,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         if let Some(modified) = notifications.modified
             && s.last_notif_modified.as_ref() != Some(&modified)
         {
-            if let Ok(db) = Database::open_default() {
+            if let Some(db) = s.db() {
                 let _ = db.set_setting("last_notif_modified", &modified);
             }
             s.last_notif_modified = Some(modified);
@@ -1844,7 +1830,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         }
         s.autonomy_done
             .retain(|_, at| now - *at < autonomy::DONE_KEPT_SECS);
-        if let Ok(db) = Database::open_default() {
+        if let Some(db) = s.db() {
             let mut done: Vec<String> =
                 s.autonomy_done.iter().map(|(k, at)| format!("{k}\t{at}")).collect();
             done.sort_unstable();
@@ -2018,9 +2004,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         if !done.is_empty() {
             s.celebrations.retain(|(id, _)| !done.contains(id));
             s.prs.retain(|pr| !done.contains(&pr.id));
-            if !s.preview
-                && let Ok(db) = Database::open_default()
-            {
+            if let Some(db) = s.db() {
                 let _ = db.save_prs(&s.prs);
             }
             s.trigger_sync();
@@ -2911,7 +2895,7 @@ fn default_filter_row(s: &App, k: &Kit) -> El {
             s.default_filter = InboxFilter::from_index(idx);
             if s.onboarded
                 && s.settings_open
-                && let Ok(db) = Database::open_default()
+                && let Some(db) = s.db()
             {
                 let _ = db.set_setting("default_tab", s.default_filter.name());
             }
@@ -4633,9 +4617,7 @@ fn sync_option_row(
                 let flag = field(&mut s.sync_options);
                 *flag = !*flag;
                 let value = *flag;
-                if let Ok(db) = Database::open_default() {
-                    let _ = db.set_setting(key, if value { "1" } else { "0" });
-                }
+                s.save_flag(key, value);
                 s.trigger_sync();
             })
             .build(k)
@@ -5299,12 +5281,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                     if s.native_notifications {
                         s.send_welcome_notification();
                     }
-                    if let Ok(db) = Database::open_default() {
-                        let _ = db.set_setting(
-                            "native_notifications",
-                            if s.native_notifications { "1" } else { "0" },
-                        );
-                    }
+                    s.save_flag("native_notifications", s.native_notifications);
                     s.next_fast_poll_at = 0.0;
                 })
                 .build(k),
