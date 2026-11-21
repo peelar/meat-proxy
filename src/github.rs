@@ -16,6 +16,8 @@ pub enum SyncStatus {
 pub struct SyncOutput {
     pub status: SyncStatus,
     pub prs: Vec<PullRequest>,
+    /// The user's own rules whose search failed, with why; the rest of the sync stands.
+    pub failed_rules: Vec<String>,
 }
 
 pub const DEFAULT_POLL_INTERVAL: u64 = 60;
@@ -595,6 +597,8 @@ pub fn fetch_live(
         label: Some("Active repo".into()),
         tracked_only: false,
     }));
+    // A rule is the user's own query, and a mistake in one must not stop the whole sync.
+    let first_rule = searches.len();
     searches.extend(rules.iter().filter(|rule| rule.enabled).map(|rule| Search {
         query: rule.to_github_search_query(),
         reason: IncomingReason::SubscribedRule,
@@ -620,8 +624,16 @@ pub fn fetch_live(
 
     let mut viewer = String::new();
     let mut prs = Vec::<PullRequest>::new();
-    for (search, result) in searches.iter().zip(results) {
-        let (login, nodes) = result?;
+    let mut failed_rules = Vec::new();
+    for (at, (search, result)) in searches.iter().zip(results).enumerate() {
+        let (login, nodes) = match result {
+            Ok(found) => found,
+            Err(error) if at >= first_rule => {
+                failed_rules.push(format!("{}: {error}", search.label.as_deref().unwrap_or("rule")));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         viewer = login;
         for node in &nodes {
             let mine = node["author"]["login"]
@@ -681,6 +693,7 @@ pub fn fetch_live(
     Ok(SyncOutput {
         status: SyncStatus::Connected { username: viewer },
         prs,
+        failed_rules,
     })
 }
 
@@ -810,8 +823,15 @@ fn fetch_search(
         let query = format!(
             "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {PAGE_SIZE}, after: {after}) {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }} }}{fields}"
         );
-        // A page GitHub was too slow for once usually comes back the second time.
-        let data = fetch_graphql(&query).or_else(|_| fetch_graphql(&query))?;
+        // A page GitHub was too slow for once usually comes back the second time; any other
+        // error (a lapsed login, a bad query) would fail the same way again.
+        let data = fetch_graphql(&query).or_else(|error| {
+            if is_transient(&error) {
+                fetch_graphql(&query)
+            } else {
+                Err(error)
+            }
+        })?;
         let viewer = data["viewer"]["login"]
             .as_str()
             .ok_or_else(|| "GitHub did not return the signed-in account".to_string())?
@@ -835,6 +855,14 @@ fn fetch_search(
     }
 }
 
+/// An error worth one more try: GitHub ran out of time, or the network dropped.
+fn is_transient(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    ["502", "503", "504", "timeout", "timed out", "no answer", "something went wrong", "connection"]
+        .iter()
+        .any(|sign| error.contains(sign))
+}
+
 fn fetch_graphql(query: &str) -> Result<serde_json::Value, String> {
     let out = gh_command()
         .args([
@@ -847,20 +875,30 @@ fn fetch_graphql(query: &str) -> Result<serde_json::Value, String> {
         ])
         .run_gh()?;
 
-    if !out.status.success() {
-        return Err(gh_error(&out, "GitHub request failed"));
-    }
+    // gh fails when the answer has errors, but still prints it: GitHub answers what it can and
+    // leaves out what it may not show (an organization that wants single sign-on, say).
+    let Ok(response) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Err(if out.status.success() {
+            "GitHub answered with something that is not JSON".to_owned()
+        } else {
+            gh_error(&out, "GitHub request failed")
+        });
+    };
+    graphql_data(response).map_err(|error| {
+        if out.status.success() { error } else { gh_error(&out, &error) }
+    })
+}
 
-    let mut response: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("Invalid GraphQL JSON: {e}"))?;
-    if let Some(message) = response["errors"][0]["message"].as_str() {
-        return Err(message.to_owned());
-    }
+/// The data of a GraphQL answer, when it has any; else its first error.
+fn graphql_data(mut response: serde_json::Value) -> Result<serde_json::Value, String> {
     let data = response["data"].take();
-    if data.is_null() {
-        return Err("GitHub response is missing data".to_string());
+    if data.is_object() {
+        return Ok(data);
     }
-    Ok(data)
+    Err(response["errors"][0]["message"]
+        .as_str()
+        .unwrap_or("GitHub response is missing data")
+        .to_owned())
 }
 
 fn parse_graphql_pr(
@@ -1774,6 +1812,19 @@ pub fn demo_prs() -> Vec<PullRequest> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_answer_with_data_and_errors_keeps_the_data() {
+        // GitHub leaves out what a single-sign-on organization hides and answers the rest.
+        let partial = json!({
+            "data": { "s0": { "nodes": [{ "number": 1 }, null] } },
+            "errors": [{ "type": "FORBIDDEN", "message": "Resource protected by SAML" }],
+        });
+        assert_eq!(graphql_data(partial).unwrap()["s0"]["nodes"][0]["number"], 1);
+        let failed = json!({ "data": null, "errors": [{ "message": "Bad query" }] });
+        assert_eq!(graphql_data(failed).unwrap_err(), "Bad query");
+        assert!(is_transient("HTTP 502: Bad Gateway") && !is_transient("HTTP 401: Bad credentials"));
+    }
 
     #[test]
     fn writes_refuse_a_pull_request_whose_commit_is_not_known() {

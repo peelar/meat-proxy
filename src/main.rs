@@ -153,6 +153,8 @@ pub struct App {
     pub status_banner: Option<String>,
     pub boot_worker: Latest<Result<db::AppSnapshot, rusqlite::Error>>,
     pub sync_worker: Latest<Result<SyncOutput, String>>,
+    /// A sync was asked for while one ran; it starts when that one lands.
+    pub sync_again: bool,
     pub judge: Option<judge::JudgeConfig>,
     /// Sort with the model's verdicts (true) or by rules alone (false); unset follows what exists.
     pub smart_sort: Option<bool>,
@@ -271,6 +273,7 @@ fn init() -> App {
         status_banner: None,
         boot_worker: Latest::default(),
         sync_worker: Latest::default(),
+        sync_again: false,
         judge: None,
         smart_sort: None,
         layout: sections::Layout::default(),
@@ -1265,10 +1268,17 @@ impl App {
         list
     }
 
+    /// Starts a sync, or, while one runs, one more after it: a new request would drop the running
+    /// one's answer, and a busy minute of approvals would never refresh the list.
     pub fn trigger_sync(&mut self) {
         if self.loading || self.preview {
             return;
         }
+        if self.sync_worker.is_pending() {
+            self.sync_again = true;
+            return;
+        }
+        self.sync_again = false;
         let repos = self.repos.clone();
         let rules = self.rules.clone();
         let options = self.sync_options;
@@ -1632,6 +1642,10 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(result) = s.sync_worker.take() {
         match result {
             Ok(mut out) => {
+                if !out.failed_rules.is_empty() {
+                    s.status_banner =
+                        Some(format!("Some rules did not sync: {}", out.failed_rules.join(" · ")));
+                }
                 out.prs.retain(|pr| !s.is_removed(&pr.repo));
                 for pr in &mut out.prs {
                     if let Some(previous) = s.prs.iter().find(|p| p.id == pr.id) {
@@ -1682,6 +1696,9 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
             }
             Err(reason) => s.sync_status = SyncStatus::NeedsAuth { reason },
+        }
+        if s.sync_again {
+            s.trigger_sync();
         }
         changed = true;
     }
