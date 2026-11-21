@@ -437,6 +437,18 @@ pub struct PullRequest {
     /// known yet.
     #[serde(skip)]
     pub asked: Option<Ask>,
+    /// The last commit, as GitHub names it, and when it was made (UTC, RFC 3339); empty when not
+    /// known. A new commit is a new round for reviewers.
+    #[serde(skip)]
+    pub head_oid: String,
+    #[serde(skip)]
+    pub last_commit_at: String,
+    /// People asked to review right now, by login (teams aside).
+    #[serde(skip)]
+    pub requested_reviewers: Vec<String>,
+    /// People whose latest deciding review asks for changes, with when they sent it.
+    #[serde(skip)]
+    pub changes_requested: Vec<(String, String)>,
 }
 
 /// Hours as a short span: 5h, 3d, 6mo, 2y.
@@ -603,6 +615,17 @@ impl PullRequest {
         }
         out.push_str(" Run the tests, then push.");
         Some(out)
+    }
+
+    /// Who asked for changes before the last commit and has not been asked to look again.
+    pub fn due_for_another_look(&self) -> Vec<&str> {
+        self.changes_requested
+            .iter()
+            // Both are UTC timestamps in one format, so they compare as text.
+            .filter(|(_, at)| !self.last_commit_at.is_empty() && at.as_str() < self.last_commit_at.as_str())
+            .map(|(login, _)| login.as_str())
+            .filter(|login| !self.requested_reviewers.iter().any(|r| r == login))
+            .collect()
     }
 
     /// The failed checks that are GitHub Actions runs, as (repository, run id), each once.
@@ -1014,6 +1037,10 @@ mod tests {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         }
     }
 

@@ -368,6 +368,7 @@ const PR_FIELDS: &str = r#"
       baseRefName
       headRepository { nameWithOwner }
       headRefName
+      headRefOid
       additions
       deletions
       author { login }
@@ -397,6 +398,7 @@ const PR_FIELDS: &str = r#"
         nodes {
           author { login }
           state
+          submittedAt
         }
       }
       reviews(last: 6) {
@@ -423,6 +425,7 @@ const PR_FIELDS: &str = r#"
       commits(last: 1) {
         nodes {
           commit {
+            committedDate
             statusCheckRollup {
               state
               contexts(first: 20) {
@@ -909,7 +912,7 @@ fn parse_graphql_pr(
     }
 
     // Who approved: the people whose latest deciding review is an approval.
-    let mut verdicts: Vec<(String, bool)> = Vec::new();
+    let mut verdicts: Vec<(String, String, String)> = Vec::new();
     if let Some(nodes) = node["decisions"]["nodes"].as_array() {
         for rev in nodes {
             let (Some(login), Some(state)) =
@@ -920,14 +923,30 @@ fn parse_graphql_pr(
             if login == author {
                 continue;
             }
-            verdicts.retain(|(who, _)| who != login);
-            verdicts.push((login.to_owned(), state == "APPROVED"));
+            verdicts.retain(|(who, _, _)| who != login);
+            let at = rev["submittedAt"].as_str().unwrap_or_default();
+            verdicts.push((login.to_owned(), state.to_owned(), at.to_owned()));
         }
     }
     let approved_by: Vec<String> = verdicts
-        .into_iter()
-        .filter_map(|(who, approved)| approved.then_some(who))
+        .iter()
+        .filter(|(_, state, _)| state == "APPROVED")
+        .map(|(who, _, _)| who.clone())
         .collect();
+    let changes_requested: Vec<(String, String)> = verdicts
+        .into_iter()
+        .filter(|(_, state, at)| state == "CHANGES_REQUESTED" && !at.is_empty())
+        .map(|(who, _, at)| (who, at))
+        .collect();
+    let requested_reviewers: Vec<String> = node["reviewRequests"]["nodes"]
+        .as_array()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n["requestedReviewer"]["login"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let unanswered_threads = unanswered_threads(node, &author);
     let updated_at = node
@@ -1014,6 +1033,13 @@ fn parse_graphql_pr(
         can_update_branch: node["viewerCanUpdateBranch"].as_bool() == Some(true),
         unanswered_threads,
         asked: None,
+        head_oid: node["headRefOid"].as_str().unwrap_or_default().to_owned(),
+        last_commit_at: node["commits"]["nodes"][0]["commit"]["committedDate"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        requested_reviewers,
+        changes_requested,
     })
 }
 
@@ -1090,16 +1116,27 @@ pub fn merge_pr(url: &str, method: MergeMethod) -> Result<(), String> {
         .to_owned())
 }
 
+/// Asks these people to review the pull request again, as the re-request arrows on GitHub do.
+pub fn request_reviewers(repo: &str, number: u64, logins: &[String]) -> Result<(), String> {
+    let fields: Vec<String> = logins.iter().map(|l| format!("reviewers[]={l}")).collect();
+    gh_api_write(
+        "POST",
+        &format!("repos/{repo}/pulls/{number}/requested_reviewers"),
+        &fields,
+    )
+    .map_err(|e| e.unwrap_or_else(|| "GitHub would not ask for another review".to_owned()))
+}
+
 /// Brings the branch up to date with its base, the way GitHub's "Update branch" button does.
 pub fn update_branch(repo: &str, number: u64) -> Result<(), String> {
-    gh_api_write("PUT", &format!("repos/{repo}/pulls/{number}/update-branch"))
+    gh_api_write("PUT", &format!("repos/{repo}/pulls/{number}/update-branch"), &[])
         .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
 }
 
 /// Runs the failed jobs of these GitHub Actions runs again.
 pub fn rerun_failed(runs: &[(String, u64)]) -> Result<(), String> {
     for (repo, run) in runs {
-        gh_api_write("POST", &format!("repos/{repo}/actions/runs/{run}/rerun-failed-jobs"))
+        gh_api_write("POST", &format!("repos/{repo}/actions/runs/{run}/rerun-failed-jobs"), &[])
             .map_err(|e| e.unwrap_or_else(|| "GitHub would not run these checks again".to_owned()))?;
     }
     Ok(())
@@ -1107,9 +1144,13 @@ pub fn rerun_failed(runs: &[(String, u64)]) -> Result<(), String> {
 
 /// A REST call that changes something and returns nothing worth reading. The error is the first
 /// line gh printed, when it printed one.
-fn gh_api_write(method: &str, path: &str) -> Result<(), Option<String>> {
-    let out = gh_command()
-        .args(["api", "--hostname", "github.com", "--silent", "-X", method, path])
+fn gh_api_write(method: &str, path: &str, fields: &[String]) -> Result<(), Option<String>> {
+    let mut command = gh_command();
+    command.args(["api", "--hostname", "github.com", "--silent", "-X", method, path]);
+    for field in fields {
+        command.args(["-f", field]);
+    }
+    let out = command
         .output()
         .map_err(|e| Some(format!("Could not run gh: {e}")))?;
     if out.status.success() {
@@ -1205,6 +1246,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         PullRequest {
             id: "acme/engine#412".to_string(),
@@ -1243,6 +1288,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         PullRequest {
             id: "acme/engine#397".to_string(),
@@ -1281,6 +1330,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         PullRequest {
             id: "acme/engine#421".to_string(),
@@ -1319,6 +1372,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         // --- acme/cli (Second repo: assigned review + your open PR waiting > 3d on reviewer) ---
         PullRequest {
@@ -1358,6 +1415,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         PullRequest {
             id: "acme/cli#889".to_string(),
@@ -1396,6 +1457,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         PullRequest {
             id: "acme/cli#908".to_string(),
@@ -1434,6 +1499,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         // --- acme/inbox (Third repo: active draft + changes requested) ---
         PullRequest {
@@ -1474,6 +1543,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
         PullRequest {
             id: "acme/inbox#19".to_string(),
@@ -1513,6 +1586,10 @@ pub fn demo_prs() -> Vec<PullRequest> {
             can_update_branch: false,
             unanswered_threads: None,
             asked: None,
+            head_oid: String::new(),
+            last_commit_at: String::new(),
+            requested_reviewers: Vec::new(),
+            changes_requested: Vec::new(),
         },
     ];
     for pr in &mut prs {

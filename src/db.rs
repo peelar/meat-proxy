@@ -31,6 +31,11 @@ pub struct AppSnapshot {
     pub hide_external: bool,
     pub show_team_reviews: bool,
     pub ai_enabled: bool,
+    /// Autonomous: keep my branches moving; ping my reviewers. Both off until chosen.
+    pub autonomy_branches: bool,
+    pub autonomy_reviewers: bool,
+    /// Actions already taken, one per pull request, action and commit.
+    pub autonomy_done: std::collections::HashSet<String>,
     /// Pull requests the user moved to Ignored.
     pub ignored: std::collections::HashSet<String>,
     /// Pull requests with auto-merge on, and what became of them.
@@ -316,6 +321,18 @@ impl Database {
                 .get_setting("show_team_reviews")?
                 .is_some_and(|v| v == "1"),
             ai_enabled: self.get_setting("ai_enabled")?.is_some_and(|v| v == "1"),
+            autonomy_branches: self
+                .get_setting("autonomy_branches")?
+                .is_some_and(|v| v == "1"),
+            autonomy_reviewers: self
+                .get_setting("autonomy_reviewers")?
+                .is_some_and(|v| v == "1"),
+            autonomy_done: self
+                .get_setting("autonomy_done")?
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect(),
             layout_key: self.get_setting("inbox_layout")?,
             ignored: self.load_ignored()?,
             tracked: self.load_tracked()?,
@@ -539,6 +556,10 @@ impl Database {
                 can_update_branch: false,
                 unanswered_threads: None,
                 asked: None,
+                head_oid: String::new(),
+                last_commit_at: String::new(),
+                requested_reviewers: Vec::new(),
+                changes_requested: Vec::new(),
             })
         })?;
         let mut out = Vec::new();

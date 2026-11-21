@@ -7,6 +7,7 @@ use rune_kit::{
     TextInput,
 };
 
+mod autonomy;
 mod avatars;
 mod db;
 mod github;
@@ -192,6 +193,12 @@ pub struct App {
     pub notification_interval: u64,
     pub next_full_sync_at: f64,
     pub allow_os_side_effects: bool,
+    /// Settings › Autonomous: what meat proxy does on GitHub by itself, on the user's own PRs.
+    pub autonomy_branches: bool,
+    pub autonomy_reviewers: bool,
+    /// Actions already taken (`autonomy::key`), so each happens once per commit.
+    pub autonomy_done: std::collections::HashSet<String>,
+    pub autonomy_worker: Latest<Vec<(String, autonomy::Action, Result<(), String>)>>,
 }
 
 fn init() -> App {
@@ -294,6 +301,10 @@ fn init() -> App {
         unblocking: Vec::new(),
         heard: Vec::new(),
         copied: None,
+        autonomy_branches: false,
+        autonomy_reviewers: false,
+        autonomy_done: std::collections::HashSet::new(),
+        autonomy_worker: Latest::default(),
     }
 }
 
@@ -389,6 +400,9 @@ impl App {
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
         self.ai_enabled = snap.ai_enabled;
+        self.autonomy_branches = snap.autonomy_branches;
+        self.autonomy_reviewers = snap.autonomy_reviewers;
+        self.autonomy_done = snap.autonomy_done;
         self.ignored = snap.ignored;
         self.tracked = snap.tracked;
         self.drop_removed_prs();
@@ -561,6 +575,57 @@ impl App {
         {
             let _ = db.set_setting("hide_external", if self.hide_external { "1" } else { "0" });
         }
+    }
+
+    /// Flip one Autonomous switch (`true` for branches, `false` for reviewers) and act right away.
+    pub fn toggle_autonomy(&mut self, branches: bool) {
+        let (flag, key) = if branches {
+            (&mut self.autonomy_branches, "autonomy_branches")
+        } else {
+            (&mut self.autonomy_reviewers, "autonomy_reviewers")
+        };
+        *flag = !*flag;
+        let value = *flag;
+        if !self.preview
+            && let Ok(db) = Database::open_default()
+        {
+            let _ = db.set_setting(key, if value { "1" } else { "0" });
+        }
+        self.run_autonomy();
+    }
+
+    /// Start whatever the Autonomous switches call for on the pull requests as last synced.
+    pub fn run_autonomy(&mut self) {
+        if self.preview
+            || !self.onboarded
+            || !self.allow_os_side_effects
+            || self.autonomy_worker.is_pending()
+        {
+            return;
+        }
+        let planned = autonomy::plan(
+            &self.prs,
+            self.autonomy_branches,
+            self.autonomy_reviewers,
+            &self.autonomy_done,
+        );
+        if planned.is_empty() {
+            return;
+        }
+        let jobs: Vec<(model::PullRequest, autonomy::Action)> = planned
+            .into_iter()
+            .filter_map(|(id, action)| {
+                Some((self.prs.iter().find(|p| p.id == id)?.clone(), action))
+            })
+            .collect();
+        self.autonomy_worker.request((), move |()| {
+            jobs.into_iter()
+                .map(|(pr, action)| {
+                    let result = autonomy::perform(&pr, &action);
+                    (pr.id, action, result)
+                })
+                .collect()
+        });
     }
 
     pub fn group_order_is_default(&self) -> bool {
@@ -1388,6 +1453,7 @@ fn setup(s: &mut App, waker: rune::Waker) {
     s.resolve_worker.set_waker(waker.clone());
     s.approve_worker.set_waker(waker.clone());
     s.unblock_worker.set_waker(waker.clone());
+    s.autonomy_worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
@@ -1523,6 +1589,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
                 s.queue_judgments();
                 s.after_sync_track();
+                s.run_autonomy();
                 let events: Vec<_> = events
                     .into_iter()
                     .filter(|e| !s.is_ignored_url(&e.pr_url))
@@ -1627,6 +1694,43 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         if s.onboarded && !s.sync_worker.is_pending() {
             s.trigger_sync();
         }
+    }
+    if let Some(results) = s.autonomy_worker.take() {
+        let mut errors = Vec::new();
+        for (id, action, result) in results {
+            let Some(pr) = s.prs.iter().find(|p| p.id == id) else {
+                continue;
+            };
+            // Done or failed, once per commit: a failure would fail the same way every minute.
+            s.autonomy_done.insert(autonomy::key(pr, &action));
+            match result {
+                Ok(()) => {
+                    let body = action.announce(pr);
+                    notify::post(
+                        &format!("autonomy-{}", autonomy::key(pr, &action)),
+                        "meat proxy",
+                        &body,
+                        Some(&pr.url),
+                        s.native_notifications && s.allow_os_side_effects,
+                    );
+                }
+                Err(error) => errors.push(format!("{}#{}: {error}", pr.repo, pr.number)),
+            }
+        }
+        // Keep only what still names a pull request in the lists.
+        let live: Vec<&str> = s.prs.iter().map(|p| p.id.as_str()).collect();
+        s.autonomy_done
+            .retain(|k| live.iter().any(|id| k.starts_with(&format!("{id}:"))));
+        if let Ok(db) = Database::open_default() {
+            let mut done: Vec<&str> = s.autonomy_done.iter().map(String::as_str).collect();
+            done.sort_unstable();
+            let _ = db.set_setting("autonomy_done", &done.join("\n"));
+        }
+        if !errors.is_empty() {
+            s.status_banner = Some(format!("Autonomous: {}", errors.join(" · ")));
+        }
+        s.trigger_sync();
+        changed = true;
     }
     if let Some((id, enable, result)) = s.auto_merge_worker.take() {
         s.auto_merging.retain(|x| *x != id);
@@ -4385,6 +4489,45 @@ fn sync_option_row(
     )
 }
 
+/// Settings › Autonomous: two switches, by who an action reaches. What each does stays out of
+/// sight; the notification after each action says it.
+fn autonomy_section(s: &App, k: &Kit) -> El {
+    let switch = |label: &'static str, on: bool, branches: bool, key: &'static str| {
+        setup_row(
+            k,
+            label,
+            Switch::new(on)
+                .label(label)
+                .hide_label()
+                .on_toggle(move |s: &mut App| s.toggle_autonomy(branches))
+                .build(k)
+                .key(key),
+        )
+    };
+    col()
+        .w_full()
+        .gap(10.0)
+        .child(text("Autonomous").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(
+            text("Your own PRs only. You get a notification each time.")
+                .wrap()
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        )
+        .child(switch(
+            "Update branches and auto-merge",
+            s.autonomy_branches,
+            true,
+            "option-autonomy-branches",
+        ))
+        .child(switch(
+            "Re-request reviews after I push",
+            s.autonomy_reviewers,
+            false,
+            "option-autonomy-reviewers",
+        ))
+}
+
 fn settings_content(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let open_idx = match s.open_stale_hours {
@@ -4605,6 +4748,7 @@ fn settings_content(s: &App, k: &Kit) -> El {
                         ),
                 )),
         )
+        .child(panel(k).child(autonomy_section(s, k)))
         .children(s.ai_feature.then(|| panel(k).child(ai_section)))
         .child(panel(k).child(thresholds_section));
 
@@ -5057,6 +5201,7 @@ fn main() {
                 exclude_mine: true,
                 enabled: true,
             }];
+            s.autonomy_branches = true;
             s.page = Page::Inbox;
             s.settings_open = true;
         }),
@@ -6010,5 +6155,15 @@ mod tests {
         assert_eq!(snapshot.draft_stale_hours, 120);
         assert_eq!(snapshot.open_stale_hours, 72);
         assert!(!snapshot.native_notifications);
+        // Nothing acts on GitHub by itself until the user says so.
+        assert!(!snapshot.autonomy_branches && !snapshot.autonomy_reviewers);
+
+        db.set_setting("autonomy_reviewers", "1").unwrap();
+        db.set_setting("autonomy_done", "PR_1:update-branch:abc\nPR_2:rerequest:def")
+            .unwrap();
+        let snapshot = db.load_snapshot().unwrap();
+        assert!(!snapshot.autonomy_branches && snapshot.autonomy_reviewers);
+        assert!(snapshot.autonomy_done.contains("PR_2:rerequest:def"));
+        assert_eq!(snapshot.autonomy_done.len(), 2);
     }
 }

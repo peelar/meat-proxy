@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6
+
+### Autonomous
+- A new Settings section, Autonomous, with two switches. Both are off until you turn them on. They act only on your own pull requests that are not drafts, at most once per push, and each action sends a notification.
+- Update branches and auto-merge: updates a branch while the repository requires it to be up to date and its checks are not failing, and turns on auto-merge once a pull request is approved and only waits on its checks.
+- Re-request reviews after I push: once you push after someone asked for changes, and no comment still waits for your answer, they are asked to review again. Bots are left out.
+
 ## 0.3.5
 
 ### Unblock
