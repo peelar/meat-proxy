@@ -32,7 +32,10 @@ pub struct NotificationPoll {
 fn gh_command() -> Command {
     let mut cmd = Command::new("gh");
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths: Vec<_> = std::env::split_paths(&inherited_path).collect();
+    // A relative or empty entry would find a `gh` in whatever directory the app was started from.
+    let mut paths: Vec<_> = std::env::split_paths(&inherited_path)
+        .filter(|path| path.is_absolute())
+        .collect();
     if let Some(home) = std::env::var_os("HOME") {
         paths.push(std::path::PathBuf::from(home).join(".local/share/mise/shims"));
     }
@@ -790,6 +793,10 @@ fn unanswered_threads(node: &serde_json::Value, author: &str) -> Option<u32> {
 /// requests; pages of 10 took between five and eight seconds.
 const PAGE_SIZE: u32 = 10;
 
+/// The most pages one search reads every minute: 200 pull requests. Past that, a search is too
+/// broad to be an inbox, and reading it all would spend GitHub's rate limit on every sync.
+const MAX_PAGES: usize = 20;
+
 /// Every page of one search, with the signed-in account's login.
 fn fetch_search(
     search: &Search,
@@ -821,8 +828,9 @@ fn fetch_search(
         .replace("$own", if own { "true" } else { "false" })
         .replace("$files", &FILES_FETCHED.to_string());
     let mut nodes = Vec::new();
+    let mut nodes_viewer: Option<String> = None;
     let mut cursor: Option<String> = None;
-    loop {
+    for _ in 0..MAX_PAGES {
         let after = serde_json::to_string(&cursor).expect("serialize cursor");
         let query = format!(
             "query {{ viewer {{ login }} s0: search(query: {term}, type: ISSUE, first: {PAGE_SIZE}, after: {after}) {{ nodes {{ ...PrFields }} pageInfo {{ hasNextPage endCursor }} }} }}{fields}"
@@ -840,6 +848,7 @@ fn fetch_search(
             .as_str()
             .ok_or_else(|| "GitHub did not return the signed-in account".to_string())?
             .to_owned();
+        nodes_viewer = Some(viewer.clone());
         let page = &data["s0"];
         nodes.extend(
             page["nodes"]
@@ -857,6 +866,8 @@ fn fetch_search(
             .ok_or_else(|| "GitHub returned an invalid search cursor".to_string())?;
         cursor = Some(next.to_owned());
     }
+    let viewer = nodes_viewer.unwrap_or_default();
+    Ok((viewer, nodes))
 }
 
 /// An error worth one more try: GitHub ran out of time, or the network dropped.
@@ -1260,11 +1271,19 @@ pub fn update_branch(repo: &str, number: u64, head: &str) -> Result<(), String> 
         .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
 }
 
-/// Runs the failed jobs of these GitHub Actions runs again.
+/// Runs the failed jobs of these GitHub Actions runs again. A failure says how many had already
+/// started, so a partial rerun is not mistaken for none.
 pub fn rerun_failed(runs: &[(String, u64)]) -> Result<(), String> {
-    for (repo, run) in runs {
+    for (started, (repo, run)) in runs.iter().enumerate() {
         gh_api_write("POST", &format!("repos/{repo}/actions/runs/{run}/rerun-failed-jobs"), &[])
-            .map_err(|e| e.unwrap_or_else(|| "GitHub would not run these checks again".to_owned()))?;
+            .map_err(|e| {
+                let error = e.unwrap_or_else(|| "GitHub would not run these checks again".to_owned());
+                if started == 0 {
+                    error
+                } else {
+                    format!("{started} of {} runs started again; the next would not: {error}", runs.len())
+                }
+            })?;
     }
     Ok(())
 }
