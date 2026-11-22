@@ -771,13 +771,10 @@ pub(crate) fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .find(|(a, _)| *a == pr.id)
         .map(|(_, at)| at.elapsed().as_secs_f32());
     let busy = s.approving.contains(&pr.id);
-    let armed = armed_left(&s.approve_armed, &pr.id);
     let (label, ink) = if let Some(age) = done {
         ("Approved", Ink::Done(age))
     } else if busy {
         ("Approving…", Ink::Busy)
-    } else if let Some(left) = armed {
-        ("Press again", Ink::Armed(left))
     } else {
         ("Approve", Ink::Rest)
     };
@@ -795,14 +792,10 @@ pub(crate) fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let wrap = row()
         .center_y()
         .hover_group()
-        .help(if armed.is_some() {
-            format!("Press again to approve {}#{}", pr.repo, pr.number)
-        } else {
-            "Approve without a comment".to_owned()
-        })
+        .help("Approve without a comment")
         .child(button);
-    // It shows while the row is hovered, and stays once it is armed, busy or done.
-    if armed.is_some() || busy || done.is_some() {
+    // It shows while the row is hovered, and stays once it is busy or done.
+    if busy || done.is_some() {
         wrap
     } else {
         wrap.group_opacity(0.0, 1.0)
@@ -1625,10 +1618,6 @@ pub(crate) fn view(s: &App, cx: &mut Cx<App>) -> El {
 pub(crate) fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
     if ev.key == rune::Key::Escape && s.intro.is_some() {
         s.intro = None;
-        return true;
-    }
-    if ev.key == rune::Key::Escape && s.approve_armed.is_some() {
-        s.approve_armed = None;
         return true;
     }
     if ev.key == rune::Key::Escape && s.merge_armed.is_some() {

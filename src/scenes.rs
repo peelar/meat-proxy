@@ -402,7 +402,6 @@ pub(crate) static SCENES: &[Scene] = &[
         if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/cli#908") {
             pr.merge_readiness = model::MergeReadiness::Ready;
         }
-        s.approve_armed = Some(("acme/cli#904".into(), std::time::Instant::now()));
     }),
     ("settings-ai", |s| {
         seed_preview(s);
@@ -522,13 +521,13 @@ pub(crate) static SCENES: &[Scene] = &[
                 .push((pr.id.clone(), std::time::Instant::now()));
         }
     }),
-    // Approve and Merge mid-flight: one of each armed, one approval just landed.
+    // Approve and Merge mid-flight: one approving, one just landed, and Merge armed.
     ("buttons", |s| {
         seed_preview(s);
         s.page = Page::Inbox;
         s.filter = InboxFilter::Inbox;
         let ago = |secs: f32| std::time::Instant::now() - std::time::Duration::from_secs_f32(secs);
-        s.approve_armed = Some(("acme/engine#418".into(), ago(1.5)));
+        s.approving = vec!["acme/engine#418".into()];
         s.approved = vec![("acme/cli#904".into(), ago(0.6))];
         s.merge_armed = Some(("acme/cli#908".into(), ago(1.0)));
     }),

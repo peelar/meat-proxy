@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.13
+
+- Approve takes one press. Merge still asks for a second.
+
 ## 0.3.7
 
 ### Pace

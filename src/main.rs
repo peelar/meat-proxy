@@ -712,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_opens_on_press_and_approve_needs_two() {
+    fn a_row_opens_on_press_and_preview_approve_stays_local() {
         let mut state = init();
         state.preview = true;
         state.prs = scenes::demo_prs();
@@ -723,12 +723,6 @@ mod tests {
         assert!(!state.expanded.contains(&id));
 
         state.press_approve(&id);
-        assert_eq!(
-            state.approve_armed.as_ref().map(|(a, _)| a.as_str()),
-            Some(id.as_str())
-        );
-        state.press_approve(&id);
-        assert!(state.approve_armed.is_none());
         assert!(state.approving.is_empty(), "a preview never calls GitHub");
     }
 

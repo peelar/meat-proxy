@@ -75,8 +75,6 @@ pub struct App {
     pub merging: Vec<String>,
     /// Rows opened to show the description.
     pub expanded: std::collections::HashSet<String>,
-    /// The PR whose Approve button was pressed once and waits for a second press.
-    pub approve_armed: Option<(String, std::time::Instant)>,
     pub approving: Vec<String>,
     /// Approved from here, and when; the button stays done until a sync moves the row.
     pub approved: Vec<(String, std::time::Instant)>,
@@ -260,7 +258,6 @@ pub(crate) fn init() -> App {
         merge_armed: None,
         merging: Vec::new(),
         expanded: std::collections::HashSet::new(),
-        approve_armed: None,
         approving: Vec::new(),
         approved: Vec::new(),
         approve_worker: Latest::default(),
@@ -929,7 +926,7 @@ impl App {
         }
     }
 
-    /// First press arms the button, the second approves. An approval can't be taken back.
+    /// One press approves. Merge asks for a second press; an approval only adds a review.
     pub fn press_approve(&mut self, pr_id: &str) {
         if !self.approving.is_empty() || self.approved.iter().any(|(id, _)| id == pr_id) {
             return;
@@ -937,15 +934,6 @@ impl App {
         let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
             return;
         };
-        let armed = self
-            .approve_armed
-            .as_ref()
-            .is_some_and(|(id, _)| id == pr_id);
-        if !armed {
-            self.approve_armed = Some((pr_id.to_owned(), std::time::Instant::now()));
-            return;
-        }
-        self.approve_armed = None;
         if self.preview {
             return;
         }

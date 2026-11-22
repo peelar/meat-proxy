@@ -588,13 +588,6 @@ fn on_actions(s: &mut App) -> bool {
 /// Armed buttons, washes, pace flashes and celebrations, a frame at a time.
 fn tick_buttons(s: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    if s.approve_armed
-        .as_ref()
-        .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > ARMED_SECS)
-    {
-        s.approve_armed = None;
-        changed = true;
-    }
     if s.merge_armed
         .as_ref()
         .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > ARMED_SECS)
@@ -615,8 +608,7 @@ fn tick_buttons(s: &mut App, tx: &mut Tx) -> bool {
         .retain(|(_, at)| at.elapsed().as_secs_f32() < PACE_FLASH_SECS);
     changed |= flashes != s.pace_flash.len();
     // Redraw every frame while an armed button's bar drains or a fresh approval's row washes.
-    if s.approve_armed.is_some()
-        || !s.pace_flash.is_empty()
+    if !s.pace_flash.is_empty()
         || s.merge_armed.is_some()
         || s.copied.is_some()
         || s.approved.iter().any(|(_, at)| at.elapsed().as_secs_f32() < INK_WASH_SECS)
