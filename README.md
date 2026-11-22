@@ -1,9 +1,4 @@
-<picture>
-  <source type="image/avif" srcset="snapshots/launch.avif">
-  <img alt="meat proxy: the inbox sorted by what each pull request needs, approving a review request, merging your own, fixing conflicts with Claude Code, and updating a branch" src="snapshots/launch.gif" width="100%">
-</picture>
-
-<sub>[Watch in full quality (MP4)](snapshots/launch.mp4)</sub>
+https://github.com/user-attachments/assets/184cc8f9-1b30-4865-9424-a2166eb49900
 
 # <img src="assets/logo.svg" alt="" width="40" height="40" align="top"> meat proxy
 
