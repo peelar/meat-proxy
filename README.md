@@ -1,7 +1,9 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="snapshots/onboarding-dark.gif">
-  <img alt="First launch: a finger presses the approve button, then you connect the GitHub CLI, turn on notifications, and open the inbox" src="snapshots/onboarding-light.gif">
+  <source type="image/avif" srcset="snapshots/launch.avif">
+  <img alt="meat proxy: the inbox sorted by what each pull request needs, approving a review request, merging your own, fixing conflicts with Claude Code, and updating a branch" src="snapshots/launch.gif" width="100%">
 </picture>
+
+<sub>[Watch in full quality (MP4)](snapshots/launch.mp4)</sub>
 
 # <img src="assets/logo.svg" alt="" width="40" height="40" align="top"> meat proxy
 
