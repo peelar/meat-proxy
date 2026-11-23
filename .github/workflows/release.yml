@@ -6,6 +6,7 @@
 #
 # The version is Cargo.toml's while it has no release, else the next patch after the newest release: raise the
 # version there for a minor or major release. A push that changes only docs or screenshots releases nothing.
+# The release notes are the CHANGELOG.md section under "## Unreleased" (see CLAUDE.md).
 name: Release
 
 on:
@@ -59,6 +60,18 @@ jobs:
           fi
           echo "tag=v$top" >> "$GITHUB_OUTPUT"
           echo "Releasing v$top"
+      # The commits wrote their changelog lines under "## Unreleased". Name that section after the release and
+      # keep it as the release notes; the last step commits the renamed heading back to main.
+      - id: notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          : > notes.md
+          if grep -q '^## Unreleased$' CHANGELOG.md; then
+            version="${TAG#v}"
+            sed -i.bak "s/^## Unreleased$/## $version/" CHANGELOG.md && rm CHANGELOG.md.bak
+            awk -v h="## $version" '$0 == h { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
+          fi
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: actions/cache@v4
         with:
@@ -69,7 +82,17 @@ jobs:
           key: rune-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - run: ./package.sh --zip "${{ steps.version.outputs.tag }}" out
       # The tag is created at the commit that was built.
-      - run: gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+      - run: gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" $([ -s notes.md ] && echo "--notes-file notes.md" || echo "--generate-notes")
         env:
           TAG: ${{ steps.version.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
+      # A markdown-only push, which releases nothing. After the build, so newer commits never join it.
+      - run: |
+          git diff --quiet CHANGELOG.md && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Release ${TAG#v} changelog" CHANGELOG.md
+          git pull --rebase origin main
+          git push origin HEAD:main
+        env:
+          TAG: ${{ steps.version.outputs.tag }}

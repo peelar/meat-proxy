@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Collapse all moved below the toolbar, as a quiet text toggle that rests next to the first section.
+
+## 0.3.16
+
+- A pull request that targets a stack base says Merge to base.
+
+## 0.3.15
+
+- A row the agent fixed says Fixed, and the notification comes from the pull request the fix ran on.
+
+## 0.3.14
+
+- Choose the agent's model from a dropdown.
+- The Fix button shows the Claude and OpenAI marks.
+- The app is called Meat Proxy.
+
 ## 0.3.13
 
 - Approve takes one press. Merge still asks for a second.
