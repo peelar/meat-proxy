@@ -14,7 +14,7 @@ Install the [GitHub CLI](https://cli.github.com) (`brew install gh`), then:
 curl -fsSL https://github.com/peelar/meat-proxy/releases/latest/download/install-mac.sh | sh
 ```
 
-It updates itself hourly. Add `sh -s -- --uninstall` to the same command to remove it.
+It checks for updates every few minutes while it runs. Add `sh -s -- --uninstall` to the same command to remove it.
 
 ## Build from source
 

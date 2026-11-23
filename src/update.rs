@@ -1,8 +1,7 @@
 //! Keeps the installed app at the latest release.
 //!
-//! The app asks GitHub for the newest release every few minutes. A newer one is downloaded into the
-//! same `staged` folder the launchd updater (`scripts/install-mac.sh`) uses, so the two never fetch
-//! it twice. It is installed when the user presses the button, or by itself at a quiet moment.
+//! The app asks GitHub for the newest release every few minutes. A newer one is downloaded into a
+//! `staged` folder. It is installed when the user presses the button, or by itself at a quiet moment.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -113,8 +112,30 @@ fn stage(support: &Path, tag: &str) -> Result<(), String> {
     result
 }
 
+/// Earlier installers ran a launchd agent through `sh`, which Login Items listed as "sh". The app
+/// updates itself now, so it takes that agent away.
+fn remove_legacy_updater() {
+    const LABEL: &str = "co.anomaly.meat-proxy.updater";
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let agent = home.join(format!("Library/LaunchAgents/{LABEL}.plist"));
+    if !agent.exists() {
+        return;
+    }
+    if let Ok(uid) = Command::new("id").arg("-u").output() {
+        let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
+        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
+    }
+    let _ = std::fs::remove_file(agent);
+    if let Some(support) = support_dir() {
+        let _ = std::fs::remove_file(support.join("update.sh"));
+    }
+}
+
 /// Asks GitHub for the newest release; when it is after `current`, has it downloaded and returns its tag.
 pub fn check_and_stage(current: &str) -> Result<Option<String>, String> {
+    remove_legacy_updater();
     let tag = latest_tag()?;
     if !is_newer(&tag, current) {
         return Ok(None);

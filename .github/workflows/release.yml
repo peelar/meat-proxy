@@ -1,5 +1,5 @@
 # Every push to main whose tests and clippy pass releases the Mac app as a GitHub release, which installed copies
-# update to within the hour (scripts/install-mac.sh). Pull requests run the same checks and release nothing.
+# update to within minutes while they run (src/update.rs). Pull requests run the same checks and release nothing.
 #
 #   meat-proxy-macos.zip   the ad-hoc signed app (./package.sh --zip)
 #   install-mac.sh         its installer
