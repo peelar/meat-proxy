@@ -4,6 +4,7 @@
 
 - Your own pull requests that are waiting on a review now show in the Inbox, under Waiting on review. They do not count as needing your thumb.
 - Collapse all moved below the toolbar, as a quiet text toggle that rests next to the first section.
+- Auto-merge buttons work in parallel: press several in a row and each finishes on its own.
 
 ## 0.3.16
 

@@ -913,7 +913,7 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let auto_on = pr.auto_merge == model::AutoMerge::On;
     let auto_offer = !ready && s.auto_merge_target(&pr.id) == Some(true);
     let auto = auto_on || auto_offer;
-    let auto_busy = s.auto_merging.contains(&pr.id);
+    let auto_busy = s.is_auto_merging(&pr.id);
 
     // A stacked pull request merges into its base branch, not the default one: say which.
     let merge_label = if pr.stack_base.is_some() { "Merge to base" } else { "Merge" };

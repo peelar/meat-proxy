@@ -92,8 +92,11 @@ pub struct App {
     pub arrivals: Vec<(String, std::time::Instant)>,
     pub merge_worker: Latest<(String, Result<(), String>)>,
     /// Turning auto-merge on or off: the pull request, which, and how it went.
-    pub auto_merge_worker: Latest<(String, bool, Result<(), String>)>,
-    pub auto_merging: Vec<String>,
+    /// One job per pull request whose auto-merge is being changed. A `Latest` keeps only its
+    /// newest request, so each press gets its own: three at once finish independently.
+    pub auto_merge_jobs: Vec<AutoMergeJob>,
+    /// Wakes the app when a job lands; set once the app is up.
+    pub waker: Option<rune::Waker>,
     /// Pull requests with auto-merge on, and the ones GitHub merged by itself (shown faded).
     pub tracked: Vec<model::Tracked>,
     /// Asks GitHub what became of tracked pull requests that left the lists.
@@ -186,6 +189,13 @@ pub struct App {
     pub pace_flash: Vec<(pace::Event, std::time::Instant)>,
 }
 
+/// A request to turn auto-merge on or off for one pull request, and the thread running it.
+pub struct AutoMergeJob {
+    pub id: String,
+    pub enable: bool,
+    pub worker: Latest<Result<(), String>>,
+}
+
 /// What the Pace panel's numbers depend on: how many events, the newest one's time, the minute.
 pub(crate) type PaceKey = (usize, i64, i64);
 
@@ -268,8 +278,8 @@ pub(crate) fn init() -> App {
         celebrations: Vec::new(),
         arrivals: Vec::new(),
         merge_worker: Latest::default(),
-        auto_merge_worker: Latest::default(),
-        auto_merging: Vec::new(),
+        auto_merge_jobs: Vec::new(),
+        waker: None,
         tracked: Vec::new(),
         resolve_worker: Latest::default(),
         last_synced: None,
@@ -756,7 +766,13 @@ impl App {
     /// Whether the Inbox tab lists it: it asks something of you, and nothing hides it.
     pub(crate) fn in_inbox(&self, pr: &PullRequest, now: u64) -> bool {
         // An ignored pull request is listed, in its own section, while it would still be there.
+        // Your own pull request waiting on its reviewers asks nothing of you, but belongs here: it
+        // is where you look for what is open. It does not count as needing you.
+        let waiting = !self.ignored.contains(&pr.id)
+            && pr.attention(self.draft_stale_hours, self.open_stale_hours, now)
+                == PrAttention::MyOpenWaiting;
         let listed = self.needs_you(pr, now)
+            || waiting
             || (self.ignored.contains(&pr.id)
                 && InboxFilter::Inbox.matches(
                     pr,
@@ -766,13 +782,7 @@ impl App {
                 ));
         listed && self.matches_search(pr)
     }
-        // Your own pull request waiting on its reviewers asks nothing of you, but belongs here: it
-        // is where you look for what is open. It does not count as needing you.
-        let waiting = !self.ignored.contains(&pr.id)
-            && pr.attention(self.draft_stale_hours, self.open_stale_hours, now)
-                == PrAttention::MyOpenWaiting;
 
-            || waiting
     /// After a sync: answer what cheap rules can, and send the model only what is left.
     pub fn queue_judgments(&mut self) {
         let Some(cfg) = self.ai.config.clone() else {
@@ -1055,18 +1065,28 @@ impl App {
         let Some(enable) = self.auto_merge_target(pr_id) else {
             return;
         };
-        if self.preview || !self.auto_merging.is_empty() {
+        if self.preview || self.is_auto_merging(pr_id) {
             return;
         }
         let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
             return;
         };
-        self.auto_merging.push(pr_id.to_owned());
-        let (id, url, method, head) =
-            (pr.id.clone(), pr.url.clone(), pr.merge_method, pr.head_oid.clone());
-        self.auto_merge_worker.request((), move |()| {
-            (id, enable, github::set_auto_merge(&url, method, enable, &head))
+        let (url, method, head) = (pr.url.clone(), pr.merge_method, pr.head_oid.clone());
+        let worker = match &self.waker {
+            Some(waker) => Latest::new(waker.clone()),
+            None => Latest::default(),
+        };
+        worker.request((), move |()| github::set_auto_merge(&url, method, enable, &head));
+        self.auto_merge_jobs.push(AutoMergeJob {
+            id: pr_id.to_owned(),
+            enable,
+            worker,
         });
+    }
+
+    /// Whether its auto-merge is being turned on or off right now.
+    pub fn is_auto_merging(&self, pr_id: &str) -> bool {
+        self.auto_merge_jobs.iter().any(|job| job.id == pr_id)
     }
 
     pub(crate) fn save_tracked_row(&self, t: &model::Tracked) {

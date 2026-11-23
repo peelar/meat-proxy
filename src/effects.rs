@@ -47,7 +47,7 @@ pub(crate) fn setup(s: &mut App, waker: rune::Waker) {
     s.fast_notif_worker.set_waker(waker.clone());
     s.discovery_worker.set_waker(waker.clone());
     s.verify_worker.set_waker(waker.clone());
-    s.auto_merge_worker.set_waker(waker.clone());
+    s.waker = Some(waker.clone());
     s.resolve_worker.set_waker(waker.clone());
     s.approve_worker.set_waker(waker.clone());
     s.unblock_worker.set_waker(waker.clone());
@@ -446,8 +446,21 @@ fn on_autonomy(s: &mut App) -> bool {
 /// The row buttons' jobs landed: auto-merge, resolve, merge, unblock and approve.
 fn on_actions(s: &mut App) -> bool {
     let mut changed = false;
-    if let Some((id, enable, result)) = s.auto_merge_worker.take() {
-        s.auto_merging.retain(|x| *x != id);
+    // Each job lands on its own. One that settled with no answer panicked: drop it, so its
+    // button does not stay busy for good.
+    let mut landed = Vec::new();
+    s.auto_merge_jobs.retain(|job| match job.worker.take() {
+        Some(result) => {
+            landed.push((job.id.clone(), job.enable, result));
+            false
+        }
+        None if job.worker.is_pending() => true,
+        None => {
+            changed = true;
+            false
+        }
+    });
+    for (id, enable, result) in landed {
         match result {
             Ok(()) => {
                 if let Some(pr) = s.prs.iter_mut().find(|p| p.id == id) {
@@ -584,7 +597,6 @@ fn on_actions(s: &mut App) -> bool {
         (s.merge_worker.is_pending(), &mut s.merging),
         (s.approve_worker.is_pending(), &mut s.approving),
         (s.unblock_worker.is_pending(), &mut s.unblocking),
-        (s.auto_merge_worker.is_pending(), &mut s.auto_merging),
     ] {
         if !pending && !busy.is_empty() {
             busy.clear();
@@ -645,4 +657,33 @@ fn tick_buttons(s: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_merge_jobs_started_together_each_land() {
+        let mut s = init();
+        s.preview = true;
+        s.prs = scenes::demo_prs();
+        let ids: Vec<String> = s.prs.iter().take(3).map(|pr| pr.id.clone()).collect();
+        for (n, id) in ids.iter().enumerate() {
+            let worker = Latest::default();
+            // The first fails and the others succeed, in whatever order they finish.
+            worker.request((), move |()| if n == 0 { Err("no".to_owned()) } else { Ok(()) });
+            s.auto_merge_jobs.push(AutoMergeJob { id: id.clone(), enable: true, worker });
+        }
+        assert!(ids.iter().all(|id| s.is_auto_merging(id)));
+        for _ in 0..200 {
+            on_actions(&mut s);
+            if s.auto_merge_jobs.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(s.auto_merge_jobs.is_empty(), "every job landed, none was dropped for a newer one");
+        assert!(s.status_banner.as_deref().is_some_and(|b| b.contains("Could not turn auto-merge on")));
+    }
 }
