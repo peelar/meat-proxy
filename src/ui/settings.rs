@@ -41,7 +41,7 @@ fn agent_section(s: &App, k: &Kit) -> El {
         .gap(10.0)
         .child(text("Fix with an agent").font(SECTION_TITLE).color(c.text_base))
         .child(
-            text("Instead of copying a prompt, a Fix button runs it for you: meat proxy clones the repository, checks the pull request out and starts the agent there, unattended and without asking for permissions. It says when the agent pushed, or didn't.")
+            text("Instead of copying a prompt, a Fix button runs it for you: Meat Proxy clones the repository, checks the pull request out and starts the agent there, unattended and without asking for permissions. It says when the agent pushed, or didn't.")
                 .wrap()
                 .font(k.ty.small)
                 .color(c.text_faint),
@@ -105,7 +105,7 @@ pub(crate) fn autonomy_section(s: &App, k: &Kit) -> El {
         .gap(10.0)
         .child(text("Autonomous").font(SECTION_TITLE).color(k.c.text_base))
         .child(
-            text("Let meat proxy act on GitHub for you, on your own pull requests only, so they keep moving without you. Each switch below turns one action on, and you get a notification every time it acts.")
+            text("Let Meat Proxy act on GitHub for you, on your own pull requests only, so they keep moving without you. Each switch below turns one action on, and you get a notification every time it acts.")
                 .wrap()
                 .font(k.ty.small)
                 .color(k.c.text_faint),

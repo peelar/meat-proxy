@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://github.com/peelar/meat-proxy/releases/latest/download/install-mac.sh | sh
 #
-# It puts meat-proxy.app in ~/Applications and adds a launchd agent that checks for a newer release at login and every
+# It puts Meat Proxy.app in ~/Applications and adds a launchd agent that checks for a newer release at login and every
 # hour, as imp's install-mac.sh does. While the app is closed, a new release replaces it at once. While it is open, the
 # release is downloaded and waits in ~/Library/Application Support/meat-proxy/staged, and goes in at the first check
 # after you quit it. The app is ad-hoc signed (no Apple Developer ID), which macOS opens because curl does not
@@ -12,7 +12,7 @@
 set -eu
 
 REPO="${MEAT_PROXY_REPO:-peelar/meat-proxy}"
-APP="$HOME/Applications/meat-proxy.app"
+APP="$HOME/Applications/Meat Proxy.app"
 SUPPORT="$HOME/Library/Application Support/meat-proxy"
 LABEL="co.anomaly.meat-proxy.updater"
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -52,17 +52,17 @@ if [ "$latest" = "$installed" ] && [ -d "$APP" ]; then
 	exit 0
 fi
 
-if [ "$(cat "$STAGED/version" 2>/dev/null)" != "$latest" ] || [ ! -d "$STAGED/meat-proxy.app" ]; then
+if [ "$(cat "$STAGED/version" 2>/dev/null)" != "$latest" ] || [ ! -d "$STAGED/Meat Proxy.app" ]; then
 	work=$(mktemp -d)
 	trap 'rm -rf "$work"' EXIT
 	curl -fsSL -o "$work/app.zip" "https://github.com/$REPO/releases/download/$latest/meat-proxy-macos.zip"
 	ditto -x -k "$work/app.zip" "$work/unpacked"
-	[ -d "$work/unpacked/meat-proxy.app" ] || { echo "$(date): meat-proxy-macos.zip of $latest has no meat-proxy.app" >&2; exit 1; }
-	xattr -dr com.apple.quarantine "$work/unpacked/meat-proxy.app" 2>/dev/null || true
-	codesign --verify --deep --strict "$work/unpacked/meat-proxy.app"
+	[ -d "$work/unpacked/Meat Proxy.app" ] || { echo "$(date): meat-proxy-macos.zip of $latest has no Meat Proxy.app" >&2; exit 1; }
+	xattr -dr com.apple.quarantine "$work/unpacked/Meat Proxy.app" 2>/dev/null || true
+	codesign --verify --deep --strict "$work/unpacked/Meat Proxy.app"
 	rm -rf "$STAGED"
 	mkdir -p "$STAGED"
-	mv "$work/unpacked/meat-proxy.app" "$STAGED/meat-proxy.app"
+	mv "$work/unpacked/Meat Proxy.app" "$STAGED/Meat Proxy.app"
 	echo "$latest" >"$STAGED/version"
 fi
 
@@ -70,7 +70,9 @@ fi
 running && exit 0
 rm -rf "$APP.old"
 [ -d "$APP" ] && mv "$APP" "$APP.old"
-mv "$STAGED/meat-proxy.app" "$APP"
+mv "$STAGED/Meat Proxy.app" "$APP"
+# Until now the app was called meat-proxy.app.
+rm -rf "$HOME/Applications/meat-proxy.app"
 rm -rf "$APP.old" "$STAGED"
 echo "$latest" >"$SUPPORT/version"
 echo "$(date): installed meat-proxy $latest (was $installed)"

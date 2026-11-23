@@ -162,7 +162,7 @@ pub struct App {
     pub notification_interval: u64,
     pub next_full_sync_at: f64,
     pub allow_os_side_effects: bool,
-    /// Settings › Autonomous: what meat proxy does on GitHub by itself, on the user's own PRs.
+    /// Settings › Autonomous: what Meat Proxy does on GitHub by itself, on the user's own PRs.
     pub autonomy_branches: bool,
     pub autonomy_reviewers: bool,
     /// Actions already taken (`autonomy::key`) with when, so each happens once per commit.

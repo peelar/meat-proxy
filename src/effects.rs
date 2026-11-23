@@ -151,7 +151,7 @@ fn on_boot(s: &mut App) -> bool {
             Err(error) => {
                 s.boot_failed = true;
                 s.status_banner = Some(format!(
-                    "Could not read saved settings, so nothing will be saved over them. Quit and open meat proxy again. {error}"
+                    "Could not read saved settings, so nothing will be saved over them. Quit and open Meat Proxy again. {error}"
                 ));
             }
         }

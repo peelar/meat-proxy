@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds meat-proxy.app and installs it in /Applications with a CLI launcher in ~/.cargo/bin:
+# Builds "Meat Proxy.app" and installs it in /Applications with a CLI launcher in ~/.cargo/bin:
 #
 #   ./package.sh
 #
@@ -28,7 +28,7 @@ echo "Building meat-proxy (release)…"
 cargo build --release --locked
 
 BIN_PATH="$SCRIPT_DIR/target/release/meat-proxy"
-APP_BUNDLE="$SCRIPT_DIR/target/release/meat-proxy.app"
+APP_BUNDLE="$SCRIPT_DIR/target/release/Meat Proxy.app"
 
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
@@ -45,9 +45,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>co.anomaly.meat-proxy</string>
     <key>CFBundleName</key>
-    <string>meat proxy</string>
+    <string>Meat Proxy</string>
     <key>CFBundleDisplayName</key>
-    <string>meat proxy</string>
+    <string>Meat Proxy</string>
     <key>CFBundleIconFile</key>
     <string>meat-proxy.icns</string>
     <key>CFBundlePackageType</key>
@@ -77,7 +77,12 @@ if [[ -n "$ZIP_OUT" ]]; then
 fi
 
 # macOS permits notification authorization for this local ad-hoc build in Applications.
-INSTALLED_APP="/Applications/meat-proxy.app"
+INSTALLED_APP="/Applications/Meat Proxy.app"
+# Until now the app was called meat-proxy.app: replace it rather than leave two copies.
+OLD_APP="/Applications/meat-proxy.app"
+if [[ -e "$OLD_APP" && "$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$OLD_APP/Contents/Info.plist" 2>/dev/null)" == "co.anomaly.meat-proxy" ]]; then
+    rm -rf "$OLD_APP"
+fi
 if [[ -e "$INSTALLED_APP" ]]; then
     installed_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INSTALLED_APP/Contents/Info.plist")
     if [[ "$installed_id" != "co.anomaly.meat-proxy" ]]; then

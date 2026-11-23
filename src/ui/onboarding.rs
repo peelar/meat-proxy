@@ -176,7 +176,7 @@ pub(crate) fn intro_view(s: &App, k: &Kit, t: f32, (w, h): (f32, f32), (name_w, 
             lerp(0.0, 115.0 - (cx - name_w / 2.0)),
             lerp(0.0, 25.0 - (name_top + name_h / 2.0)),
         );
-    for (i, ch) in "meat proxy".chars().enumerate() {
+    for (i, ch) in "Meat Proxy".chars().enumerate() {
         let from = 2.4 + i as f32 * 0.055;
         let p = ease_out(phase(t, from, from + 0.7));
         name = name.child(frame_exact(if ch == ' ' {
@@ -224,7 +224,7 @@ pub(crate) fn onboarding_page_view(s: &App, k: &Kit, intro: Option<f32>) -> El {
                 .color(c.text_base),
         )
         .child(
-            text("meat proxy puts the pull requests that need your thumb first. It reads GitHub through the GitHub CLI, signed in as you. No tokens to paste.")
+            text("Meat Proxy puts the pull requests that need your thumb first. It reads GitHub through the GitHub CLI, signed in as you. No tokens to paste.")
                 .wrap()
                 .font(k.ty.body)
                 .color(c.text_muted),
