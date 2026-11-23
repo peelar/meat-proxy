@@ -408,6 +408,8 @@ pub(crate) fn settings_modal(s: &App, k: &Kit) -> El {
         .clip_rounded(12.0)
         .fill(k.c.bg_base)
         .border(1.0, k.c.border_base)
+        // The border is drawn under the content: inset it, or scrolled cards paint over it.
+        .padding(1.0)
         .child(
             row()
                 .w_full()
@@ -472,6 +474,8 @@ pub(crate) fn repositories_modal(s: &App, k: &Kit) -> El {
         .clip_rounded(12.0)
         .fill(k.c.bg_base)
         .border(1.0, k.c.border_base)
+        // The border is drawn under the content: inset it, or scrolled cards paint over it.
+        .padding(1.0)
         .child(
             row()
                 .w_full()
