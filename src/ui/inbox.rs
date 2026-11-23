@@ -167,49 +167,67 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
         .build(k)
         .key("inbox-search-input");
 
-    row()
+    let collapse = row()
+        .key("collapse-all")
+        .role("button")
+        .label(if s.all_sections_collapsed() {
+            "Expand all"
+        } else {
+            "Collapse all"
+        })
+        .px(4.0)
+        .py(2.0)
+        .radius(4.0)
+        .cursor(rune::Cursor::Pointer)
+        .hover(k.c.hover)
+        .on_press_tx(|s: &mut App, tx: &mut Tx| {
+            tx.motion_curve(rune::Curve::tween(
+                0.12,
+                rune::Easing::cubic(0.2, 0.0, 0.0, 1.0),
+            ));
+            s.toggle_collapse_all()
+        })
+        .child(
+            text(if s.all_sections_collapsed() {
+                "Expand all"
+            } else {
+                "Collapse all"
+            })
+            .font(k.ty.small)
+            .color(k.c.text_muted),
+        );
+
+    col()
         .w_full()
-        .center_y()
-        .justify_between()
-        .gap(8.0)
-        .child(filter_seg)
+        .gap(6.0)
         .child(
             row()
+                .w_full()
                 .center_y()
+                .justify_between()
                 .gap(8.0)
-                .child({
-                    Button::new(if s.all_sections_collapsed() {
-                        "Expand all"
-                    } else {
-                        "Collapse all"
-                    })
-                    .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Large)
-                    .on_press_tx(|s: &mut App, tx: &mut Tx| {
-                        tx.motion_curve(rune::Curve::tween(
-                            0.12,
-                            rune::Easing::cubic(0.2, 0.0, 0.0, 1.0),
-                        ));
-                        s.toggle_collapse_all()
-                    })
-                    .build(k)
-                    .key("collapse-all")
-                })
-                .child(search)
+                .child(filter_seg)
                 .child(
-                    Button::new("Add repository")
-                        .variant(ButtonVariant::Outline)
-                        .control_size(ControlSize::Large)
-                        .on_press(|s: &mut App| {
-                            s.add_repo_open = true;
-                            if s.discovery.is_none() {
-                                s.trigger_discovery();
-                            }
-                        })
-                        .build(k)
-                        .key("add-repo-open"),
+                    row()
+                        .center_y()
+                        .gap(8.0)
+                        .child(search)
+                        .child(
+                            Button::new("Add repository")
+                                .variant(ButtonVariant::Outline)
+                                .control_size(ControlSize::Large)
+                                .on_press(|s: &mut App| {
+                                    s.add_repo_open = true;
+                                    if s.discovery.is_none() {
+                                        s.trigger_discovery();
+                                    }
+                                })
+                                .build(k)
+                                .key("add-repo-open"),
+                        ),
                 ),
         )
+        .child(row().w_full().justify_end().child(collapse))
 }
 
 // Matching the resting surface keeps the glyph quiet. Keyboard focus paints a
