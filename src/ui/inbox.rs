@@ -227,7 +227,15 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
                         ),
                 ),
         )
-        .child(row().w_full().justify_end().child(collapse))
+        // The document's 16px gap sits between this and the first section; slide the toggle down
+        // so it rests near that section's border instead of floating mid-gap.
+        .child(
+            row()
+                .w_full()
+                .justify_end()
+                .offset(0.0, 12.0)
+                .child(collapse),
+        )
 }
 
 // Matching the resting surface keeps the glyph quiet. Keyboard focus paints a
