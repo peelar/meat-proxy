@@ -809,8 +809,9 @@ pub(crate) fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .hover_group()
         .help("Approve without a comment")
         .child(button);
-    // It shows while the row is hovered, and stays once it is busy or done.
-    if busy || done.is_some() {
+    // A review asked of you is what the row's status waits on, so it stays; a team's request
+    // shows it while the row is hovered. Busy or done stays either way.
+    if busy || done.is_some() || pr.incoming_reason == model::IncomingReason::AssignedOrReviewRequested {
         wrap
     } else {
         wrap.group_opacity(0.0, 1.0)
@@ -915,7 +916,7 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         });
     }
 
-    row()
+    let wrap = row()
         .center_y()
         .hover_group()
         .help(if auto_on {
@@ -948,7 +949,14 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         } else {
             pr.merge_readiness.blocked_reason().to_owned()
         })
-        .child(button)
+        .child(button);
+    // A Merge that can do nothing yet waits for the pointer, which then shows why; one that can
+    // act, or is mid-action, stays.
+    if ready || auto || merging || armed.is_some() {
+        wrap
+    } else {
+        wrap.group_opacity(0.0, 1.0)
+    }
 }
 
 /// One light icon button on a repository header, tinted `hue` (oklch degrees).

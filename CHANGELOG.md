@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Approve stays visible on rows that ask for your review. Merge shows only when it can merge, and otherwise appears when you point at the row, with the reason.
+
 ## 0.3.19
 
 - The toolbar is one row: Collapse all, sort and reset are icons beside the search, and Add repository is a plus next to the Pull Requests heading. A collapsed Scoreboard no longer shows its hint text.

@@ -741,27 +741,32 @@ mod tests {
         assert!(state.approving.is_empty(), "a preview never calls GitHub");
     }
 
+    /// A button stays visible when it is what the row asks of you; one that can do nothing yet
+    /// waits for the pointer.
     #[test]
-    fn approve_shows_only_while_its_row_is_hovered() {
+    fn a_button_shows_at_rest_only_when_it_answers_the_row() {
         let mut state = init();
         state.preview = true;
         seed_preview(&mut state);
         state.page = Page::Inbox;
         let mut rt = Runtime::new(state, view, (1000.0, 800.0), Env::new(true, 1.0));
         rt.frame(0.0);
-        let key = "approve-acme/engine#418";
-        let opacity = |rt: &Runtime<App>| {
+        let opacity = |rt: &Runtime<App>, key: &str| {
             rt.elements()
                 .into_iter()
                 .find(|e| e.key.as_deref() == Some(key))
                 .map(|e| e.opacity)
         };
-        assert_eq!(opacity(&rt), Some(0.0));
-        let (x, y) = rt.find("pr-row-acme/engine#418").unwrap();
+        // A review asked of you: Approve stays.
+        assert_eq!(opacity(&rt, "approve-acme/engine#418"), Some(1.0));
+        // GitHub has not said it can merge: Merge waits for the pointer.
+        let merge = "merge-acme/cli#908";
+        assert_eq!(opacity(&rt, merge), Some(0.0));
+        let (x, y) = rt.find("pr-row-acme/cli#908").unwrap();
         rt.pointer_move(x + 20.0, y);
         rt.frame(0.5);
         rt.frame(1.0);
-        assert_eq!(opacity(&rt), Some(1.0));
+        assert_eq!(opacity(&rt, merge), Some(1.0));
     }
 
     #[test]
