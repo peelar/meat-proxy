@@ -135,7 +135,7 @@ fn sort_icons(s: &App, k: &Kit) -> El {
         .child(rune::icon(&BRAIN, 14.0).color(if ai && live {
             model_ink(k)
         } else {
-            c.text_faint
+            c.icon_muted
         }));
     if available && live {
         toggle = toggle
@@ -144,6 +144,7 @@ fn sort_icons(s: &App, k: &Kit) -> El {
             .on_press(|s: &mut App| s.toggle_smart_sort());
     }
     let reset = icon_action(&RESET, "Reset to the default order")
+        .variant(rune_kit::IconButtonVariant::GhostMuted)
         .disabled(!live || s.group_order_is_default())
         .on_press(|s: &mut App| s.reset_group_order())
         .build(k)
@@ -179,6 +180,7 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
         if collapsed { &EXPAND_ALL } else { &COLLAPSE_ALL },
         if collapsed { "Expand all" } else { "Collapse all" },
     )
+    .variant(rune_kit::IconButtonVariant::GhostMuted)
     .on_press_tx(|s: &mut App, tx: &mut Tx| {
         tx.motion_curve(rune::Curve::tween(
             0.12,
