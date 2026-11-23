@@ -53,6 +53,80 @@ impl Provider {
     }
 }
 
+/// The label of the choice that leaves the model to the agent's own configuration.
+pub const DEFAULT_MODEL: &str = "Agent default";
+
+/// The models Settings offers for `provider`, as (value for `--model`, name shown). Claude Code has
+/// no command that lists them, so these are the current ones. Codex keeps its own list in
+/// `~/.codex/models_cache.json`.
+pub fn models(provider: Provider) -> Vec<(String, String)> {
+    match provider {
+        Provider::Claude => [
+            ("claude-fable-5-2", "Fable 5.2"),
+            ("claude-opus-5-5", "Opus 5.5"),
+            ("claude-sonnet-5-5", "Sonnet 5.5"),
+            ("claude-haiku-5-5", "Haiku 5.5"),
+        ]
+        .map(|(value, name)| (value.to_owned(), name.to_owned()))
+        .to_vec(),
+        Provider::Codex => {
+            static LISTED: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+            LISTED.get_or_init(codex_models).clone()
+        }
+    }
+}
+
+fn codex_models() -> Vec<(String, String)> {
+    let listed = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".codex/models_cache.json"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| {
+            let models = json.get("models")?.as_array()?;
+            Some(
+                models
+                    .iter()
+                    .filter(|m| m.get("visibility").and_then(|v| v.as_str()) == Some("list"))
+                    .filter_map(|m| {
+                        let slug = m.get("slug")?.as_str()?.to_owned();
+                        let name = m.get("display_name").and_then(|n| n.as_str());
+                        Some((slug.clone(), name.unwrap_or(&slug).to_owned()))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default();
+    if listed.is_empty() {
+        [("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")]
+            .map(|(value, name)| (value.to_owned(), name.to_owned()))
+            .to_vec()
+    } else {
+        listed
+    }
+}
+
+/// The name Settings shows for a saved model: the listed name, else the value itself.
+pub fn model_name(provider: Provider, value: &str) -> String {
+    if value.is_empty() {
+        return DEFAULT_MODEL.to_owned();
+    }
+    models(provider)
+        .into_iter()
+        .find(|(v, _)| v == value)
+        .map_or_else(|| value.to_owned(), |(_, name)| name)
+}
+
+/// The value to save for a name chosen in Settings: empty for the agent's default.
+pub fn model_value(provider: Provider, name: &str) -> String {
+    models(provider)
+        .into_iter()
+        .find(|(_, n)| n == name)
+        .map_or_else(
+            || if name == DEFAULT_MODEL { String::new() } else { name.to_owned() },
+            |(value, _)| value,
+        )
+}
+
 /// Settings › Fix with an agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {

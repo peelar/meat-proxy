@@ -33,7 +33,7 @@ pub(crate) fn sync_option_row(
 
 /// Settings › Fix with an agent: Copy prompt becomes Fix, which runs the prompt in a detached
 /// Claude Code or Codex session.
-fn agent_section(s: &App, k: &Kit) -> El {
+fn agent_section(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let on = s.agent.enabled;
     col()
@@ -74,15 +74,31 @@ fn agent_section(s: &App, k: &Kit) -> El {
         .child(setup_row(
             k,
             "Model",
-            TextInput::new(&s.agent_model)
-                .label("Agent model")
-                .disabled(!on)
-                .placeholder("The agent's default")
-                .width(Some(360.0))
-                .on_edit(|s: &mut App| &mut s.agent_model)
-                .build(k)
-                .key("option-agent-model"),
+            model_select(s, k, layer),
         ))
+}
+
+/// The agent's model: its default, or one of the models it offers.
+fn model_select(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    let provider = s.agent.provider;
+    let mut options = vec![agent::DEFAULT_MODEL.to_owned()];
+    options.extend(agent::models(provider).into_iter().map(|(_, name)| name));
+    // A model saved by an earlier version, or by the other agent, still shows.
+    let current = agent::model_name(provider, &s.agent.model);
+    if !options.contains(&current) {
+        options.push(current.clone());
+    }
+    Select::new("option-agent-model", &options)
+        .label("Agent model")
+        .appearance(SelectAppearance::Field)
+        .width(220.0)
+        .current(Some(&current))
+        .disabled(!s.agent.enabled)
+        .open(s.agent_model_open)
+        .on_toggle(|s: &mut App| s.agent_model_open = !s.agent_model_open)
+        .on_close(|s: &mut App| s.agent_model_open = false)
+        .on_choose(|s: &mut App, choice: &str, _: &mut Tx| s.pick_agent_model(choice))
+        .build(k, layer)
 }
 
 /// Settings › Autonomous: two switches, by who an action reaches. What each does stays out of
@@ -124,7 +140,7 @@ pub(crate) fn autonomy_section(s: &App, k: &Kit) -> El {
         ))
 }
 
-pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
+pub(crate) fn settings_content(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let open_idx = match s.open_stale_hours {
         24 => 0,
@@ -337,7 +353,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit) -> El {
                         ),
                 )),
         )
-        .child(panel(k).child(agent_section(s, k)))
+        .child(panel(k).child(agent_section(s, k, layer)))
         .child(panel(k).child(autonomy_section(s, k)))
         .child(panel(k).child(pace_section(s, k)))
         .children(s.ai.feature.then(|| panel(k).child(ai_section)))
@@ -377,6 +393,8 @@ pub(crate) fn settings_modal(s: &App, k: &Kit) -> El {
         .on_press(|s: &mut App| s.settings_open = false)
         .build(k)
         .key("close-settings");
+    // Open dropdowns, drawn above the dialog.
+    let mut layer = Vec::new();
     let dialog = col()
         .key("settings-dialog")
         .role("dialog")
@@ -415,7 +433,7 @@ pub(crate) fn settings_modal(s: &App, k: &Kit) -> El {
                 )
                 .child(close),
         )
-        .child(settings_content(s, k))
+        .child(settings_content(s, k, &mut layer))
         .modal(true, |s: &mut App| s.settings_open = false)
         .modal_click_outside(true);
     el().key("settings-overlay")
@@ -427,6 +445,7 @@ pub(crate) fn settings_modal(s: &App, k: &Kit) -> El {
         .fill(k.c.scrim)
         .center()
         .child(dialog)
+        .children(layer)
 }
 
 /// How far the Inbox blurs behind the Settings dialog.

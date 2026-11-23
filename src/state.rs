@@ -170,7 +170,7 @@ pub struct App {
     pub autonomy_worker: Latest<Vec<autonomy::Outcome>>,
     /// Settings › Fix with an agent, the model as typed, and the pull request an agent is on.
     pub agent: agent::Config,
-    pub agent_model: TextEdit,
+    pub agent_model_open: bool,
     pub agent_running: Option<String>,
     pub agent_worker: Latest<(String, Result<agent::Outcome, String>)>,
     /// Pace: the score of quick approvals and merges, on unless switched off in Settings; its
@@ -321,7 +321,7 @@ pub(crate) fn init() -> App {
         heard: Vec::new(),
         copied: None,
         agent: agent::Config::default(),
-        agent_model: TextEdit::new(""),
+        agent_model_open: false,
         agent_running: None,
         agent_worker: Latest::default(),
         autonomy_branches: false,
@@ -444,7 +444,6 @@ impl App {
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
         self.ai.enabled = snap.ai_enabled;
-        self.agent_model = TextEdit::new(&snap.agent.model);
         self.agent = snap.agent;
         self.autonomy_branches = snap.autonomy_branches;
         self.autonomy_reviewers = snap.autonomy_reviewers;
@@ -1009,14 +1008,17 @@ impl App {
     pub fn pick_agent_provider(&mut self, provider: agent::Provider) {
         self.agent.provider = provider;
         self.save_setting("agent_provider", provider.id());
+        // The other agent's model means nothing to this one.
+        self.pick_agent_model(agent::DEFAULT_MODEL);
     }
 
-    /// The model is typed in Settings; keep it once it differs from what is in effect.
-    pub(crate) fn apply_agent_model(&mut self) {
-        let typed = self.agent_model.text.trim().to_owned();
-        if typed != self.agent.model {
-            self.save_setting("agent_model", &typed);
-            self.agent.model = typed;
+    /// Keeps the model chosen in Settings; the first option leaves it to the agent.
+    pub fn pick_agent_model(&mut self, choice: &str) {
+        let model = agent::model_value(self.agent.provider, choice);
+        self.agent_model_open = false;
+        if model != self.agent.model {
+            self.save_setting("agent_model", &model);
+            self.agent.model = model;
         }
     }
 

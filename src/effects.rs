@@ -121,7 +121,7 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
 /// Applies what was typed in Settings once the typing has paused.
 fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    let typed = [&s.max_age_input, &s.ai.url, &s.ai.model, &s.ai.key, &s.agent_model]
+    let typed = [&s.max_age_input, &s.ai.url, &s.ai.model, &s.ai.key]
         .map(|field| field.text.as_str())
         .join("\u{1f}");
     if s.typed.as_ref().is_none_or(|(seen, _)| *seen != typed) {
@@ -136,7 +136,6 @@ fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
             changed = true;
         }
         changed |= s.apply_ai_fields();
-        s.apply_agent_model();
     }
     changed
 }

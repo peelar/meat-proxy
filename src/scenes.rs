@@ -410,6 +410,17 @@ pub(crate) static SCENES: &[Scene] = &[
             pr.merge_readiness = model::MergeReadiness::Ready;
         }
     }),
+    ("settings-agent", |s| {
+        seed_preview(s);
+        s.agent.enabled = true;
+        s.page = Page::Inbox;
+        s.settings_open = true;
+    }),
+    ("settings-agent-model", |s| {
+        run_scene(s, "settings-agent");
+        s.agent.model = "claude-opus-5-5".into();
+        s.agent_model_open = true;
+    }),
     ("settings-ai", |s| {
         seed_preview(s);
         s.ai.key = TextEdit::new("sk-or-v1-0123456789abcdef");

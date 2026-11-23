@@ -3,8 +3,8 @@ use rune::{
     row, text,
 };
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Kit, Markdown, MarkdownStyle, SegmentedControl, Switch,
-    TextInput,
+    Button, ButtonVariant, ControlSize, Kit, Markdown, MarkdownStyle, SegmentedControl, Select,
+    SelectAppearance, Switch, TextInput,
 };
 
 mod agent;
@@ -988,5 +988,39 @@ mod tests {
         assert!(rt.find("pace-header").is_none());
         assert!(rt.find(&format!("pace-pill-{id}")).is_none());
         assert_eq!(rt.state.pace_events.len(), 1);
+    }
+
+    #[test]
+    fn the_agent_model_is_chosen_from_a_dropdown_under_its_field() {
+        let mut state = init();
+        state.preview = true;
+        seed_preview(&mut state);
+        state.page = Page::Inbox;
+        state.settings_open = true;
+        state.agent.enabled = true;
+        let mut rt = Runtime::new(state, view, (1000.0, 1500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let rect = |rt: &Runtime<App>, key: &str| {
+            rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect)
+        };
+        let (x, y) = rt.find("option-agent-model-trigger").expect("the field is in Settings");
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0);
+        rt.frame(2.0);
+        assert!(rt.state.agent_model_open);
+        let field = rect(&rt, "option-agent-model-trigger").unwrap();
+        let list = rect(&rt, "option-agent-model-content").expect("the listbox opens");
+        assert!(list[1] >= field[1] + field[3] - 1.0, "below its field: {list:?} vs {field:?}");
+        assert!(list[0] < field[0] + field[2] && list[0] + list[2] > field[0], "over its field");
+        let (x, y) = rt.find("option2").expect("an option to choose");
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(3.0);
+        assert_eq!(rt.state.agent.model, "claude-opus-5-5");
+        assert!(!rt.state.agent_model_open);
+        assert!(rt.state.settings_open, "choosing leaves Settings open");
     }
 }
