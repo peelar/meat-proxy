@@ -967,6 +967,11 @@ impl App {
     }
 
     /// Whether the Fix button is on offer: the setting is on and nothing else is running.
+    /// Whether rows show Fix instead of Copy prompt. A preview shows it too, but never runs it.
+    pub fn agent_offered(&self) -> bool {
+        self.agent.enabled && (self.preview || self.allow_os_side_effects)
+    }
+
     pub fn agent_ready(&self) -> bool {
         self.agent.enabled && !self.preview && self.allow_os_side_effects
     }

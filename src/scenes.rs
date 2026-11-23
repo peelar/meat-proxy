@@ -368,6 +368,13 @@ pub(crate) fn seed_preview(s: &mut App) {
 pub(crate) type Scene = (&'static str, fn(&mut App));
 
 /// The states `--scene <name>` opens, for snapshots and demos; each starts from `init`.
+/// Runs another scene's setup first.
+fn run_scene(s: &mut App, name: &str) {
+    if let Some((_, setup)) = SCENES.iter().find(|(n, _)| *n == name) {
+        setup(s);
+    }
+}
+
 pub(crate) static SCENES: &[Scene] = &[
     ("onboarding", |s| {
         s.loading = false;
@@ -573,6 +580,17 @@ pub(crate) static SCENES: &[Scene] = &[
                 _ => {}
             }
         }
+    }),
+    // The same rows with Fix, once per agent.
+    ("unblock-claude", |s| {
+        run_scene(s, "unblock");
+        s.agent.enabled = true;
+        s.agent.provider = agent::Provider::Claude;
+    }),
+    ("unblock-codex", |s| {
+        run_scene(s, "unblock");
+        s.agent.enabled = true;
+        s.agent.provider = agent::Provider::Codex;
     }),
     ("unblock-open", |s| {
         seed_preview(s);

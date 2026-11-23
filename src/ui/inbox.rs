@@ -605,7 +605,7 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
     // checks run again on the result.
     let update_first = blockers.contains(&Blocker::Behind) && pr.can_update_branch;
     let prompt = if update_first { None } else { pr.agent_prompt() };
-    let fix = if prompt.is_some() && s.agent_ready() {
+    let fix = if prompt.is_some() && s.agent_offered() {
         Some(s.agent.provider)
     } else {
         None
