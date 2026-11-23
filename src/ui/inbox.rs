@@ -21,7 +21,7 @@ pub(crate) fn brand(s: &App, k: &Kit) -> El {
         })
         .child(keycap.cursor(rune::Cursor::Pointer))
         .child(
-            text("meat proxy")
+            text(crate::profile::app_name())
                 .font(TextStyle::new(14.0, 650.0))
                 .color(k.c.text_base)
                 .cursor(rune::Cursor::Pointer),

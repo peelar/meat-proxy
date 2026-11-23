@@ -15,6 +15,7 @@ mod github;
 mod judge;
 mod model;
 mod notify;
+mod profile;
 mod pace;
 mod reorder;
 mod sections;
@@ -74,7 +75,7 @@ fn main() {
         poll: Some(poll),
         on_key: Some(on_key),
         scenes: SCENES,
-        ..rune::AppSpec::new("meat proxy", (920.0, 680.0), init, view)
+        ..rune::AppSpec::new(crate::profile::app_name(), (920.0, 680.0), init, view)
     })
     .tab_visits_controls(true)
     .chrome(chrome)

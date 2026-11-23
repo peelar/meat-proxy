@@ -74,7 +74,8 @@ fn cache_path(login: &str) -> Option<PathBuf> {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"))
         })?;
     Some(
-        dir.join("meat-proxy/avatars")
+        dir.join(crate::profile::dir_name())
+            .join("avatars")
             .join(login.to_ascii_lowercase()),
     )
 }

@@ -104,7 +104,9 @@ fn workspace(pr: &PullRequest) -> PathBuf {
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join(".config/meat-proxy/agents");
+        .join(".config")
+        .join(crate::profile::dir_name())
+        .join("agents");
     base.join(format!("{}-{}", pr.repo.replace('/', "-"), pr.number))
 }
 

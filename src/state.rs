@@ -837,7 +837,7 @@ impl App {
     pub fn send_welcome_notification(&self) {
         notify::post(
             "notifications-enabled",
-            "meat proxy",
+            crate::profile::app_name(),
             "Notifications are on. You'll see a note here when a review is requested of you or a PR needs a nudge.",
             None,
             self.allow_os_side_effects,

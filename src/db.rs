@@ -63,7 +63,7 @@ pub fn default_db_path() -> PathBuf {
     {
         if let Some(home) = std::env::var_os("HOME") {
             use std::os::unix::fs::PermissionsExt;
-            let dir = PathBuf::from(home).join(".config/meat-proxy");
+            let dir = PathBuf::from(home).join(".config").join(crate::profile::dir_name());
             if std::fs::create_dir_all(&dir).is_ok() {
                 let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
             }

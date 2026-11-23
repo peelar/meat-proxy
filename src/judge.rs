@@ -184,7 +184,12 @@ impl JudgeConfig {
 
     fn path() -> Option<std::path::PathBuf> {
         std::env::var_os("HOME")
-            .map(|home| std::path::PathBuf::from(home).join(".config/meat-proxy/judge.json"))
+            .map(|home| {
+                std::path::PathBuf::from(home)
+                    .join(".config")
+                    .join(crate::profile::dir_name())
+                    .join("judge.json")
+            })
     }
 
     /// `judge.json` alone, without the environment.

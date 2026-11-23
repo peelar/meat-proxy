@@ -411,7 +411,7 @@ fn on_autonomy(s: &mut App) -> bool {
                     let body = action.announce(pr);
                     notify::post(
                         &format!("autonomy-{}", autonomy::key(pr, &action)),
-                        "meat proxy",
+                        crate::profile::app_name(),
                         &body,
                         Some(&pr.url),
                         s.native_notifications && s.allow_os_side_effects,
@@ -536,7 +536,7 @@ fn on_actions(s: &mut App) -> bool {
         let sound_on = s.native_notifications && s.allow_os_side_effects;
         match (result, name) {
             (Ok(outcome), Some(pr)) => {
-                notify::post(&format!("agent-{id}"), "meat proxy", &outcome.announce(&pr), Some(&pr.url), sound_on);
+                notify::post(&format!("agent-{id}"), crate::profile::app_name(), &outcome.announce(&pr), Some(&pr.url), sound_on);
                 match outcome {
                     agent::Outcome::Pushed => s.trigger_sync(),
                     agent::Outcome::NothingPushed { said, folder } => {
@@ -551,7 +551,7 @@ fn on_actions(s: &mut App) -> bool {
             }
             (Err(error), pr) => {
                 let at = pr.map_or(String::new(), |p| format!(" on {}#{}", p.repo, p.number));
-                notify::post(&format!("agent-{id}"), "meat proxy", &format!("The agent failed{at}"), None, sound_on);
+                notify::post(&format!("agent-{id}"), crate::profile::app_name(), &format!("The agent failed{at}"), None, sound_on);
                 s.status_banner = Some(format!("Fix failed{at}. {error}"));
             }
             (Ok(_), None) => {}
