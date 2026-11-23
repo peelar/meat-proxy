@@ -302,7 +302,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(
             panel(k)
                 .child(
-                    text("Pull requests").font(SECTION_TITLE)
+                    text("Pull Requests").font(SECTION_TITLE)
                         .color(c.text_base),
                 )
                 .child(setup_row(

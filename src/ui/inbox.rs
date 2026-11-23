@@ -1069,7 +1069,7 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
                 .w_full()
                 .justify_between()
                 .items_end()
-                .child(col().gap(5.0).child(heading(k, "Pull requests")).child(
+                .child(col().gap(5.0).child(heading(k, "Pull Requests")).child(
                     if s.prs.is_empty() {
                         el()
                     } else {
