@@ -13,18 +13,16 @@ pub(crate) fn brand(s: &App, k: &Kit) -> El {
         .key("brand")
         .center_y()
         .gap(9.0)
-        .cursor(rune::Cursor::Pointer)
         .on_press(|s: &mut App| {
             if s.page == Page::Inbox {
                 s.selected_repo = None;
             }
         })
-        .child(keycap.cursor(rune::Cursor::Pointer))
+        .child(keycap)
         .child(
             text(crate::profile::app_name())
                 .font(TextStyle::new(14.0, 650.0))
-                .color(k.c.text_base)
-                .cursor(rune::Cursor::Pointer),
+                .color(k.c.text_base),
         )
 }
 
@@ -100,6 +98,7 @@ fn update_button(s: &App, k: &Kit) -> Option<El> {
             .label(format!("Restart to update to {tag}"))
             .help("A new version is ready. Meat Proxy restarts to install it.")
             .focusable(true)
+            .center_y()
             .px(8.0)
             .py(3.0)
             .radius(6.0)
@@ -253,7 +252,10 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
             row()
                 .w_full()
                 .justify_end()
+                .center_y()
+                .gap(8.0)
                 .offset(0.0, 12.0)
+                .children((s.filter == InboxFilter::Inbox).then(|| sort_control(s, k)))
                 .child(collapse),
         )
 }
@@ -1085,28 +1087,19 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
     doc = doc
         .child(row().center_y().gap(12.0).child(brand(s, k)).children(update_button(s, k)))
         .child(
-            row()
-                .w_full()
-                .justify_between()
-                .items_end()
-                .child(col().gap(5.0).child(heading(k, "Pull Requests")).child(
-                    if s.prs.is_empty() {
-                        el()
-                    } else {
-                        text(format!(
-                            "{} open  ·  {} need your thumb",
-                            s.prs.len(),
-                            attention
-                        ))
-                        .font(k.ty.body)
-                        .color(c.text_muted)
-                    },
-                ))
-                .child(if s.filter == InboxFilter::Inbox {
-                    sort_control(s, k)
-                } else {
+            col().gap(5.0).child(heading(k, "Pull Requests")).child(
+                if s.prs.is_empty() {
                     el()
-                }),
+                } else {
+                    text(format!(
+                        "{} open  ·  {} need your thumb",
+                        s.prs.len(),
+                        attention
+                    ))
+                    .font(k.ty.body)
+                    .color(c.text_muted)
+                },
+            ),
         )
         .children((s.pace_enabled && s.page == Page::Inbox).then(|| pace_panel(s, k)))
         .child(inbox_tools(s, k));
