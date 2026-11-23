@@ -889,6 +889,8 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let auto = auto_on || auto_offer;
     let auto_busy = s.auto_merging.contains(&pr.id);
 
+    // A stacked pull request merges into its base branch, not the default one: say which.
+    let merge_label = if pr.stack_base.is_some() { "Merge to base" } else { "Merge" };
     let (glyph, label, ink) = if merging {
         (&MERGE, "Merging…", Ink::Busy)
     } else if let Some(left) = armed {
@@ -898,9 +900,9 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     } else if auto_offer {
         (&BOLT, "Auto-merge", if auto_busy { Ink::Busy } else { Ink::Rest })
     } else if !ready || busy {
-        (&MERGE, "Merge", Ink::Disabled)
+        (&MERGE, merge_label, Ink::Disabled)
     } else {
-        (&MERGE, "Merge", Ink::Rest)
+        (&MERGE, merge_label, Ink::Rest)
     };
     let mut button = ink_button(k, tone, glyph, label, ink, key);
     if matches!(ink, Ink::Rest | Ink::Armed(_) | Ink::On) {
@@ -936,7 +938,13 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
                 pr.merge_method.label()
             )
         } else if ready {
-            format!("Merge with {}", pr.merge_method.label())
+            match pr.stack_base.as_deref() {
+                Some(base) => format!(
+                    "Merge with {} into {base}, not the default branch",
+                    pr.merge_method.label()
+                ),
+                None => format!("Merge with {}", pr.merge_method.label()),
+            }
         } else {
             pr.merge_readiness.blocked_reason().to_owned()
         })
