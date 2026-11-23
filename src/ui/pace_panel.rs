@@ -177,11 +177,12 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
             summary.push(format!("{quick} quick this week"));
         }
         if summary.is_empty() {
-            summary.push("Approve or merge from here to start a streak".to_owned());
+            None
+        } else {
+            Some(text(summary.join("  ·  ")).font(k.ty.small).color(c.text_muted))
         }
-        text(summary.join("  ·  ")).font(k.ty.small).color(c.text_muted)
     } else if stats.bold > 0 {
-        row()
+        Some(row()
             .center_y()
             .gap(5.0)
             .child(rune::icon(&EYE, 12.0).color(c.warning.fg).a11y_hidden())
@@ -192,11 +193,13 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
                 ))
                 .font(k.ty.small)
                 .color(c.text_faint),
-            )
+            ))
     } else {
-        text("Quick: within the hour of being asked, or of the approval for a merge")
-            .font(k.ty.small)
-            .color(c.text_faint)
+        Some(
+            text("Quick: within the hour of being asked, or of the approval for a merge")
+                .font(k.ty.small)
+                .color(c.text_faint),
+        )
     };
     // Folded, the last week as a strip, with the streak's days joined into one bar.
     let week = &days[days.len().saturating_sub(7)..];
@@ -238,8 +241,8 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
                 .gap(8.0)
                 .child(rune::icon(&BOLT, 14.0).color(mint(k)).a11y_hidden())
                 .child(text("Scoreboard").font(k.ty.ui_medium).color(c.text_base))
-                .child(el().size(1.0, 10.0).fill(c.border_base))
-                .child(caption),
+                .children(caption.is_some().then(|| el().size(1.0, 10.0).fill(c.border_base)))
+                .children(caption),
         )
         .child(
             row()

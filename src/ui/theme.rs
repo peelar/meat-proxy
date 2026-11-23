@@ -122,6 +122,18 @@ pub(crate) const RESET: rune::Icon = rune::Icon {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5M3 2.6v2.6h2.6"/>"#,
 };
 
+/// Collapse every group: two chevrons pointing in. Expanding them is the same pair pointing out.
+pub(crate) const COLLAPSE_ALL: rune::Icon = rune::Icon {
+    name: "collapse-all",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M4.5 2.5 8 5.5l3.5-3M4.5 13.5 8 10.5l3.5 3"/>"#,
+};
+pub(crate) const EXPAND_ALL: rune::Icon = rune::Icon {
+    name: "expand-all",
+    view: 16.0,
+    body: r#"<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M4.5 5.5 8 2.5l3.5 3M4.5 10.5 8 13.5l3.5-3"/>"#,
+};
+
 /// Update branch: two arrows chasing each other.
 pub(crate) const UPDATE: rune::Icon = rune::Icon {
     name: "update-branch",

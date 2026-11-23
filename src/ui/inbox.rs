@@ -109,10 +109,12 @@ fn update_button(s: &App, k: &Kit) -> Option<El> {
     )
 }
 
-/// Says how the Inbox is sorted, and lets you change it: AI (a model reads the review requests) or
-/// rules alone. Next to it, a button puts the groups back in the default order.
-pub(crate) fn sort_control(s: &App, k: &Kit) -> El {
+/// Sort mode and reset, as two icons that keep their slots on every tab so the search box never
+/// moves. Off the Inbox they are dimmed and do nothing. The brain is tinted while a model sorts;
+/// its tooltip says which mode is on.
+fn sort_icons(s: &App, k: &Kit) -> El {
     let c = &k.c;
+    let live = s.filter == InboxFilter::Inbox;
     let ai = s.smart_active();
     let available = s.smart_available();
     let tip = if !available {
@@ -122,41 +124,27 @@ pub(crate) fn sort_control(s: &App, k: &Kit) -> El {
     } else {
         "Sorted by rules alone. Nothing is sent to a model. Click to sort with AI."
     };
-    let mut label = row().center_y().gap(5.0);
-    if ai {
-        label = label.child(rune::icon(&BRAIN, 13.0).color(model_ink(k)));
-    }
-    let label = label.child(
-        text(if ai {
-            "Sorted by AI"
-        } else {
-            "Sorted by rules"
-        })
-        .font(k.ty.small)
-        .color(c.text_muted),
-    );
     let mut toggle = row()
         .key("sort-mode")
         .role("button")
-        .label(if ai {
-            "Sorted by AI"
-        } else {
-            "Sorted by rules"
-        })
-        .px(8.0)
-        .py(4.0)
+        .label(if ai { "Sorted by AI" } else { "Sorted by rules" })
+        .size(24.0, 24.0)
         .radius(6.0)
-        .center_y()
+        .center()
         .help(tip)
-        .child(label);
-    if available {
+        .child(rune::icon(&BRAIN, 14.0).color(if ai && live {
+            model_ink(k)
+        } else {
+            c.text_faint
+        }));
+    if available && live {
         toggle = toggle
             .cursor(rune::Cursor::Pointer)
             .hover(c.hover)
             .on_press(|s: &mut App| s.toggle_smart_sort());
     }
     let reset = icon_action(&RESET, "Reset to the default order")
-        .disabled(s.group_order_is_default())
+        .disabled(!live || s.group_order_is_default())
         .on_press(|s: &mut App| s.reset_group_order())
         .build(k)
         .key("reset-group-order");
@@ -186,81 +174,39 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
         .build(k)
         .key("inbox-search-input");
 
-    let collapse = row()
-        .key("collapse-all")
-        .role("button")
-        .label(if s.all_sections_collapsed() {
-            "Expand all"
-        } else {
-            "Collapse all"
-        })
-        .px(4.0)
-        .py(2.0)
-        .radius(4.0)
-        .cursor(rune::Cursor::Pointer)
-        .hover(k.c.hover)
-        .on_press_tx(|s: &mut App, tx: &mut Tx| {
-            tx.motion_curve(rune::Curve::tween(
-                0.12,
-                rune::Easing::cubic(0.2, 0.0, 0.0, 1.0),
-            ));
-            s.toggle_collapse_all()
-        })
-        .child(
-            text(if s.all_sections_collapsed() {
-                "Expand all"
-            } else {
-                "Collapse all"
-            })
-            .font(k.ty.small)
-            .color(k.c.text_muted),
-        );
+    let collapsed = s.all_sections_collapsed();
+    let collapse = icon_action(
+        if collapsed { &EXPAND_ALL } else { &COLLAPSE_ALL },
+        if collapsed { "Expand all" } else { "Collapse all" },
+    )
+    .on_press_tx(|s: &mut App, tx: &mut Tx| {
+        tx.motion_curve(rune::Curve::tween(
+            0.12,
+            rune::Easing::cubic(0.2, 0.0, 0.0, 1.0),
+        ));
+        s.toggle_collapse_all()
+    })
+    .build(k)
+    .key("collapse-all");
 
-    col()
+    row()
         .w_full()
-        .gap(6.0)
+        .center_y()
+        .justify_between()
+        .gap(8.0)
+        .child(filter_seg)
         .child(
             row()
-                .w_full()
                 .center_y()
-                .justify_between()
                 .gap(8.0)
-                .child(filter_seg)
+                .child(search)
                 .child(
                     row()
                         .center_y()
-                        .gap(8.0)
-                        .child(search)
-                        .child(
-                            Button::new("Add repository")
-                                .variant(ButtonVariant::Outline)
-                                .control_size(ControlSize::Large)
-                                .on_press(|s: &mut App| {
-                                    s.add_repo_open = true;
-                                    if s.discovery.is_none() {
-                                        s.trigger_discovery();
-                                    }
-                                })
-                                .build(k)
-                                .key("add-repo-open"),
-                        ),
+                        .gap(2.0)
+                        .child(collapse)
+                        .child(sort_icons(s, k)),
                 ),
-        )
-        // The document's 16px gap sits between this and the first section; slide the toggle down
-        // so it rests near that section's border instead of floating mid-gap.
-        .child(
-            row()
-                .w_full()
-                .justify_between()
-                .center_y()
-                .gap(8.0)
-                .offset(0.0, 12.0)
-                .child(collapse)
-                .child(if s.filter == InboxFilter::Inbox {
-                    sort_control(s, k)
-                } else {
-                    el()
-                }),
         )
 }
 
@@ -1091,19 +1037,34 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
     doc = doc
         .child(row().center_y().gap(12.0).child(brand(s, k)).children(update_button(s, k)))
         .child(
-            col().gap(5.0).child(heading(k, "Pull Requests")).child(
-                if s.prs.is_empty() {
-                    el()
-                } else {
-                    text(format!(
-                        "{} open  ·  {} need your thumb",
-                        s.prs.len(),
-                        attention
-                    ))
-                    .font(k.ty.body)
-                    .color(c.text_muted)
-                },
-            ),
+            row()
+                .w_full()
+                .justify_between()
+                .items_end()
+                .child(col().gap(5.0).child(heading(k, "Pull Requests")).child(
+                    if s.prs.is_empty() {
+                        el()
+                    } else {
+                        text(format!(
+                            "{} open  ·  {} need your thumb",
+                            s.prs.len(),
+                            attention
+                        ))
+                        .font(k.ty.body)
+                        .color(c.text_muted)
+                    },
+                ))
+                .child(
+                    icon_action(&PLUS, "Add repository")
+                        .on_press(|s: &mut App| {
+                            s.add_repo_open = true;
+                            if s.discovery.is_none() {
+                                s.trigger_discovery();
+                            }
+                        })
+                        .build(k)
+                        .key("add-repo-open"),
+                ),
         )
         .children((s.pace_enabled && s.page == Page::Inbox).then(|| pace_panel(s, k)))
         .child(inbox_tools(s, k));

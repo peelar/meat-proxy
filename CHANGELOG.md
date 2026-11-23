@@ -2,7 +2,7 @@
 
 ## 0.3.19
 
-- The sort control moved down to the right of the list, level with Collapse all, which now sits on the left.
+- The toolbar is one row: Collapse all, sort and reset are icons beside the search, and Add repository is a plus next to the Pull Requests heading. A collapsed Scoreboard no longer shows its hint text.
 - Meat Proxy now looks for a new version every 5 minutes and downloads it in the background. An Update button appears next to the logo; press it to restart into the new version. If you don't, it installs itself once the app has been in the background for a couple of minutes and nothing is running.
 
 ## 0.3.18
