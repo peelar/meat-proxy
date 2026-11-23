@@ -172,7 +172,9 @@ pub struct App {
     pub agent: agent::Config,
     pub agent_model_open: bool,
     pub agent_running: Option<String>,
-    pub agent_worker: Latest<(String, Result<agent::Outcome, String>)>,
+    pub agent_worker: Latest<(PullRequest, Result<agent::Outcome, String>)>,
+    /// Pull requests the agent pushed a fix to this session, and when: the row says Fixed.
+    pub agent_fixed: Vec<(String, std::time::Instant)>,
     /// Pace: the score of quick approvals and merges, on unless switched off in Settings; its
     /// panel above the Inbox, and whether it is folded.
     pub pace_enabled: bool,
@@ -324,6 +326,7 @@ pub(crate) fn init() -> App {
         agent_model_open: false,
         agent_running: None,
         agent_worker: Latest::default(),
+        agent_fixed: Vec::new(),
         autonomy_branches: false,
         autonomy_reviewers: false,
         autonomy_done: std::collections::HashMap::new(),
@@ -990,7 +993,7 @@ impl App {
         self.agent_running = Some(pr.id.clone());
         self.agent_worker.request((), move |()| {
             let result = agent::run(&pr, &prompt, &cfg);
-            (pr.id.clone(), result)
+            (pr, result)
         });
     }
 

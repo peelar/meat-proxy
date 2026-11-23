@@ -605,6 +605,21 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
     // checks run again on the result.
     let update_first = blockers.contains(&Blocker::Behind) && pr.can_update_branch;
     let prompt = if update_first { None } else { pr.agent_prompt() };
+    // The agent pushed a fix and nothing holds the pull request up now: say so where Fix was.
+    if prompt.is_none()
+        && s.agent_offered()
+        && let Some((_, at)) = s.agent_fixed.iter().find(|(id, _)| *id == pr.id)
+    {
+        let (glyph, tone) = match s.agent.provider {
+            agent::Provider::Claude => (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0)),
+            agent::Provider::Codex => (&CODEX, tone),
+        };
+        let button = ink_button(k, tone, glyph, "Fixed", Ink::Done(at.elapsed().as_secs_f32()), key);
+        return Some((
+            row().center_y().help(format!("{} pushed a fix", s.agent.provider.label())).child(button),
+            true,
+        ));
+    }
     let fix = if prompt.is_some() && s.agent_offered() {
         Some(s.agent.provider)
     } else {

@@ -529,15 +529,19 @@ fn on_actions(s: &mut App) -> bool {
         }
         changed = true;
     }
-    if let Some((id, result)) = s.agent_worker.take() {
+    if let Some((pr, result)) = s.agent_worker.take() {
         s.agent_running = None;
-        let name = s.prs.iter().find(|p| p.id == id).cloned();
         let sound_on = s.native_notifications && s.allow_os_side_effects;
-        match (result, name) {
-            (Ok(outcome), Some(pr)) => {
+        let id = pr.id.clone();
+        match result {
+            Ok(outcome) => {
                 notify::post(&format!("agent-{id}"), crate::profile::app_name(), &outcome.announce(&pr), Some(&pr.url), sound_on);
                 match outcome {
-                    agent::Outcome::Pushed => s.trigger_sync(),
+                    agent::Outcome::Pushed => {
+                        s.agent_fixed.retain(|(f, _)| *f != id);
+                        s.agent_fixed.push((id, std::time::Instant::now()));
+                        s.trigger_sync();
+                    }
                     agent::Outcome::NothingPushed { said, folder } => {
                         s.status_banner = Some(format!(
                             "The agent pushed nothing to {}#{}. {said} (clone kept in {})",
@@ -548,12 +552,11 @@ fn on_actions(s: &mut App) -> bool {
                     }
                 }
             }
-            (Err(error), pr) => {
-                let at = pr.map_or(String::new(), |p| format!(" on {}#{}", p.repo, p.number));
-                notify::post(&format!("agent-{id}"), crate::profile::app_name(), &format!("The agent failed{at}"), None, sound_on);
+            Err(error) => {
+                let at = format!(" on {}#{}", pr.repo, pr.number);
+                notify::post(&format!("agent-{id}"), crate::profile::app_name(), &format!("The agent failed{at}"), Some(&pr.url), sound_on);
                 s.status_banner = Some(format!("Fix failed{at}. {error}"));
             }
-            (Ok(_), None) => {}
         }
         changed = true;
     }

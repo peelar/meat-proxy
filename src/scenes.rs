@@ -598,6 +598,17 @@ pub(crate) static SCENES: &[Scene] = &[
         s.agent.enabled = true;
         s.agent.provider = agent::Provider::Claude;
     }),
+    // The agent pushed a fix to the conflicted row: it says Fixed where Fix was.
+    ("unblock-fixed", |s| {
+        run_scene(s, "unblock");
+        s.agent.enabled = true;
+        s.agent.provider = agent::Provider::Claude;
+        if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/cli#889") {
+            pr.ci_status = CiStatus::Passing;
+            pr.merge_readiness = model::MergeReadiness::Unknown;
+            s.agent_fixed.push((pr.id.clone(), std::time::Instant::now() - std::time::Duration::from_secs(5)));
+        }
+    }),
     ("unblock-codex", |s| {
         run_scene(s, "unblock");
         s.agent.enabled = true;
