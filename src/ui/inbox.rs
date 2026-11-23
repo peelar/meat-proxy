@@ -256,11 +256,11 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
                 .gap(8.0)
                 .offset(0.0, 12.0)
                 .child(collapse)
-                .child(
-                    (s.filter == InboxFilter::Inbox)
-                        .then(|| sort_control(s, k))
-                        .unwrap_or_else(el),
-                ),
+                .child(if s.filter == InboxFilter::Inbox {
+                    sort_control(s, k)
+                } else {
+                    el()
+                }),
         )
 }
 
