@@ -766,7 +766,13 @@ impl App {
                 ));
         listed && self.matches_search(pr)
     }
+        // Your own pull request waiting on its reviewers asks nothing of you, but belongs here: it
+        // is where you look for what is open. It does not count as needing you.
+        let waiting = !self.ignored.contains(&pr.id)
+            && pr.attention(self.draft_stale_hours, self.open_stale_hours, now)
+                == PrAttention::MyOpenWaiting;
 
+            || waiting
     /// After a sync: answer what cheap rules can, and send the model only what is left.
     pub fn queue_judgments(&mut self) {
         let Some(cfg) = self.ai.config.clone() else {

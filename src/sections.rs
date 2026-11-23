@@ -7,7 +7,7 @@
 //!
 //! The sections are built in. The condition language is small: `any`, `asked:me`, `asked:team`,
 //! `asked:any`, `is:approved`, `is:blocked`, `is:changes-requested`, `is:unreviewed`,
-//! `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`,
+//! `is:waiting`, `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`,
 //! `label:`, `title:`, or a question id; `!` in front negates.
 
 use crate::model::{PrAttention, PullRequest};
@@ -38,7 +38,8 @@ const DEFAULT_JSON: &str = r#"{
     { "name": "Address feedback", "when": ["is:changes-requested"] },
     { "name": "Team reviews", "when": ["asked:team"] },
     { "name": "Get a reviewer", "when": ["is:unreviewed"] },
-    { "name": "Finish or close", "when": ["is:stale-draft"] }
+    { "name": "Finish or close", "when": ["is:stale-draft"] },
+    { "name": "Waiting on review", "when": ["is:waiting"] }
   ]
 }
 "#;
@@ -74,6 +75,7 @@ enum Is {
     Blocked,
     ChangesRequested,
     Unreviewed,
+    Waiting,
     StaleDraft,
 }
 
@@ -268,6 +270,7 @@ impl Layout {
                 subject.attention == PrAttention::MyOpenChangesRequested
             }
             Term::Is(Is::Unreviewed) => subject.attention == PrAttention::MyOpenNeedsNudge,
+            Term::Is(Is::Waiting) => subject.attention == PrAttention::MyOpenWaiting,
             Term::Is(Is::StaleDraft) => subject.attention == PrAttention::MyDraftNeedsNudge,
             Term::External => pr.external,
             Term::Bot => is_bot(&pr.author),
@@ -340,6 +343,7 @@ fn parse_cond(word: &str, question_ids: &[&str]) -> Result<Cond, String> {
         "is:blocked" => Term::Is(Is::Blocked),
         "is:changes-requested" => Term::Is(Is::ChangesRequested),
         "is:unreviewed" => Term::Is(Is::Unreviewed),
+        "is:waiting" => Term::Is(Is::Waiting),
         "is:stale-draft" => Term::Is(Is::StaleDraft),
         _ => {
             if let Some(size) = lower.strip_prefix("lines") {
@@ -462,8 +466,8 @@ mod tests {
     #[test]
     fn the_defaults_parse_and_ask_two_questions() {
         let layout = Layout::default();
-        assert_eq!(layout.sections.len(), 13);
         assert_eq!(layout.sections[0].name, "Merge these");
+        assert_eq!(layout.sections.last().unwrap().name, "Waiting on review");
         assert_eq!(layout.needed_questions().len(), 2);
         assert!(layout.asks_anything());
         assert!(layout.sections[3].uses_model() && !layout.sections[0].uses_model());

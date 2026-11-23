@@ -330,10 +330,20 @@ mod tests {
         assert_eq!(state.group_rank(1), 1, "then the next section in the file");
         // Groups 0, 3 and 6 are on screen; drag the last to the top.
         state.drop_group(&[0, 3, 6], 2, 0);
-        assert_eq!(state.group_order, [6, 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]);
+        // Every section keeps a place; the dragged one moves to the front.
+        let sections = state.layout.sections.len() as u8;
+        let moved_first: Vec<u8> = [6, 0, 1, 2, 3, 4, 5]
+            .into_iter()
+            .chain(7..sections)
+            .collect();
+        assert_eq!(state.group_order, moved_first);
         // Drag the first to the bottom of what is shown: it lands after group 3.
         state.drop_group(&[6, 0, 3], 0, 2);
-        assert_eq!(state.group_order, [0, 1, 2, 3, 6, 4, 5, 7, 8, 9, 10, 11, 12]);
+        let moved_after_three: Vec<u8> = [0, 1, 2, 3, 6, 4, 5]
+            .into_iter()
+            .chain(7..sections)
+            .collect();
+        assert_eq!(state.group_order, moved_after_three);
         // Reordering is undone by the reset, which is only on offer while the order differs.
         assert!(!state.group_order_is_default());
         state.reset_group_order();
