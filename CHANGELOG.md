@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The sort control moved down next to Collapse all, so it sits right above the list it sorts.
+- The sort control moved down to the right of the list, level with Collapse all, which now sits on the left.
 - Meat Proxy now looks for a new version every 5 minutes and downloads it in the background. An Update button appears next to the logo; press it to restart into the new version. If you don't, it installs itself once the app has been in the background for a couple of minutes and nothing is running.
 
 ## 0.3.18

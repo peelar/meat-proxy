@@ -251,12 +251,16 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
         .child(
             row()
                 .w_full()
-                .justify_end()
+                .justify_between()
                 .center_y()
                 .gap(8.0)
                 .offset(0.0, 12.0)
-                .children((s.filter == InboxFilter::Inbox).then(|| sort_control(s, k)))
-                .child(collapse),
+                .child(collapse)
+                .child(
+                    (s.filter == InboxFilter::Inbox)
+                        .then(|| sort_control(s, k))
+                        .unwrap_or_else(el),
+                ),
         )
 }
 
