@@ -90,6 +90,26 @@ pub(crate) fn top_bar(s: &App, k: &Kit, hide_brand: bool) -> El {
         .child(el().w_full().h(1.0).fill(c.border_weak))
 }
 
+/// Offered next to the logo once a newer version is downloaded; pressing it restarts into that version.
+fn update_button(s: &App, k: &Kit) -> Option<El> {
+    let tag = s.update.ready.as_ref()?;
+    Some(
+        row()
+            .key("install-update")
+            .role("button")
+            .label(format!("Restart to update to {tag}"))
+            .help("A new version is ready. Meat Proxy restarts to install it.")
+            .focusable(true)
+            .px(8.0)
+            .py(3.0)
+            .radius(6.0)
+            .cursor(rune::Cursor::Pointer)
+            .hover(k.c.layer_02)
+            .on_press(|s: &mut App| s.install_update())
+            .child(text(format!("Update to {tag}")).font(k.ty.small).color(k.c.text_faint)),
+    )
+}
+
 /// Says how the Inbox is sorted, and lets you change it: AI (a model reads the review requests) or
 /// rules alone. Next to it, a button puts the groups back in the default order.
 pub(crate) fn sort_control(s: &App, k: &Kit) -> El {
@@ -1063,7 +1083,7 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
     let now = current_epoch_hour();
     let attention = s.prs.iter().filter(|p| s.needs_you(p, now)).count();
     doc = doc
-        .child(brand(s, k))
+        .child(row().center_y().gap(12.0).child(brand(s, k)).children(update_button(s, k)))
         .child(
             row()
                 .w_full()

@@ -53,6 +53,7 @@ pub(crate) fn setup(s: &mut App, waker: rune::Waker) {
     s.unblock_worker.set_waker(waker.clone());
     s.autonomy_worker.set_waker(waker.clone());
     s.agent_worker.set_waker(waker.clone());
+    s.update.worker.set_waker(waker.clone());
     s.merge_worker.set_waker(waker);
     s.boot_worker.request((), |()| {
         Database::open_default().and_then(|db| db.load_snapshot())
@@ -97,6 +98,7 @@ pub(crate) fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     changed |= on_judgments(s);
     on_notifications(s, clock);
     run_timers(s, clock);
+    changed |= on_update(s, clock);
     changed |= on_autonomy(s);
     changed |= on_actions(s);
     changed |= tick_buttons(s, tx);
@@ -399,6 +401,33 @@ fn run_timers(s: &mut App, clock: f64) {
             s.trigger_sync();
         }
     }
+}
+
+/// Looks for a newer release, and installs a downloaded one at a quiet moment.
+fn on_update(s: &mut App, clock: f64) -> bool {
+    let mut changed = false;
+    if let Some(result) = s.update.worker.take() {
+        match result {
+            Ok(tag) => {
+                changed = tag != s.update.ready;
+                s.update.ready = tag;
+            }
+            Err(e) => eprintln!("meat-proxy update: {e}"),
+        }
+    }
+    if s.allow_os_side_effects && update::running_bundle().is_some() {
+        if clock >= s.update.next_check_at && !s.update.worker.is_pending() {
+            s.update.next_check_at = clock + update::CHECK_EVERY_SECS;
+            let current = app_version();
+            s.update.worker.request((), move |()| update::check_and_stage(&current));
+        }
+        if s.update.ready.is_some()
+            && update::quiet_moment(s.update.unfocused_since.map(|at| at.elapsed()), s.is_working())
+        {
+            s.install_update();
+        }
+    }
+    changed
 }
 
 /// What the Autonomous switches did on GitHub.

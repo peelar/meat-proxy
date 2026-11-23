@@ -123,6 +123,7 @@ pub struct App {
     pub last_notif_modified: Option<String>,
     pub search_query: TextEdit,
     pub status_banner: Option<String>,
+    pub update: Update,
     /// The saved data, opened on first use and kept open; see `App::db`.
     pub(crate) db: std::cell::OnceCell<Database>,
     /// The saved data could not be read at launch. Setup must not run over it then: finishing
@@ -187,6 +188,27 @@ pub struct App {
     pub pace_events: Vec<pace::Event>,
     /// What was just counted, and when: the row says so, and the panel's number pulses.
     pub pace_flash: Vec<(pace::Event, std::time::Instant)>,
+}
+
+/// Whether a newer release is known, downloaded and waiting to be installed.
+pub struct Update {
+    pub worker: Latest<Result<Option<String>, String>>,
+    /// The downloaded release's tag, once there is one.
+    pub ready: Option<String>,
+    pub next_check_at: f64,
+    /// Since when the window has been in the background; `None` while it has focus.
+    pub unfocused_since: Option<std::time::Instant>,
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Self {
+            worker: Latest::default(),
+            ready: None,
+            next_check_at: 0.0,
+            unfocused_since: None,
+        }
+    }
 }
 
 /// A request to turn auto-merge on or off for one pull request, and the thread running it.
@@ -302,6 +324,7 @@ pub(crate) fn init() -> App {
         last_notif_modified: None,
         search_query: TextEdit::new(""),
         status_banner: None,
+        update: Update::default(),
         db: std::cell::OnceCell::new(),
         boot_failed: false,
         boot_worker: Latest::default(),
@@ -686,6 +709,28 @@ impl App {
             .rev()
             .find(|(e, _)| e.pr_id == pr_id)
             .map(|(e, at)| (e, at.elapsed().as_secs_f32()))
+    }
+
+    /// True while something the user started is still running on GitHub, which an update must not cut off.
+    pub fn is_working(&self) -> bool {
+        self.approve_worker.is_pending()
+            || self.unblock_worker.is_pending()
+            || self.merge_worker.is_pending()
+            || self.resolve_worker.is_pending()
+            || self.autonomy_worker.is_pending()
+            || self.agent_worker.is_pending()
+            || self.auto_merge_jobs.iter().any(|j| j.worker.is_pending())
+    }
+
+    /// Swap in the downloaded release and restart into it.
+    pub fn install_update(&mut self) {
+        let Some(tag) = self.update.ready.clone() else {
+            return;
+        };
+        match update::install_and_relaunch(&tag) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => self.status_banner = Some(format!("Could not update: {e}")),
+        }
     }
 
     /// Start whatever the Autonomous switches call for on the pull requests as last synced.

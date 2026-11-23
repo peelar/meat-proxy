@@ -402,6 +402,10 @@ pub(crate) static SCENES: &[Scene] = &[
         seed_preview(s);
         s.page = Page::Inbox;
     }),
+    ("update-ready", |s| {
+        run_scene(s, "inbox");
+        s.update.ready = Some("v0.3.18".into());
+    }),
     ("inbox-open", |s| {
         seed_preview(s);
         s.page = Page::Inbox;

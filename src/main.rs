@@ -26,6 +26,7 @@ mod judge_eval;
 mod scenes;
 mod state;
 mod ui;
+mod update;
 
 use effects::*;
 use judge_eval::*;
@@ -78,6 +79,9 @@ fn main() {
         ..rune::AppSpec::new(crate::profile::app_name(), (920.0, 680.0), init, view)
     })
     .tab_visits_controls(true)
+    .on_focus(|s: &mut App, focused, _| {
+        s.update.unfocused_since = (!focused).then(std::time::Instant::now);
+    })
     .chrome(chrome)
     .run();
 }
