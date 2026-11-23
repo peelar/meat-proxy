@@ -253,6 +253,9 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
         let Some(repo) = item["repository"]["full_name"].as_str() else {
             continue;
         };
+        if crate::profile::hide_private() && item["repository"]["private"].as_bool() != Some(false) {
+            continue;
+        }
         let Some(number) = subject["url"]
             .as_str()
             .and_then(|url| url.rsplit('/').next())
@@ -341,10 +344,10 @@ pub fn discover_repos() -> Result<Discovery, String> {
         format!(
             "{alias}: contributionsCollection(from: \"{}\") {{
                pullRequestContributionsByRepository(maxRepositories: 50) {{
-                 repository {{ nameWithOwner isArchived }} contributions(first: 1) {{ totalCount }}
+                 repository {{ nameWithOwner isArchived isPrivate }} contributions(first: 1) {{ totalCount }}
                }}
                pullRequestReviewContributionsByRepository(maxRepositories: 50) {{
-                 repository {{ nameWithOwner isArchived }} contributions(first: 1) {{ totalCount }}
+                 repository {{ nameWithOwner isArchived isPrivate }} contributions(first: 1) {{ totalCount }}
                }}
              }}",
             utc_days_ago(days)
@@ -369,6 +372,9 @@ pub fn discover_repos() -> Result<Discovery, String> {
             };
             for item in items {
                 if item["repository"]["isArchived"].as_bool() == Some(true) {
+                    continue;
+                }
+                if crate::profile::hide_private() && item["repository"]["isPrivate"].as_bool() != Some(false) {
                     continue;
                 }
                 let Some(name) = item["repository"]["nameWithOwner"].as_str() else {

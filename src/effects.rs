@@ -231,6 +231,13 @@ fn on_sync(s: &mut App, clock: f64) -> bool {
                         Some(format!("Some rules did not sync: {}", out.failed_rules.join(" · ")));
                 }
                 out.prs.retain(|pr| !s.is_removed(&pr.repo));
+                if profile::hide_private() {
+                    s.private_repos
+                        .extend(out.prs.iter().filter(|pr| pr.private_repo).map(|pr| pr.repo.clone()));
+                    out.prs.retain(|pr| !pr.private_repo);
+                    let hidden = &s.private_repos;
+                    s.repos.retain(|r| !hidden.contains(&r.name));
+                }
                 for pr in &mut out.prs {
                     if let Some(previous) = s.prs.iter().find(|p| p.id == pr.id) {
                         pr.snoozed_until_hour = previous.snoozed_until_hour;

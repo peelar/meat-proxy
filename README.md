@@ -23,3 +23,11 @@ With Rust, Xcode Command Line Tools and the GitHub CLI installed:
 ```sh
 ./package.sh && ~/.cargo/bin/meat-proxy
 ```
+
+## Recording a demo
+
+`MEAT_PROXY_HIDE_PRIVATE=1` keeps private repositories out of the app: their pull requests, notifications and names. Start it from a terminal:
+
+```sh
+MEAT_PROXY_HIDE_PRIVATE=1 ~/.cargo/bin/meat-proxy
+```

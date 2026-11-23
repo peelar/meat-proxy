@@ -152,6 +152,8 @@ pub struct App {
     pub discovery_worker: Latest<Result<github::Discovery, String>>,
     pub verify_worker: Latest<Result<String, String>>,
     pub discovery: Option<github::Discovery>,
+    /// Repositories seen to be private while they are hidden (`MEAT_PROXY_HIDE_PRIVATE`).
+    pub private_repos: std::collections::HashSet<String>,
     pub discovery_error: Option<String>,
     pub add_repo_open: bool,
     pub confirm_remove: Option<String>,
@@ -302,6 +304,7 @@ pub(crate) fn init() -> App {
         typed: None,
         pace_stats: std::cell::RefCell::new(None),
         ignored: std::collections::HashSet::new(),
+        private_repos: std::collections::HashSet::new(),
         ignored_open: false,
         auth_worker: Latest::default(),
         fast_notif_worker: Latest::default(),
@@ -414,6 +417,12 @@ impl App {
         self.repos = snap.repos;
         self.rules = snap.rules;
         self.notifications = snap.notifications;
+        if profile::hide_private() {
+            // The saved data does not say which repositories are private. Show nothing of it
+            // until the first sync does.
+            self.prs.clear();
+            self.notifications.clear();
+        }
         self.draft_stale_hours = snap.draft_stale_hours;
         self.open_stale_hours = snap.open_stale_hours;
         self.onboarded = snap.onboarded;
