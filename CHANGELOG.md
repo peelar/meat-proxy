@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.21
 
 - Meat Proxy no longer shows up as "sh" in Login Items. Updates come from the app itself, and it removes the old background updater on its next check.
 - Approve stays visible on rows that ask for your review. Merge shows only when it can merge, and otherwise appears when you point at the row, with the reason.
