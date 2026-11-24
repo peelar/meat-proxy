@@ -533,11 +533,15 @@ const PR_FIELDS: &str = r#"
             committedDate
             statusCheckRollup {
               state
-              contexts(first: 20) {
+              contexts(first: 100) {
+                pageInfo { hasNextPage }
                 nodes {
                   __typename
-                  ... on CheckRun { name conclusion detailsUrl }
-                  ... on StatusContext { context state targetUrl }
+                  ... on CheckRun {
+                    name status conclusion detailsUrl databaseId
+                    checkSuite { app { id } workflowRun { workflow { id } } }
+                  }
+                  ... on StatusContext { context state targetUrl createdAt }
                 }
               }
             }
@@ -794,25 +798,73 @@ fn asked(node: &serde_json::Value, login: &str) -> Option<Ask> {
     })
 }
 
-/// The checks of the last commit that ended badly, with where to read why.
-fn failing_checks(node: &serde_json::Value) -> Vec<Check> {
-    let Some(contexts) =
-        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"].as_array()
-    else {
-        return Vec::new();
+/// GitHub's aggregate can stay FAILURE after a cancelled or failed run is replaced by a
+/// successful one. Use the latest attempt of each job, keeping different apps and workflows
+/// separate even when they use the same job name. A partial response still needs the rollup.
+fn ci_checks(node: &serde_json::Value) -> (CiStatus, Vec<Check>) {
+    let rollup = &node["commits"]["nodes"][0]["commit"]["statusCheckRollup"];
+    let aggregate = match rollup["state"].as_str() {
+        Some("SUCCESS") => CiStatus::Passing,
+        Some("PENDING" | "EXPECTED") => CiStatus::Pending,
+        Some("FAILURE" | "ERROR") => CiStatus::Failing,
+        _ => CiStatus::None,
     };
-    let mut out: Vec<Check> = Vec::new();
+    let Some(contexts) = rollup["contexts"]["nodes"].as_array() else {
+        return (aggregate, Vec::new());
+    };
+    let mut latest: Vec<&serde_json::Value> = Vec::new();
     for context in contexts {
+        let is_run = context["__typename"].as_str() == Some("CheckRun");
+        let previous = latest.iter().position(|known| {
+            known["__typename"] == context["__typename"]
+                && if is_run {
+                    known["name"] == context["name"]
+                        && known["checkSuite"]["app"]["id"] == context["checkSuite"]["app"]["id"]
+                        && known["checkSuite"]["workflowRun"]["workflow"]["id"]
+                            == context["checkSuite"]["workflowRun"]["workflow"]["id"]
+                } else {
+                    known["context"] == context["context"]
+                }
+        });
+        if let Some(index) = previous {
+            let newer = if is_run {
+                context["databaseId"].as_u64() > latest[index]["databaseId"].as_u64()
+            } else {
+                context["createdAt"].as_str() > latest[index]["createdAt"].as_str()
+            };
+            if newer {
+                latest[index] = context;
+            }
+        } else {
+            latest.push(context);
+        }
+    }
+    let mut out: Vec<Check> = Vec::new();
+    let mut pending = false;
+    let mut failing = false;
+    for context in latest {
         // A check run has a conclusion and a status context a state; one of the two is set.
         let (name, verdict, url) = if context["__typename"].as_str() == Some("CheckRun") {
-            (&context["name"], &context["conclusion"], &context["detailsUrl"])
+            (
+                &context["name"],
+                &context["conclusion"],
+                &context["detailsUrl"],
+            )
         } else {
-            (&context["context"], &context["state"], &context["targetUrl"])
+            (
+                &context["context"],
+                &context["state"],
+                &context["targetUrl"],
+            )
         };
         let failed = matches!(
             verdict.as_str(),
             Some("FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED")
         );
+        failing |= failed;
+        // Cancelled checks are unfinished work, not a code failure or a passing check.
+        pending |= !failed && !matches!(verdict.as_str(), Some("SUCCESS" | "NEUTRAL" | "SKIPPED"));
+        pending |= context["status"].as_str().is_some_and(|s| s != "COMPLETED");
         if let Some(name) = name.as_str().filter(|_| failed)
             && !out.iter().any(|known| known.name == name)
         {
@@ -822,7 +874,18 @@ fn failing_checks(node: &serde_json::Value) -> Vec<Check> {
             });
         }
     }
-    out
+    let status = if contexts.is_empty()
+        || rollup["contexts"]["pageInfo"]["hasNextPage"].as_bool() == Some(true)
+    {
+        aggregate
+    } else if failing {
+        CiStatus::Failing
+    } else if pending {
+        CiStatus::Pending
+    } else {
+        CiStatus::Passing
+    };
+    (status, out)
 }
 
 /// Review threads still open whose last comment is neither the author's nor a bot's: the ones
@@ -1073,21 +1136,7 @@ fn parse_graphql_pr(
         _ => ReviewState::None,
     };
 
-    let ci_status = match node
-        .get("commits")
-        .and_then(|c| c.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|a| a.first())
-        .and_then(|c| c.get("commit"))
-        .and_then(|c| c.get("statusCheckRollup"))
-        .and_then(|s| s.get("state"))
-        .and_then(|s| s.as_str())
-    {
-        Some("SUCCESS") => CiStatus::Passing,
-        Some("PENDING" | "EXPECTED") => CiStatus::Pending,
-        Some("FAILURE" | "ERROR") => CiStatus::Failing,
-        _ => CiStatus::None,
-    };
+    let (ci_status, failing_checks) = ci_checks(node);
 
     let mut reviewers = Vec::new();
     if let Some(reqs) = node
@@ -1266,7 +1315,7 @@ fn parse_graphql_pr(
                     .collect()
             })
             .unwrap_or_default(),
-        failing_checks: failing_checks(node),
+        failing_checks,
         can_update_branch: node["viewerCanUpdateBranch"].as_bool() == Some(true),
         unanswered_threads,
         asked: None,
@@ -1442,6 +1491,121 @@ pub fn infer_repos_from_prs(prs: &[PullRequest], existing: &[RepoConfig]) -> Vec
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn check_run(id: u64, verdict: Option<&str>) -> serde_json::Value {
+        json!({
+            "__typename": "CheckRun", "name": "E2E", "databaseId": id,
+            "status": if verdict.is_some() { "COMPLETED" } else { "IN_PROGRESS" },
+            "conclusion": verdict, "detailsUrl": format!("https://github.com/o/r/actions/runs/{id}"),
+            "checkSuite": { "app": { "id": "actions" }, "workflowRun": { "workflow": { "id": "e2e" } } }
+        })
+    }
+
+    fn pr_with_checks(checks: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({
+            "number": 211, "title": "t", "url": "https://github.com/o/r/pull/211", "state": "OPEN",
+            "repository": { "nameWithOwner": "o/r" }, "author": { "login": "me" },
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
+                "state": "FAILURE", "contexts": { "pageInfo": { "hasNextPage": false }, "nodes": checks }
+            } } }] }
+        })
+    }
+
+    #[test]
+    fn a_passing_replacement_clears_cancelled_and_failed_attempts() {
+        // configurator#211: GitHub kept FAILURE after a cancelled E2E run was replaced.
+        for old in ["CANCELLED", "FAILURE", "TIMED_OUT"] {
+            for checks in [
+                vec![check_run(10, Some(old)), check_run(20, Some("SUCCESS"))],
+                vec![check_run(20, Some("SUCCESS")), check_run(10, Some(old))],
+            ] {
+                let node = pr_with_checks(checks);
+                let pr = parse_graphql_pr(
+                    &node,
+                    Ownership::Mine,
+                    IncomingReason::NotIncoming,
+                    None,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(pr.ci_status, CiStatus::Passing);
+                assert!(pr.failing_checks.is_empty());
+                assert!(
+                    !pr.blockers()
+                        .contains(&crate::model::Blocker::ChecksFailing)
+                );
+                assert!(pr.agent_prompt().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn the_latest_attempt_can_be_pending_cancelled_or_failing() {
+        for (conclusion, expected) in [
+            (None, CiStatus::Pending),
+            (Some("CANCELLED"), CiStatus::Pending),
+            (Some("FAILURE"), CiStatus::Failing),
+            (Some("TIMED_OUT"), CiStatus::Failing),
+            (Some("ACTION_REQUIRED"), CiStatus::Failing),
+            (Some("NEUTRAL"), CiStatus::Passing),
+            (Some("SKIPPED"), CiStatus::Passing),
+        ] {
+            let node = pr_with_checks(vec![
+                check_run(10, Some("FAILURE")),
+                check_run(20, conclusion),
+            ]);
+            let (status, failed) = ci_checks(&node);
+            assert_eq!(status, expected, "{conclusion:?}");
+            assert_eq!(failed.len(), usize::from(expected == CiStatus::Failing));
+            if let Some(check) = failed.first() {
+                assert!(check.url.ends_with("/20"));
+            }
+        }
+    }
+
+    #[test]
+    fn same_named_jobs_from_other_workflows_or_apps_do_not_replace_failures() {
+        for path in ["/checkSuite/app/id", "/checkSuite/workflowRun/workflow/id"] {
+            let mut other = check_run(20, Some("SUCCESS"));
+            *other.pointer_mut(path).unwrap() = json!("other");
+            let (status, failed) =
+                ci_checks(&pr_with_checks(vec![check_run(10, Some("FAILURE")), other]));
+            assert_eq!(status, CiStatus::Failing);
+            assert_eq!(failed[0].name, "E2E");
+        }
+    }
+
+    #[test]
+    fn legacy_status_contexts_still_report_errors_and_pending_checks() {
+        for (state, expected) in [
+            ("ERROR", CiStatus::Failing),
+            ("FAILURE", CiStatus::Failing),
+            ("PENDING", CiStatus::Pending),
+            ("SUCCESS", CiStatus::Passing),
+        ] {
+            let node = pr_with_checks(vec![
+                check_run(20, Some("SUCCESS")),
+                json!({
+                    "__typename": "StatusContext", "context": "ci/vendor", "state": state,
+                    "targetUrl": "https://ci.example.com/1"
+                }),
+            ]);
+            let (status, failed) = ci_checks(&node);
+            assert_eq!(status, expected);
+            assert_eq!(failed.len(), usize::from(expected == CiStatus::Failing));
+        }
+    }
+
+    #[test]
+    fn incomplete_check_lists_keep_the_aggregate_status() {
+        let mut node = pr_with_checks(vec![check_run(20, Some("SUCCESS"))]);
+        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"]["hasNextPage"] =
+            json!(true);
+        assert_eq!(ci_checks(&node).0, CiStatus::Failing);
+        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"] = json!(null);
+        assert_eq!(ci_checks(&node).0, CiStatus::Failing);
+        assert_eq!(ci_checks(&json!({})).0, CiStatus::None);
+    }
 
     #[test]
     fn an_answer_with_data_and_errors_keeps_the_data() {

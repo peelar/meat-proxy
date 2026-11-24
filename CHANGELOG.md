@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- CI status follows the latest check runs, so a cancelled or failed attempt replaced by a passing run no longer says CI failing.
+
 ## 0.3.21
 
 - Meat Proxy no longer shows up as "sh" in Login Items. Updates come from the app itself, and it removes the old background updater on its next check.
