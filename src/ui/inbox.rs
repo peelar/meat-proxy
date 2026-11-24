@@ -1178,6 +1178,12 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
             (!prs.is_empty() || keep_empty).then_some((idx, repo, prs))
         })
         .collect();
+    let mut groups = groups;
+    // On Theirs the section holding the latest request comes first; pinned ones keep their place.
+    if s.filter == InboxFilter::Theirs {
+        let newest = |prs: &[PullRequest]| prs.iter().map(App::theirs_recency).min();
+        groups.sort_by_key(|(_, repo, prs)| (!repo.pinned, newest(prs).filter(|_| !repo.pinned)));
+    }
     let order: Vec<String> = groups.iter().map(|(_, r, _)| r.name.clone()).collect();
     let group_count = groups.len();
     // While a section is dragged every section folds to its header, so all of them share a height.

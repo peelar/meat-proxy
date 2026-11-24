@@ -1377,6 +1377,14 @@ impl App {
             .cloned()
             .collect();
 
+        if self.filter == InboxFilter::Theirs {
+            list.sort_by(|a, b| {
+                Self::theirs_recency(a)
+                    .cmp(&Self::theirs_recency(b))
+                    .then_with(|| b.number.cmp(&a.number))
+            });
+            return list;
+        }
         // Teammates before outsiders, then newest activity first: whatever has gone stale usually
         // has a reason.
         list.sort_by(|a, b| {
@@ -1386,6 +1394,15 @@ impl App {
                 .then_with(|| b.number.cmp(&a.number))
         });
         list
+    }
+
+    /// How recently someone else's pull request reached you, smallest first: ones that asked for
+    /// your review by name come before the rest, the latest request first, then newest activity.
+    pub(crate) fn theirs_recency(pr: &PullRequest) -> (bool, u64) {
+        match &pr.asked {
+            Some(ask) => (false, ask.hours_ago),
+            None => (true, pr.idle_hours),
+        }
     }
 
     /// Starts a sync, or, while one runs, one more after it: a new request would drop the running
