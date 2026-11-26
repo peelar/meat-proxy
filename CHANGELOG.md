@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Approve several pull requests in a row: each shows Approving… right away and finishes on its own, instead of later presses being ignored while the first one runs.
+
 ## 0.3.22
 
 - CI status follows the latest check runs, so a cancelled or failed attempt replaced by a passing run no longer says CI failing.

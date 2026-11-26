@@ -785,7 +785,7 @@ pub(crate) fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .iter()
         .find(|(a, _)| *a == pr.id)
         .map(|(_, at)| at.elapsed().as_secs_f32());
-    let busy = s.approving.contains(&pr.id);
+    let busy = s.is_approving(&pr.id);
     let (label, ink) = if let Some(age) = done {
         ("Approved", Ink::Done(age))
     } else if busy {

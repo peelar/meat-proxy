@@ -75,10 +75,10 @@ pub struct App {
     pub merging: Vec<String>,
     /// Rows opened to show the description.
     pub expanded: std::collections::HashSet<String>,
-    pub approving: Vec<String>,
+    /// Approvals on their way to GitHub, one job per pull request.
+    pub approve_jobs: RowJobs<(), Result<(), String>>,
     /// Approved from here, and when; the button stays done until a sync moves the row.
     pub approved: Vec<(String, std::time::Instant)>,
-    pub approve_worker: Latest<(String, Result<(), String>)>,
     /// Updating a branch or running failed checks again: the pull request, which, and how it went.
     pub unblock_worker: Latest<(String, Unblock, Result<(), String>)>,
     pub unblocking: Vec<String>,
@@ -250,6 +250,11 @@ impl<M, T: Send + 'static> RowJobs<M, T> {
         self.jobs.iter().any(|job| job.pr_id == pr_id)
     }
 
+    /// List a job as running without running it, for a preview scene, which never polls.
+    pub fn show(&mut self, pr_id: &str, meta: M) {
+        self.jobs.push(RowJob { pr_id: pr_id.to_owned(), meta, worker: Latest::default() });
+    }
+
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
@@ -355,9 +360,8 @@ pub(crate) fn init() -> App {
         merge_armed: None,
         merging: Vec::new(),
         expanded: std::collections::HashSet::new(),
-        approving: Vec::new(),
         approved: Vec::new(),
-        approve_worker: Latest::default(),
+        approve_jobs: RowJobs::default(),
         celebrations: Vec::new(),
         arrivals: Vec::new(),
         merge_worker: Latest::default(),
@@ -774,7 +778,7 @@ impl App {
 
     /// True while something the user started is still running on GitHub, which an update must not cut off.
     pub fn is_working(&self) -> bool {
-        self.approve_worker.is_pending()
+        self.approve_jobs.is_pending()
             || self.unblock_worker.is_pending()
             || self.merge_worker.is_pending()
             || self.resolve_worker.is_pending()
@@ -1061,7 +1065,16 @@ impl App {
 
     /// One press approves. Merge asks for a second press; an approval only adds a review.
     pub fn press_approve(&mut self, pr_id: &str) {
-        if !self.approving.is_empty() || self.approved.iter().any(|(id, _)| id == pr_id) {
+        self.approve_with(pr_id, github::approve_pr);
+    }
+
+    /// Approve through `approve`, which tests swap for one that never reaches GitHub.
+    pub(crate) fn approve_with(
+        &mut self,
+        pr_id: &str,
+        approve: fn(&str, u64, &str) -> Result<(), String>,
+    ) {
+        if self.is_approving(pr_id) || self.approved.iter().any(|(id, _)| id == pr_id) {
             return;
         }
         let Some(pr) = self.prs.iter().find(|p| p.id == pr_id) else {
@@ -1070,11 +1083,9 @@ impl App {
         if self.preview {
             return;
         }
-        self.approving.push(pr_id.to_owned());
-        let (id, repo, number, head) =
-            (pr.id.clone(), pr.repo.clone(), pr.number, pr.head_oid.clone());
-        self.approve_worker
-            .request((), move |()| (id, github::approve_pr(&repo, number, &head)));
+        let (repo, number, head) = (pr.repo.clone(), pr.number, pr.head_oid.clone());
+        self.approve_jobs
+            .start(pr_id, (), self.waker.as_ref(), move || approve(&repo, number, &head));
     }
 
     /// Clear what blocks a pull request. One press is enough, unlike Merge and Approve: both
@@ -1181,6 +1192,11 @@ impl App {
         self.auto_merge_jobs.start(pr_id, enable, self.waker.as_ref(), move || {
             github::set_auto_merge(&url, method, enable, &head)
         });
+    }
+
+    /// Whether its approval is on its way to GitHub.
+    pub fn is_approving(&self, pr_id: &str) -> bool {
+        self.approve_jobs.contains(pr_id)
     }
 
     /// Whether its auto-merge is being turned on or off right now.

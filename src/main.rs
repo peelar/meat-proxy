@@ -738,7 +738,7 @@ mod tests {
         assert!(!state.expanded.contains(&id));
 
         state.press_approve(&id);
-        assert!(state.approving.is_empty(), "a preview never calls GitHub");
+        assert!(state.approve_jobs.is_empty(), "a preview never calls GitHub");
     }
 
     /// A button stays visible when it is what the row asks of you; one that can do nothing yet

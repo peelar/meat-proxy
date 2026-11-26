@@ -543,13 +543,23 @@ pub(crate) static SCENES: &[Scene] = &[
                 .push((pr.id.clone(), std::time::Instant::now()));
         }
     }),
-    // Approve and Merge mid-flight: one approving, one just landed, and Merge armed.
+    // Approve and Merge mid-flight: three approving at once, one just landed, and Merge armed.
     ("buttons", |s| {
         seed_preview(s);
         s.page = Page::Inbox;
         s.filter = InboxFilter::Inbox;
         let ago = |secs: f32| std::time::Instant::now() - std::time::Duration::from_secs_f32(secs);
-        s.approving = vec!["acme/engine#418".into()];
+        let review_requests: Vec<String> = s
+            .prs
+            .iter()
+            .filter(|pr| pr.incoming_reason == model::IncomingReason::AssignedOrReviewRequested)
+            .map(|pr| pr.id.clone())
+            .filter(|id| id != "acme/cli#904")
+            .take(3)
+            .collect();
+        for id in &review_requests {
+            s.approve_jobs.show(id, ());
+        }
         s.approved = vec![("acme/cli#904".into(), ago(0.6))];
         s.merge_armed = Some(("acme/cli#908".into(), ago(1.0)));
     }),

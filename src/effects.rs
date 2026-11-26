@@ -49,7 +49,6 @@ pub(crate) fn setup(s: &mut App, waker: rune::Waker) {
     s.verify_worker.set_waker(waker.clone());
     s.waker = Some(waker.clone());
     s.resolve_worker.set_waker(waker.clone());
-    s.approve_worker.set_waker(waker.clone());
     s.unblock_worker.set_waker(waker.clone());
     s.autonomy_worker.set_waker(waker.clone());
     s.agent_worker.set_waker(waker.clone());
@@ -595,8 +594,9 @@ fn on_actions(s: &mut App) -> bool {
         }
         changed = true;
     }
-    if let Some((id, result)) = s.approve_worker.take() {
-        s.approving.retain(|a| *a != id);
+    let (approvals, landed) = s.approve_jobs.take_landed();
+    changed |= landed;
+    for (id, (), result) in approvals {
         match result {
             Ok(()) => {
                 s.record_pace(pace::Kind::Approve, &id);
@@ -610,7 +610,6 @@ fn on_actions(s: &mut App) -> bool {
     // A job that panicked settles with nothing to land; its button must not stay busy for good.
     for (pending, busy) in [
         (s.merge_worker.is_pending(), &mut s.merging),
-        (s.approve_worker.is_pending(), &mut s.approving),
         (s.unblock_worker.is_pending(), &mut s.unblocking),
     ] {
         if !pending && !busy.is_empty() {
@@ -699,5 +698,32 @@ mod tests {
         }
         assert!(s.auto_merge_jobs.is_empty(), "every job landed, none was dropped for a newer one");
         assert!(s.status_banner.as_deref().is_some_and(|b| b.contains("Could not turn auto-merge on")));
+    }
+
+    #[test]
+    fn approvals_pressed_back_to_back_each_show_busy_and_land() {
+        let mut s = init();
+        s.prs = scenes::demo_prs();
+        let ids: Vec<String> = s.prs.iter().take(3).map(|pr| pr.id.clone()).collect();
+        let slow = |_: &str, _: u64, _: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Ok(())
+        };
+        for id in &ids {
+            s.approve_with(id, slow);
+        }
+        assert!(ids.iter().all(|id| s.is_approving(id)), "every press shows Approving… at once");
+        for _ in 0..200 {
+            on_actions(&mut s);
+            if !s.is_working() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        on_actions(&mut s);
+        for id in &ids {
+            assert!(!s.is_approving(id));
+            assert!(s.approved.iter().any(|(a, _)| a == id), "{id} landed as Approved");
+        }
     }
 }
