@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Messages at the top of the Inbox wrap instead of running off the edge, and errors show in red with what went wrong on its own lines.
+
 ## 0.3.24
 
 - Stacked pull requests show as a stack in the Inbox tab too, each one indented under the pull request it builds on.

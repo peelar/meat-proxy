@@ -402,6 +402,21 @@ pub(crate) static SCENES: &[Scene] = &[
         seed_preview(s);
         s.page = Page::Inbox;
     }),
+    // A failed Fix whose agent printed long lines, and an outcome that is not an error.
+    ("banner-error", |s| {
+        run_scene(s, "inbox");
+        s.status_banner = Some(Notice::error(
+            "Fix failed on acme/engine#418.",
+            "Codex failed: rPromptSubmit\nhook: UserPromptSubmit Completed\nERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 1:04 PM.",
+        ));
+    }),
+    ("banner-info", |s| {
+        run_scene(s, "inbox");
+        s.status_banner = Some(Notice::info(
+            "The agent pushed nothing to acme/engine#418.",
+            "The checks already pass on the latest commit; there was nothing to fix.\n(clone kept in /Users/me/Library/Caches/meat-proxy/acme-engine-418)",
+        ));
+    }),
     ("update-ready", |s| {
         run_scene(s, "inbox");
         s.update.ready = Some("v0.3.18".into());

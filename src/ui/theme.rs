@@ -293,3 +293,28 @@ pub(crate) fn armed_left(armed: &Option<(String, std::time::Instant)>, id: &str)
 pub(crate) fn plural(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
+
+/// The status banner: the headline, then what the tool said, both wrapping. An error reads red.
+pub(crate) fn notice_view(k: &Kit, notice: &Notice) -> El {
+    let c = &k.c;
+    let (headline_ink, detail_ink) =
+        if notice.error { (c.danger.fg, c.text_base) } else { (c.text_base, c.text_muted) };
+    let mut body = col().grow(1.0).min_w(0.0).gap(4.0).child(
+        text(notice.headline.clone())
+            .wrap()
+            .font(k.ty.ui_medium)
+            .color(headline_ink),
+    );
+    if !notice.detail.is_empty() {
+        body = body.child(text(notice.detail.clone()).wrap().font(k.ty.small).color(detail_ink));
+    }
+    body
+}
+
+/// The frame around [`notice_view`]: the danger tint for an error, the plain layer otherwise.
+pub(crate) fn notice_frame(k: &Kit, notice: &Notice) -> El {
+    let c = &k.c;
+    let (fill, edge) =
+        if notice.error { (c.danger.bg, c.danger.border) } else { (c.layer_01, c.border_weak) };
+    row().w_full().px(12.0).py(8.0).gap(12.0).radius(6.0).fill(fill).border(1.0, edge)
+}

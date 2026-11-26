@@ -230,13 +230,8 @@ pub(crate) fn onboarding_page_view(s: &App, k: &Kit, intro: Option<f32>) -> El {
                 .color(c.text_muted),
         );
 
-    if let Some(message) = &s.status_banner {
-        doc = doc.child(
-            text(message.clone())
-                .wrap()
-                .font(k.ty.small)
-                .color(c.text_muted),
-        );
+    if let Some(notice) = &s.status_banner {
+        doc = doc.child(notice_frame(k, notice).child(notice_view(k, notice)));
     }
 
     let (glyph, status) = if let Some(username) = connected {
@@ -579,12 +574,7 @@ pub(crate) fn add_repository_panel(s: &App, k: &Kit, framed: bool) -> El {
             ),
     );
     match &s.status_banner {
-        Some(message) if !framed => panel.child(
-            text(message.clone())
-                .wrap()
-                .font(k.ty.small)
-                .color(c.text_muted),
-        ),
+        Some(notice) if !framed => panel.child(notice_frame(k, notice).child(notice_view(k, notice))),
         _ => panel,
     }
 }

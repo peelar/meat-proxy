@@ -150,8 +150,9 @@ fn on_boot(s: &mut App) -> bool {
             Ok(snap) => s.apply_snapshot(snap),
             Err(error) => {
                 s.boot_failed = true;
-                s.status_banner = Some(format!(
-                    "Could not read saved settings, so nothing will be saved over them. Quit and open Meat Proxy again. {error}"
+                s.status_banner = Some(Notice::error(
+                    "Could not read saved settings, so nothing will be saved over them. Quit and open Meat Proxy again.",
+                    error.to_string(),
                 ));
             }
         }
@@ -198,7 +199,7 @@ fn on_setup(s: &mut App, tx: &mut Tx) -> bool {
                 s.new_repo = TextEdit::new("");
                 s.add_repo(&name);
             }
-            Err(error) => s.status_banner = Some(error),
+            Err(error) => s.status_banner = Some(Notice::error(error, "")),
         }
         changed = true;
     }
@@ -209,7 +210,7 @@ fn on_setup(s: &mut App, tx: &mut Tx) -> bool {
                 s.status_banner = None;
                 s.trigger_sync();
             }
-            Err(error) => s.status_banner = Some(format!("Could not sign in. {error}")),
+            Err(error) => s.status_banner = Some(Notice::error("Could not sign in.", error)),
         }
         changed = true;
     } else if s.auth_worker.is_pending() {
@@ -229,7 +230,7 @@ fn on_sync(s: &mut App, clock: f64) -> bool {
             Ok(mut out) => {
                 if !out.failed_rules.is_empty() {
                     s.status_banner =
-                        Some(format!("Some rules did not sync: {}", out.failed_rules.join(" · ")));
+                        Some(Notice::error("Some rules did not sync.", out.failed_rules.join("\n")));
                 }
                 out.prs.retain(|pr| !s.is_removed(&pr.repo));
                 if profile::hide_private() {
@@ -463,7 +464,7 @@ fn on_autonomy(s: &mut App) -> bool {
             let _ = db.set_setting("autonomy_done", &done.join("\n"));
         }
         if !errors.is_empty() {
-            s.status_banner = Some(format!("Autonomous: {}", errors.join(" · ")));
+            s.status_banner = Some(Notice::error("Autonomous actions failed.", errors.join("\n")));
         }
         s.trigger_sync();
         changed = true;
@@ -488,9 +489,9 @@ fn on_actions(s: &mut App) -> bool {
                 s.trigger_sync();
             }
             Err(error) => {
-                s.status_banner = Some(format!(
-                    "Could not turn auto-merge {}. {error}",
-                    if enable { "on" } else { "off" }
+                s.status_banner = Some(Notice::error(
+                    format!("Could not turn auto-merge {}.", if enable { "on" } else { "off" }),
+                    error,
                 ));
             }
         }
@@ -531,7 +532,7 @@ fn on_actions(s: &mut App) -> bool {
                 s.record_pace(pace::Kind::Merge, &id);
                 s.celebrations.push((id, std::time::Instant::now()));
             }
-            Err(error) => s.status_banner = Some(format!("Could not merge. {error}")),
+            Err(error) => s.status_banner = Some(Notice::error("Could not merge.", error)),
         }
         changed = true;
     }
@@ -553,11 +554,14 @@ fn on_actions(s: &mut App) -> bool {
                 }
             }
             Err(error) => {
-                s.status_banner = Some(format!(
-                    "Could not {}. {error}",
-                    match what {
-                        Unblock::UpdateBranch => "update the branch",
-                    }
+                s.status_banner = Some(Notice::error(
+                    format!(
+                        "Could not {}.",
+                        match what {
+                            Unblock::UpdateBranch => "update the branch",
+                        }
+                    ),
+                    error,
                 ));
             }
         }
@@ -577,11 +581,9 @@ fn on_actions(s: &mut App) -> bool {
                         s.trigger_sync();
                     }
                     agent::Outcome::NothingPushed { said, folder } => {
-                        s.status_banner = Some(format!(
-                            "The agent pushed nothing to {}#{}. {said} (clone kept in {})",
-                            pr.repo,
-                            pr.number,
-                            folder.display()
+                        s.status_banner = Some(Notice::info(
+                            format!("The agent pushed nothing to {}#{}.", pr.repo, pr.number),
+                            format!("{said}\n(clone kept in {})", folder.display()),
                         ));
                     }
                 }
@@ -589,7 +591,7 @@ fn on_actions(s: &mut App) -> bool {
             Err(error) => {
                 let at = format!(" on {}#{}", pr.repo, pr.number);
                 notify::post(&format!("agent-{id}"), crate::profile::app_name(), &format!("The agent failed{at}"), Some(&pr.url), sound_on);
-                s.status_banner = Some(format!("Fix failed{at}. {error}"));
+                s.status_banner = Some(Notice::error(format!("Fix failed{at}."), error));
             }
         }
         changed = true;
@@ -603,7 +605,7 @@ fn on_actions(s: &mut App) -> bool {
                 s.approved.push((id, std::time::Instant::now()));
                 s.trigger_sync();
             }
-            Err(error) => s.status_banner = Some(format!("Could not approve. {error}")),
+            Err(error) => s.status_banner = Some(Notice::error("Could not approve.", error)),
         }
         changed = true;
     }
@@ -697,7 +699,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(s.auto_merge_jobs.is_empty(), "every job landed, none was dropped for a newer one");
-        assert!(s.status_banner.as_deref().is_some_and(|b| b.contains("Could not turn auto-merge on")));
+        assert!(s.status_banner.as_ref().is_some_and(|b| b.error && b.headline.contains("Could not turn auto-merge on")));
     }
 
     #[test]

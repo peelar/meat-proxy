@@ -137,7 +137,7 @@ mod tests {
         land(&mut s, |s| s.sync_worker.is_pending());
         assert_eq!(s.prs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [kept.id.as_str()]);
         assert_eq!(s.prs[0].snoozed_until_hour, u64::MAX, "the snooze outlives the sync");
-        assert!(s.status_banner.as_deref().is_some_and(|b| b.contains("Release blockers")));
+        assert!(s.status_banner.as_ref().is_some_and(|b| b.error && b.detail.contains("Release blockers")));
     }
 
     #[test]

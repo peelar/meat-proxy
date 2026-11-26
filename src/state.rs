@@ -49,6 +49,26 @@ pub enum Page {
     Inbox,
 }
 
+/// The message across the top of the window: what went wrong, or what happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    /// One line saying what happened, like "Could not merge."
+    pub headline: String,
+    /// What the tool behind it said, kept as printed. Empty when there is nothing more.
+    pub detail: String,
+    pub error: bool,
+}
+
+impl Notice {
+    pub fn error(headline: impl Into<String>, detail: impl Into<String>) -> Notice {
+        Notice { headline: headline.into(), detail: detail.into().trim().to_owned(), error: true }
+    }
+
+    pub fn info(headline: impl Into<String>, detail: impl Into<String>) -> Notice {
+        Notice { headline: headline.into(), detail: detail.into().trim().to_owned(), error: false }
+    }
+}
+
 pub struct App {
     pub(crate) avatars: avatars::Avatars,
     pub(crate) settings_open: bool,
@@ -120,7 +140,7 @@ pub struct App {
     pub sync_status: SyncStatus,
     pub last_notif_modified: Option<String>,
     pub search_query: TextEdit,
-    pub status_banner: Option<String>,
+    pub status_banner: Option<Notice>,
     pub update: Update,
     /// The saved data, opened on first use and kept open; see `App::db`.
     pub(crate) db: std::cell::OnceCell<Database>,
@@ -794,7 +814,7 @@ impl App {
         };
         match update::install_and_relaunch(&tag) {
             Ok(()) => std::process::exit(0),
-            Err(e) => self.status_banner = Some(format!("Could not update: {e}")),
+            Err(e) => self.status_banner = Some(Notice::error("Could not update.", e.to_string())),
         }
     }
 
@@ -1539,7 +1559,7 @@ impl App {
                 .map_err(|e| e.to_string())
             });
             if let Err(error) = saved {
-                self.status_banner = Some(format!("Could not save setup. {error}"));
+                self.status_banner = Some(Notice::error("Could not save setup.", error));
                 return;
             }
         }

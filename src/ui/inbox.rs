@@ -1080,17 +1080,9 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
         .child(inbox_tools(s, k));
     if let Some(msg) = &s.status_banner {
         doc = doc.child(
-            row()
+            notice_frame(k, msg)
                 .key("toast-status-banner")
-                .w_full()
-                .px(12.0)
-                .py(6.0)
-                .radius(6.0)
-                .fill(c.layer_01)
-                .border(1.0, c.border_weak)
-                .center_y()
-                .justify_between()
-                .child(text(msg.clone()).font(k.ty.small).color(c.text_muted))
+                .child(notice_view(k, msg))
                 .child(
                     Button::new("Dismiss")
                         .variant(ButtonVariant::Ghost)
