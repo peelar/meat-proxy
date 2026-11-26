@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.24
 
 - Stacked pull requests show as a stack in the Inbox tab too, each one indented under the pull request it builds on.
 
