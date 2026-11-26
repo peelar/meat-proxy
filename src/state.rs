@@ -91,10 +91,8 @@ pub struct App {
     /// Pull requests a sync just brought in, with when each starts to appear.
     pub arrivals: Vec<(String, std::time::Instant)>,
     pub merge_worker: Latest<(String, Result<(), String>)>,
-    /// Turning auto-merge on or off: the pull request, which, and how it went.
-    /// One job per pull request whose auto-merge is being changed. A `Latest` keeps only its
-    /// newest request, so each press gets its own: three at once finish independently.
-    pub auto_merge_jobs: Vec<AutoMergeJob>,
+    /// Turning auto-merge on or off, one job per pull request: which way, and how it went.
+    pub auto_merge_jobs: RowJobs<bool, Result<(), String>>,
     /// Wakes the app when a job lands; set once the app is up.
     pub waker: Option<rune::Waker>,
     /// Pull requests with auto-merge on, and the ones GitHub merged by itself (shown faded).
@@ -211,11 +209,74 @@ impl Default for Update {
     }
 }
 
-/// A request to turn auto-merge on or off for one pull request, and the thread running it.
-pub struct AutoMergeJob {
-    pub id: String,
-    pub enable: bool,
-    pub worker: Latest<Result<(), String>>,
+/// A row button's background jobs, one per pull request. A `Latest` keeps only its newest
+/// request, so a shared one would drop every press but the last: each press gets its own, and
+/// presses on several rows run side by side.
+pub struct RowJobs<M, T: Send + 'static> {
+    jobs: Vec<RowJob<M, T>>,
+}
+
+struct RowJob<M, T: Send + 'static> {
+    pr_id: String,
+    meta: M,
+    worker: Latest<T>,
+}
+
+impl<M, T: Send + 'static> Default for RowJobs<M, T> {
+    fn default() -> Self {
+        Self { jobs: Vec::new() }
+    }
+}
+
+impl<M, T: Send + 'static> RowJobs<M, T> {
+    /// Run `work` in the background for this pull request; `waker` wakes the app when it lands.
+    pub fn start(
+        &mut self,
+        pr_id: &str,
+        meta: M,
+        waker: Option<&rune::Waker>,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) {
+        let worker = match waker {
+            Some(waker) => Latest::new(waker.clone()),
+            None => Latest::default(),
+        };
+        worker.request((), move |()| work());
+        self.jobs.push(RowJob { pr_id: pr_id.to_owned(), meta, worker });
+    }
+
+    /// Whether a job for this pull request is running.
+    pub fn contains(&self, pr_id: &str) -> bool {
+        self.jobs.iter().any(|job| job.pr_id == pr_id)
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+
+    /// Whether any job is still running on GitHub.
+    pub fn is_pending(&self) -> bool {
+        self.jobs.iter().any(|job| job.worker.is_pending())
+    }
+
+    /// The jobs that finished since the last call, each with its answer. A job that settled
+    /// with no answer panicked: it is dropped, so its button does not stay busy for good.
+    /// The flag says whether any job left the list.
+    pub fn take_landed(&mut self) -> (Vec<(String, M, T)>, bool) {
+        let before = self.jobs.len();
+        let mut landed = Vec::new();
+        let mut running = Vec::new();
+        for job in self.jobs.drain(..) {
+            match job.worker.take() {
+                Some(answer) => landed.push((job.pr_id, job.meta, answer)),
+                None if job.worker.is_pending() => running.push(job),
+                None => {}
+            }
+        }
+        self.jobs = running;
+        (landed, self.jobs.len() != before)
+    }
 }
 
 /// What the Pace panel's numbers depend on: how many events, the newest one's time, the minute.
@@ -300,7 +361,7 @@ pub(crate) fn init() -> App {
         celebrations: Vec::new(),
         arrivals: Vec::new(),
         merge_worker: Latest::default(),
-        auto_merge_jobs: Vec::new(),
+        auto_merge_jobs: RowJobs::default(),
         waker: None,
         tracked: Vec::new(),
         resolve_worker: Latest::default(),
@@ -719,7 +780,7 @@ impl App {
             || self.resolve_worker.is_pending()
             || self.autonomy_worker.is_pending()
             || self.agent_worker.is_pending()
-            || self.auto_merge_jobs.iter().any(|j| j.worker.is_pending())
+            || self.auto_merge_jobs.is_pending()
     }
 
     /// Swap in the downloaded release and restart into it.
@@ -1117,21 +1178,14 @@ impl App {
             return;
         };
         let (url, method, head) = (pr.url.clone(), pr.merge_method, pr.head_oid.clone());
-        let worker = match &self.waker {
-            Some(waker) => Latest::new(waker.clone()),
-            None => Latest::default(),
-        };
-        worker.request((), move |()| github::set_auto_merge(&url, method, enable, &head));
-        self.auto_merge_jobs.push(AutoMergeJob {
-            id: pr_id.to_owned(),
-            enable,
-            worker,
+        self.auto_merge_jobs.start(pr_id, enable, self.waker.as_ref(), move || {
+            github::set_auto_merge(&url, method, enable, &head)
         });
     }
 
     /// Whether its auto-merge is being turned on or off right now.
     pub fn is_auto_merging(&self, pr_id: &str) -> bool {
-        self.auto_merge_jobs.iter().any(|job| job.id == pr_id)
+        self.auto_merge_jobs.contains(pr_id)
     }
 
     pub(crate) fn save_tracked_row(&self, t: &model::Tracked) {
