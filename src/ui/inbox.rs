@@ -1319,7 +1319,8 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
                     .padding(12.0),
             );
         }
-        for (idx, item) in stacks::rows(prs, &s.prs).iter().enumerate() {
+        let visible: Vec<&PullRequest> = prs.iter().collect();
+        for (idx, item) in stacks::rows(&visible, &s.prs).iter().enumerate() {
             if idx > 0 {
                 list = list.child(el().w_full().h(1.0).fill(c.border_weak));
             }
@@ -1563,20 +1564,16 @@ pub(crate) fn flat_inbox(s: &App, k: &Kit) -> El {
             list = list.raise().offset_motion(rune::Anim::INSTANT);
         }
         if !folded {
-            for (idx, pr) in shown_items
+            let in_section: Vec<&PullRequest> = shown_items
                 .iter()
+                .copied()
                 .filter(|pr| group(pr).is_some_and(|(id, _)| id == position))
-                .enumerate()
-            {
+                .collect();
+            for (idx, item) in stacks::rows(&in_section, &s.prs).iter().enumerate() {
                 if idx > 0 {
                     list = list.child(el().w_full().h(1.0).fill(c.border_weak));
                 }
-                let item = stacks::StackRow {
-                    pr,
-                    depth: 0,
-                    parent: None,
-                };
-                list = list.child(minimal_pr_row(s, &item, k, true));
+                list = list.child(minimal_pr_row(s, item, k, true));
             }
             let mut first = !items
                 .iter()

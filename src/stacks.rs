@@ -7,22 +7,19 @@ pub struct StackRow<'a> {
     pub parent: Option<u64>,
 }
 
-/// Input is one repository's visible PRs in inbox priority order.
-pub fn rows<'a>(visible: &'a [PullRequest], inbox: &[PullRequest]) -> Vec<StackRow<'a>> {
-    let Some(first) = visible.first() else {
-        return Vec::new();
-    };
+/// Input is visible PRs in inbox priority order, from one repository or several.
+pub fn rows<'a>(visible: &[&'a PullRequest], inbox: &[PullRequest]) -> Vec<StackRow<'a>> {
     let mut heads = HashMap::new();
-    for pr in inbox.iter().filter(|pr| pr.repo == first.repo) {
+    for pr in inbox {
         if pr
             .head_repo
             .as_deref()
-            .is_some_and(|repo| repo.eq_ignore_ascii_case(&first.repo))
+            .is_some_and(|repo| repo.eq_ignore_ascii_case(&pr.repo))
             && !pr.head_ref.is_empty()
         {
             // A branch with two open PRs has no unique parent, even if one is filtered out.
             heads
-                .entry(pr.head_ref.as_str())
+                .entry((pr.repo.as_str(), pr.head_ref.as_str()))
                 .and_modify(|id| *id = None)
                 .or_insert(Some(pr.number));
         }
@@ -30,14 +27,15 @@ pub fn rows<'a>(visible: &'a [PullRequest], inbox: &[PullRequest]) -> Vec<StackR
     let positions: HashMap<_, _> = visible
         .iter()
         .enumerate()
-        .map(|(i, pr)| (pr.number, i))
+        .map(|(i, pr)| ((pr.repo.as_str(), pr.number), i))
         .collect();
     let parents: Vec<_> = visible
         .iter()
         .map(|pr| {
-            let number = heads.get(pr.stack_base.as_deref()?)?.as_ref()?;
+            let base = pr.stack_base.as_deref()?;
+            let number = heads.get(&(pr.repo.as_str(), base))?.as_ref()?;
             positions
-                .get(number)
+                .get(&(pr.repo.as_str(), *number))
                 .copied()
                 .filter(|_| *number != pr.number)
         })
@@ -67,7 +65,7 @@ pub fn rows<'a>(visible: &'a [PullRequest], inbox: &[PullRequest]) -> Vec<StackR
             // Mutually targeted branches are not a stack.
             seen.insert(i);
             result.push(StackRow {
-                pr: &visible[i],
+                pr: visible[i],
                 depth: 0,
                 parent: None,
             });
@@ -79,7 +77,7 @@ pub fn rows<'a>(visible: &'a [PullRequest], inbox: &[PullRequest]) -> Vec<StackR
                 continue;
             }
             result.push(StackRow {
-                pr: &visible[index],
+                pr: visible[index],
                 depth,
                 parent: parents[index].map(|p| visible[p].number),
             });
@@ -102,13 +100,14 @@ mod tests {
     fn urgent_child_brings_its_stack_forward_and_hidden_parent_stays_hidden() {
         let all = crate::scenes::demo_prs();
         let by_number = |id| all.iter().find(|p| p.number == id).unwrap().clone();
-        let visible = vec![
+        let owned = [
             by_number(421),
             by_number(397),
             by_number(418),
             by_number(412),
         ];
-        let layout = |prs: &[PullRequest]| {
+        let visible: Vec<_> = owned.iter().collect();
+        let layout = |prs: &[&PullRequest]| {
             rows(prs, &all)
                 .iter()
                 .map(|r| (r.pr.number, r.depth))
@@ -125,18 +124,42 @@ mod tests {
             .into_iter()
             .filter(|p| matches!(p.number, 412 | 418))
             .collect();
+        let depths = |visible: &[PullRequest], inbox: &[PullRequest]| {
+            let refs: Vec<_> = visible.iter().collect();
+            rows(&refs, inbox).iter().map(|r| r.depth).collect::<Vec<_>>()
+        };
         prs[0].head_repo = Some("fork/rune".into());
-        assert!(rows(&prs, &prs).iter().all(|r| r.depth == 0));
+        assert_eq!(depths(&prs, &prs), [0, 0]);
         prs[0].head_repo = Some(prs[0].repo.clone());
         let mut ambiguous = prs.clone();
         let mut duplicate = prs[0].clone();
         duplicate.number = 999;
         ambiguous.push(duplicate);
-        assert!(rows(&prs, &ambiguous).iter().all(|r| r.depth == 0));
+        assert_eq!(depths(&prs, &ambiguous), [0, 0]);
         prs[0].stack_base = Some(prs[1].head_ref.clone());
+        assert_eq!(depths(&prs, &prs), [0, 0]);
+    }
+
+    #[test]
+    fn a_section_mixing_repositories_still_shows_each_stack() {
+        let all = crate::scenes::demo_prs();
+        let mut prs: Vec<_> = all
+            .into_iter()
+            .filter(|p| matches!(p.number, 412 | 418))
+            .collect();
+        // Same number and base branch in another repository, whose base has no open PR there.
+        let mut elsewhere = prs.iter().find(|p| p.number == 412).unwrap().clone();
+        elsewhere.repo = "acme/other".into();
+        elsewhere.head_repo = Some(elsewhere.repo.clone());
+        prs.insert(0, elsewhere);
+        let refs: Vec<_> = prs.iter().collect();
+        let layout: Vec<_> = rows(&refs, &prs)
+            .iter()
+            .map(|r| (r.pr.repo.as_str(), r.pr.number, r.depth))
+            .collect();
         assert_eq!(
-            rows(&prs, &prs).iter().map(|r| r.depth).collect::<Vec<_>>(),
-            [0, 0]
+            layout,
+            [("acme/other", 412, 0), ("acme/engine", 418, 0), ("acme/engine", 412, 1)]
         );
     }
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Stacked pull requests show as a stack in the Inbox tab too, each one indented under the pull request it builds on.
+
 ## 0.3.23
 
 - Approve several pull requests in a row: each shows Approving… right away and finishes on its own, instead of later presses being ignored while the first one runs.
