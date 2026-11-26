@@ -8,4 +8,4 @@ Every push to `main` is a release, so `CHANGELOG.md` is written as you commit, n
 
 # Shipping
 
-No pull requests. Commit on a branch, then push to `main` only after the user approves that push. Every push to `main` releases, so ask before each one and never push unprompted.
+Work on `main` and push to `main`. No branches, no pull requests. Every push to `main` is a release.
