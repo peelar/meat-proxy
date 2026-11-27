@@ -18,10 +18,18 @@ pub fn hide_private() -> bool {
 
 /// The name shown to the user.
 pub fn app_name() -> &'static str {
-    if is_dev() { "Meat Proxy Dev" } else { "Meat Proxy" }
+    if is_dev() {
+        "Meat Proxy Dev"
+    } else {
+        "Meat Proxy"
+    }
 }
 
 /// The folder name under `~/.config` and the caches directory.
 pub fn dir_name() -> &'static str {
-    if is_dev() { "meat-proxy-dev" } else { "meat-proxy" }
+    if is_dev() {
+        "meat-proxy-dev"
+    } else {
+        "meat-proxy"
+    }
 }

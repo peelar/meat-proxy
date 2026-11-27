@@ -139,7 +139,10 @@ pub fn merge(pr: &PullRequest, now: i64) -> Event {
 /// `event` is faster than every other approval (or merge) of the seven days before it. Beating
 /// nothing is no record, a tie is none either, and a bold approval never sets one.
 pub fn new_best(events: &[Event], event: &Event) -> bool {
-    let Some(wait) = event.wait_minutes.filter(|_| event.verdict != Verdict::Bold) else {
+    let Some(wait) = event
+        .wait_minutes
+        .filter(|_| event.verdict != Verdict::Bold)
+    else {
         return false;
     };
     let mut earlier = events
@@ -408,11 +411,20 @@ mod tests {
             ev(1, Kind::Merge, 3, Verdict::Quick),
         ];
         let stats = Stats::new(&events, DateTime::parse_from_rfc3339(NOW).unwrap());
-        assert_eq!((stats.fastest_approval, stats.fastest_merge), (Some(6), Some(3)));
+        assert_eq!(
+            (stats.fastest_approval, stats.fastest_merge),
+            (Some(6), Some(3))
+        );
         assert!(new_best(&events, &ev(0, Kind::Approve, 5, Verdict::Quick)));
-        assert!(!new_best(&events, &ev(0, Kind::Approve, 6, Verdict::Quick)), "a tie");
+        assert!(
+            !new_best(&events, &ev(0, Kind::Approve, 6, Verdict::Quick)),
+            "a tie"
+        );
         assert!(!new_best(&events, &ev(0, Kind::Approve, 2, Verdict::Bold)));
-        assert!(!new_best(&events, &ev(0, Kind::Merge, 4, Verdict::Quick)), "slower");
+        assert!(
+            !new_best(&events, &ev(0, Kind::Merge, 4, Verdict::Quick)),
+            "slower"
+        );
         assert!(
             !new_best(&events[..1], &ev(0, Kind::Approve, 5, Verdict::Quick)),
             "nothing this week to beat"

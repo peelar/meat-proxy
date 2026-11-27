@@ -89,9 +89,7 @@ pub fn plan(
         }
         // Comments still waiting for an answer mean the push is not the whole reply yet; threads
         // not known (too many to fetch, or no sync yet) count as waiting.
-        if reviewers
-            && pr.review_state != ReviewState::Approved
-            && pr.unanswered_threads == Some(0)
+        if reviewers && pr.review_state != ReviewState::Approved && pr.unanswered_threads == Some(0)
         {
             let due: Vec<String> = pr
                 .due_for_another_look()
@@ -116,7 +114,9 @@ pub fn plan(
 pub fn perform(pr: &PullRequest, action: &Action) -> Result<(), String> {
     match action {
         Action::UpdateBranch => crate::github::update_branch(&pr.repo, pr.number, &pr.head_oid),
-        Action::EnableAutoMerge => crate::github::set_auto_merge(&pr.url, pr.merge_method, true, &pr.head_oid),
+        Action::EnableAutoMerge => {
+            crate::github::set_auto_merge(&pr.url, pr.merge_method, true, &pr.head_oid)
+        }
         Action::RerequestReview(who) => crate::github::request_reviewers(&pr.repo, pr.number, who),
     }
 }
@@ -150,7 +150,10 @@ mod tests {
         let mut pr = mine();
         pr.merge_readiness = MergeReadiness::Behind;
         pr.can_update_branch = true;
-        assert_eq!(names(&plan(&[pr.clone()], true, false, &none)), ["update-branch"]);
+        assert_eq!(
+            names(&plan(&[pr.clone()], true, false, &none)),
+            ["update-branch"]
+        );
         // Off, or the reviewers scope alone, does nothing to branches.
         assert!(plan(&[pr.clone()], false, true, &none).is_empty());
 
@@ -181,7 +184,10 @@ mod tests {
         pr.review_state = ReviewState::Approved;
         pr.ci_status = CiStatus::Pending;
         pr.auto_merge = AutoMerge::Available;
-        assert_eq!(names(&plan(&[pr.clone()], true, false, &none)), ["auto-merge"]);
+        assert_eq!(
+            names(&plan(&[pr.clone()], true, false, &none)),
+            ["auto-merge"]
+        );
         // Already on, not offered by the repository, or held by conflicts: nothing.
         for change in [
             |p: &mut PullRequest| p.auto_merge = AutoMerge::On,
@@ -215,7 +221,13 @@ mod tests {
         assert!(plan(&[open], false, true, &none).is_empty());
         let mut unknown = pr.clone();
         unknown.unanswered_threads = None;
-        assert!(plan(&[unknown], false, true, &none).is_empty(), "threads not known: wait");
-        assert!(plan(&[pr], true, false, &none).is_empty(), "the branches scope pings nobody");
+        assert!(
+            plan(&[unknown], false, true, &none).is_empty(),
+            "threads not known: wait"
+        );
+        assert!(
+            plan(&[pr], true, false, &none).is_empty(),
+            "the branches scope pings nobody"
+        );
     }
 }

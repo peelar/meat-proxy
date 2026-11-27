@@ -145,7 +145,9 @@ pub fn open_url_in_browser(url: &str, allow_os_open: bool) {
 /// scheme would start a program or mount a share, so only https pages open.
 fn is_web_page(url: &str) -> bool {
     url.len() > 8
-        && url.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        && url
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
         && !url.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
@@ -179,7 +181,11 @@ pub fn evaluate_inbox_notifications(
         if pr.ownership == Ownership::Mine
             && let Some(prev) = was_present
         {
-            for login in pr.approved_by.iter().filter(|l| !prev.approved_by.contains(l)) {
+            for login in pr
+                .approved_by
+                .iter()
+                .filter(|l| !prev.approved_by.contains(l))
+            {
                 approved_now = true;
                 let notif_id = format!("approved-{}-{login}-{now_hour}", pr.id);
                 if !existing_notifications.iter().any(|n| n.id == notif_id) {
@@ -229,7 +235,11 @@ pub fn evaluate_inbox_notifications(
                     MergeReadiness::Conflicts | MergeReadiness::Unknown
                 )
             {
-                moved("conflicts", format!("{name} has conflicts"), pr.title.clone());
+                moved(
+                    "conflicts",
+                    format!("{name} has conflicts"),
+                    pr.title.clone(),
+                );
             }
             if let (Some(before), Some(now)) = (prev.unanswered_threads, pr.unanswered_threads)
                 && now > before
@@ -379,7 +389,10 @@ mod tests {
 
     #[test]
     fn only_https_pages_open() {
-        for url in ["https://github.com/o/r/pull/1", "HTTPS://ci.example.com/run/5"] {
+        for url in [
+            "https://github.com/o/r/pull/1",
+            "HTTPS://ci.example.com/run/5",
+        ] {
             assert!(is_web_page(url), "{url}");
         }
         for url in [
@@ -427,7 +440,10 @@ mod tests {
         decided.review_state = ReviewState::Approved;
         let mut waiting = mine.clone();
         waiting.review_state = ReviewState::ReviewRequested;
-        assert_eq!(titles(&[waiting], &[decided]), vec![format!("@kai approved {name}")]);
+        assert_eq!(
+            titles(&[waiting], &[decided]),
+            vec![format!("@kai approved {name}")]
+        );
 
         // Someone asks for your review.
         let mut theirs = crate::scenes::demo_prs()
@@ -437,7 +453,11 @@ mod tests {
         theirs.incoming_reason = IncomingReason::SubscribedRule;
         let mut asked = theirs.clone();
         asked.incoming_reason = IncomingReason::AssignedOrReviewRequested;
-        assert!(titles(&[theirs], &[asked.clone()]).iter().any(|t| t.starts_with("Assigned to review")));
+        assert!(
+            titles(&[theirs], &[asked.clone()])
+                .iter()
+                .any(|t| t.starts_with("Assigned to review"))
+        );
 
         // Asked again after you reviewed: a new notification per round, while the request is fresh.
         let round = |at: &str, hours_ago| {
@@ -449,12 +469,33 @@ mod tests {
             });
             pr
         };
-        let first = evaluate_inbox_notifications(&[asked.clone()], &[round("2026-11-20T10:00:00Z", 1)], &[], 72, 48, 0);
+        let first = evaluate_inbox_notifications(
+            &[asked.clone()],
+            &[round("2026-11-20T10:00:00Z", 1)],
+            &[],
+            72,
+            48,
+            0,
+        );
         assert_eq!(first.len(), 1);
         assert!(first[0].title.ends_with("is back for your thumb"));
-        let same = evaluate_inbox_notifications(&[asked.clone()], &[round("2026-11-20T10:00:00Z", 2)], &first, 72, 48, 0);
+        let same = evaluate_inbox_notifications(
+            &[asked.clone()],
+            &[round("2026-11-20T10:00:00Z", 2)],
+            &first,
+            72,
+            48,
+            0,
+        );
         assert!(same.is_empty(), "the same request does not notify twice");
-        let next = evaluate_inbox_notifications(&[asked.clone()], &[round("2026-11-21T09:00:00Z", 0)], &first, 72, 48, 0);
+        let next = evaluate_inbox_notifications(
+            &[asked.clone()],
+            &[round("2026-11-21T09:00:00Z", 0)],
+            &first,
+            72,
+            48,
+            0,
+        );
         assert_eq!(next.len(), 1, "the next round does");
         assert!(titles(&[asked.clone()], &[round("2026-11-17T10:00:00Z", 96)]).is_empty());
     }
@@ -478,20 +519,28 @@ mod tests {
             name: "lint".into(),
             url: String::new(),
         }];
-        let events = evaluate_inbox_notifications(&[mine.clone()], &[failed.clone()], &[], 72, 48, 7);
+        let events =
+            evaluate_inbox_notifications(&[mine.clone()], &[failed.clone()], &[], 72, 48, 7);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].title, format!("Checks failed on {name}"));
         assert!(events[0].body.starts_with("lint · "));
         // Still failing an hour later is not news; failing again after a green run is.
-        assert!(evaluate_inbox_notifications(&[failed.clone()], &[failed.clone()], &events, 72, 48, 8).is_empty());
-        let again = evaluate_inbox_notifications(&[mine.clone()], &[failed.clone()], &events, 72, 48, 9);
+        assert!(
+            evaluate_inbox_notifications(&[failed.clone()], &[failed.clone()], &events, 72, 48, 8)
+                .is_empty()
+        );
+        let again =
+            evaluate_inbox_notifications(&[mine.clone()], &[failed.clone()], &events, 72, 48, 9);
         assert_eq!(again.len(), 1);
         assert_ne!(again[0].id, events[0].id);
 
         let mut ready = mine.clone();
         ready.ci_status = CiStatus::Passing;
         ready.merge_readiness = MergeReadiness::Ready;
-        assert_eq!(titles(&[mine.clone()], &[ready.clone()]), vec![format!("{name} can merge")]);
+        assert_eq!(
+            titles(&[mine.clone()], &[ready.clone()]),
+            vec![format!("{name} can merge")]
+        );
         // With auto-merge on GitHub merges it; and what was saved by an earlier run says nothing
         // about merge state, so the first sync of a run announces neither readiness nor conflicts.
         let mut auto = ready.clone();
@@ -503,7 +552,10 @@ mod tests {
         let mut conflicted = mine.clone();
         conflicted.merge_readiness = MergeReadiness::Conflicts;
         assert!(titles(&[saved], &[conflicted.clone()]).is_empty());
-        assert_eq!(titles(&[mine.clone()], &[conflicted]), vec![format!("{name} has conflicts")]);
+        assert_eq!(
+            titles(&[mine.clone()], &[conflicted]),
+            vec![format!("{name} has conflicts")]
+        );
 
         let mut commented = mine.clone();
         commented.unanswered_threads = Some(2);

@@ -126,7 +126,10 @@ mod tests {
             .collect();
         let depths = |visible: &[PullRequest], inbox: &[PullRequest]| {
             let refs: Vec<_> = visible.iter().collect();
-            rows(&refs, inbox).iter().map(|r| r.depth).collect::<Vec<_>>()
+            rows(&refs, inbox)
+                .iter()
+                .map(|r| r.depth)
+                .collect::<Vec<_>>()
         };
         prs[0].head_repo = Some("fork/rune".into());
         assert_eq!(depths(&prs, &prs), [0, 0]);
@@ -159,7 +162,11 @@ mod tests {
             .collect();
         assert_eq!(
             layout,
-            [("acme/other", 412, 0), ("acme/engine", 418, 0), ("acme/engine", 412, 1)]
+            [
+                ("acme/other", 412, 0),
+                ("acme/engine", 418, 0),
+                ("acme/engine", 412, 1)
+            ]
         );
     }
 }

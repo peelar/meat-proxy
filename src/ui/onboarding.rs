@@ -24,7 +24,13 @@ pub(crate) fn frame_exact(e: El) -> El {
 /// springs in, a finger falls onto it, approvals fly off, the name appears, and then button and
 /// name fly into the header, where the logo and name take over. Every value is computed from
 /// `t`, so nothing springs. `name_w` and `name_h` are the full-size name's last laid-out size.
-pub(crate) fn intro_view(s: &App, k: &Kit, t: f32, (w, h): (f32, f32), (name_w, name_h): (f32, f32)) -> El {
+pub(crate) fn intro_view(
+    s: &App,
+    k: &Kit,
+    t: f32,
+    (w, h): (f32, f32),
+    (name_w, name_h): (f32, f32),
+) -> El {
     let c = &k.c;
     let green = oklch(0.57, 0.15, 150.0);
     let art = |image: Option<&rune::Image>, size: f32| match image {
@@ -574,7 +580,9 @@ pub(crate) fn add_repository_panel(s: &App, k: &Kit, framed: bool) -> El {
             ),
     );
     match &s.status_banner {
-        Some(notice) if !framed => panel.child(notice_frame(k, notice).child(notice_view(k, notice))),
+        Some(notice) if !framed => {
+            panel.child(notice_frame(k, notice).child(notice_view(k, notice)))
+        }
         _ => panel,
     }
 }

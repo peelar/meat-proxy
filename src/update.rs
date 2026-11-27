@@ -57,16 +57,29 @@ fn support_dir() -> Option<PathBuf> {
 /// The newest release's tag, which GitHub's `/releases/latest` address redirects to.
 fn latest_tag() -> Result<String, String> {
     let out = Command::new("curl")
-        .args(["-fsSLI", "-m", "20", "-o", "/dev/null", "-w", "%{url_effective}"])
+        .args([
+            "-fsSLI",
+            "-m",
+            "20",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{url_effective}",
+        ])
         .arg(format!("https://github.com/{REPO}/releases/latest"))
         .output()
         .map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
-        return Err(format!("GitHub did not answer: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "GitHub did not answer: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     let url = String::from_utf8_lossy(&out.stdout);
     let tag = url.trim().rsplit('/').next().unwrap_or_default();
-    parse_version(tag).map(|_| tag.to_owned()).ok_or_else(|| format!("no release yet: {url}"))
+    parse_version(tag)
+        .map(|_| tag.to_owned())
+        .ok_or_else(|| format!("no release yet: {url}"))
 }
 
 fn run(command: &mut Command) -> Result<(), String> {
@@ -94,15 +107,25 @@ fn stage(support: &Path, tag: &str) -> Result<(), String> {
         run(Command::new("curl")
             .args(["-fsSL", "-m", "300", "-o"])
             .arg(&zip)
-            .arg(format!("https://github.com/{REPO}/releases/download/{tag}/meat-proxy-macos.zip")))?;
+            .arg(format!(
+                "https://github.com/{REPO}/releases/download/{tag}/meat-proxy-macos.zip"
+            )))?;
         let unpacked = work.join("unpacked");
-        run(Command::new("ditto").args(["-x", "-k"]).arg(&zip).arg(&unpacked))?;
+        run(Command::new("ditto")
+            .args(["-x", "-k"])
+            .arg(&zip)
+            .arg(&unpacked))?;
         let app = unpacked.join(APP_NAME);
         if !app.is_dir() {
             return Err(format!("{tag}'s zip has no {APP_NAME}"));
         }
-        let _ = Command::new("xattr").args(["-dr", "com.apple.quarantine"]).arg(&app).output();
-        run(Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(&app))?;
+        let _ = Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine"])
+            .arg(&app)
+            .output();
+        run(Command::new("codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&app))?;
         let _ = std::fs::remove_dir_all(&staged);
         std::fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
         std::fs::rename(&app, staged.join(APP_NAME)).map_err(|e| e.to_string())?;
@@ -125,7 +148,9 @@ fn remove_legacy_updater() {
     }
     if let Ok(uid) = Command::new("id").arg("-u").output() {
         let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
-        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+            .output();
     }
     let _ = std::fs::remove_file(agent);
     if let Some(support) = support_dir() {
@@ -206,6 +231,9 @@ mod tests {
         assert!(quiet_moment(long, false));
         assert!(!quiet_moment(long, true), "a merge is running");
         assert!(!quiet_moment(None, false), "the window is focused");
-        assert!(!quiet_moment(Some(Duration::from_secs(5)), false), "it just lost focus");
+        assert!(
+            !quiet_moment(Some(Duration::from_secs(5)), false),
+            "it just lost focus"
+        );
     }
 }

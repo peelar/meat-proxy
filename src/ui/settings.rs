@@ -177,10 +177,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let thresholds_section = col()
         .w_full()
         .gap(10.0)
-        .child(
-            text("Notifications").font(SECTION_TITLE)
-                .color(c.text_base),
-        )
+        .child(text("Notifications").font(SECTION_TITLE).color(c.text_base))
         .child(notifications_row)
         .child(
             row()
@@ -301,10 +298,7 @@ pub(crate) fn settings_content(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(panel(k).child(default_filter_row(s, k)))
         .child(
             panel(k)
-                .child(
-                    text("Pull Requests").font(SECTION_TITLE)
-                        .color(c.text_base),
-                )
+                .child(text("Pull Requests").font(SECTION_TITLE).color(c.text_base))
                 .child(setup_row(
                     k,
                     "Show team review requests in the Inbox",
@@ -314,6 +308,16 @@ pub(crate) fn settings_content(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                         .on_toggle(|s: &mut App| s.toggle_show_team_reviews())
                         .build(k)
                         .key("option-show-team-reviews"),
+                ))
+                .child(setup_row(
+                    k,
+                    "Show my drafts in the Inbox",
+                    Switch::new(s.show_my_drafts)
+                        .label("Show my drafts in the Inbox")
+                        .hide_label()
+                        .on_toggle(|s: &mut App| s.toggle_show_my_drafts())
+                        .build(k)
+                        .key("option-show-my-drafts"),
                 ))
                 .child(setup_row(
                     k,

@@ -61,7 +61,11 @@ pub(crate) fn setup(s: &mut App, waker: rune::Waker) {
 
 /// Records the events that are new and, unless `quiet`, shows each as a notification. Returns the
 /// pull requests the new ones are about.
-pub(crate) fn deliver_events(s: &mut App, events: Vec<NotificationEvent>, quiet: bool) -> Vec<String> {
+pub(crate) fn deliver_events(
+    s: &mut App,
+    events: Vec<NotificationEvent>,
+    quiet: bool,
+) -> Vec<String> {
     if !s.onboarded || !s.native_notifications || !s.allow_os_side_effects || events.is_empty() {
         return Vec::new();
     }
@@ -128,7 +132,11 @@ fn apply_typed(s: &mut App, tx: &mut Tx) -> bool {
     if s.typed.as_ref().is_none_or(|(seen, _)| *seen != typed) {
         s.typed = Some((typed, std::time::Instant::now()));
         tx.wake_after(TYPING_SETTLES);
-    } else if s.typed.as_ref().is_some_and(|(_, at)| at.elapsed() >= TYPING_SETTLES) {
+    } else if s
+        .typed
+        .as_ref()
+        .is_some_and(|(_, at)| at.elapsed() >= TYPING_SETTLES)
+    {
         // The age limit applies once it parses as a number.
         if let Ok(days) = s.max_age_input.text.trim().parse::<u32>()
             && days != s.sync_options.max_age_days
@@ -229,13 +237,19 @@ fn on_sync(s: &mut App, clock: f64) -> bool {
         match result {
             Ok(mut out) => {
                 if !out.failed_rules.is_empty() {
-                    s.status_banner =
-                        Some(Notice::error("Some rules did not sync.", out.failed_rules.join("\n")));
+                    s.status_banner = Some(Notice::error(
+                        "Some rules did not sync.",
+                        out.failed_rules.join("\n"),
+                    ));
                 }
                 out.prs.retain(|pr| !s.is_removed(&pr.repo));
                 if profile::hide_private() {
-                    s.private_repos
-                        .extend(out.prs.iter().filter(|pr| pr.private_repo).map(|pr| pr.repo.clone()));
+                    s.private_repos.extend(
+                        out.prs
+                            .iter()
+                            .filter(|pr| pr.private_repo)
+                            .map(|pr| pr.repo.clone()),
+                    );
                     out.prs.retain(|pr| !pr.private_repo);
                     let hidden = &s.private_repos;
                     s.repos.retain(|r| !hidden.contains(&r.name));
@@ -419,10 +433,15 @@ fn on_update(s: &mut App, clock: f64) -> bool {
         if clock >= s.update.next_check_at && !s.update.worker.is_pending() {
             s.update.next_check_at = clock + update::CHECK_EVERY_SECS;
             let current = app_version();
-            s.update.worker.request((), move |()| update::check_and_stage(&current));
+            s.update
+                .worker
+                .request((), move |()| update::check_and_stage(&current));
         }
         if s.update.ready.is_some()
-            && update::quiet_moment(s.update.unfocused_since.map(|at| at.elapsed()), s.is_working())
+            && update::quiet_moment(
+                s.update.unfocused_since.map(|at| at.elapsed()),
+                s.is_working(),
+            )
         {
             s.install_update();
         }
@@ -458,13 +477,19 @@ fn on_autonomy(s: &mut App) -> bool {
         s.autonomy_done
             .retain(|_, at| now - *at < autonomy::DONE_KEPT_SECS);
         if let Some(db) = s.db() {
-            let mut done: Vec<String> =
-                s.autonomy_done.iter().map(|(k, at)| format!("{k}\t{at}")).collect();
+            let mut done: Vec<String> = s
+                .autonomy_done
+                .iter()
+                .map(|(k, at)| format!("{k}\t{at}"))
+                .collect();
             done.sort_unstable();
             let _ = db.set_setting("autonomy_done", &done.join("\n"));
         }
         if !errors.is_empty() {
-            s.status_banner = Some(Notice::error("Autonomous actions failed.", errors.join("\n")));
+            s.status_banner = Some(Notice::error(
+                "Autonomous actions failed.",
+                errors.join("\n"),
+            ));
         }
         s.trigger_sync();
         changed = true;
@@ -490,7 +515,10 @@ fn on_actions(s: &mut App) -> bool {
             }
             Err(error) => {
                 s.status_banner = Some(Notice::error(
-                    format!("Could not turn auto-merge {}.", if enable { "on" } else { "off" }),
+                    format!(
+                        "Could not turn auto-merge {}.",
+                        if enable { "on" } else { "off" }
+                    ),
                     error,
                 ));
             }
@@ -573,7 +601,13 @@ fn on_actions(s: &mut App) -> bool {
         let id = pr.id.clone();
         match result {
             Ok(outcome) => {
-                notify::post(&format!("agent-{id}"), crate::profile::app_name(), &outcome.announce(&pr), Some(&pr.url), sound_on);
+                notify::post(
+                    &format!("agent-{id}"),
+                    crate::profile::app_name(),
+                    &outcome.announce(&pr),
+                    Some(&pr.url),
+                    sound_on,
+                );
                 match outcome {
                     agent::Outcome::Pushed => {
                         s.agent_fixed.retain(|(f, _)| *f != id);
@@ -590,7 +624,13 @@ fn on_actions(s: &mut App) -> bool {
             }
             Err(error) => {
                 let at = format!(" on {}#{}", pr.repo, pr.number);
-                notify::post(&format!("agent-{id}"), crate::profile::app_name(), &format!("The agent failed{at}"), Some(&pr.url), sound_on);
+                notify::post(
+                    &format!("agent-{id}"),
+                    crate::profile::app_name(),
+                    &format!("The agent failed{at}"),
+                    Some(&pr.url),
+                    sound_on,
+                );
                 s.status_banner = Some(Notice::error(format!("Fix failed{at}."), error));
             }
         }
@@ -632,8 +672,7 @@ fn tick_buttons(s: &mut App, tx: &mut Tx) -> bool {
         s.merge_armed = None;
         changed = true;
     }
-    if s
-        .copied
+    if s.copied
         .as_ref()
         .is_some_and(|(_, at)| at.elapsed().as_secs_f32() > COPIED_SECS)
     {
@@ -648,7 +687,9 @@ fn tick_buttons(s: &mut App, tx: &mut Tx) -> bool {
     if !s.pace_flash.is_empty()
         || s.merge_armed.is_some()
         || s.copied.is_some()
-        || s.approved.iter().any(|(_, at)| at.elapsed().as_secs_f32() < INK_WASH_SECS)
+        || s.approved
+            .iter()
+            .any(|(_, at)| at.elapsed().as_secs_f32() < INK_WASH_SECS)
     {
         tx.wake_after(std::time::Duration::from_millis(16));
         changed = true;
@@ -687,8 +728,9 @@ mod tests {
         let ids: Vec<String> = s.prs.iter().take(3).map(|pr| pr.id.clone()).collect();
         for (n, id) in ids.iter().enumerate() {
             // The first fails and the others succeed, in whatever order they finish.
-            s.auto_merge_jobs
-                .start(id, true, None, move || if n == 0 { Err("no".to_owned()) } else { Ok(()) });
+            s.auto_merge_jobs.start(id, true, None, move || {
+                if n == 0 { Err("no".to_owned()) } else { Ok(()) }
+            });
         }
         assert!(ids.iter().all(|id| s.is_auto_merging(id)));
         for _ in 0..200 {
@@ -698,8 +740,15 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(s.auto_merge_jobs.is_empty(), "every job landed, none was dropped for a newer one");
-        assert!(s.status_banner.as_ref().is_some_and(|b| b.error && b.headline.contains("Could not turn auto-merge on")));
+        assert!(
+            s.auto_merge_jobs.is_empty(),
+            "every job landed, none was dropped for a newer one"
+        );
+        assert!(
+            s.status_banner
+                .as_ref()
+                .is_some_and(|b| b.error && b.headline.contains("Could not turn auto-merge on"))
+        );
     }
 
     #[test]
@@ -714,7 +763,10 @@ mod tests {
         for id in &ids {
             s.approve_with(id, slow);
         }
-        assert!(ids.iter().all(|id| s.is_approving(id)), "every press shows Approving… at once");
+        assert!(
+            ids.iter().all(|id| s.is_approving(id)),
+            "every press shows Approving… at once"
+        );
         for _ in 0..200 {
             on_actions(&mut s);
             if !s.is_working() {
@@ -725,7 +777,10 @@ mod tests {
         on_actions(&mut s);
         for id in &ids {
             assert!(!s.is_approving(id));
-            assert!(s.approved.iter().any(|(a, _)| a == id), "{id} landed as Approved");
+            assert!(
+                s.approved.iter().any(|(a, _)| a == id),
+                "{id} landed as Approved"
+            );
         }
     }
 }

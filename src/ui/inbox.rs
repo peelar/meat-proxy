@@ -105,7 +105,11 @@ fn update_button(s: &App, k: &Kit) -> Option<El> {
             .cursor(rune::Cursor::Pointer)
             .hover(k.c.layer_02)
             .on_press(|s: &mut App| s.install_update())
-            .child(text(format!("Update to {tag}")).font(k.ty.small).color(k.c.text_faint)),
+            .child(
+                text(format!("Update to {tag}"))
+                    .font(k.ty.small)
+                    .color(k.c.text_faint),
+            ),
     )
 }
 
@@ -127,7 +131,11 @@ fn sort_icons(s: &App, k: &Kit) -> El {
     let mut toggle = row()
         .key("sort-mode")
         .role("button")
-        .label(if ai { "Sorted by AI" } else { "Sorted by rules" })
+        .label(if ai {
+            "Sorted by AI"
+        } else {
+            "Sorted by rules"
+        })
         .size(24.0, 24.0)
         .radius(6.0)
         .center()
@@ -177,8 +185,16 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
 
     let collapsed = s.all_sections_collapsed();
     let collapse = icon_action(
-        if collapsed { &EXPAND_ALL } else { &COLLAPSE_ALL },
-        if collapsed { "Expand all" } else { "Collapse all" },
+        if collapsed {
+            &EXPAND_ALL
+        } else {
+            &COLLAPSE_ALL
+        },
+        if collapsed {
+            "Expand all"
+        } else {
+            "Collapse all"
+        },
     )
     .variant(rune_kit::IconButtonVariant::GhostMuted)
     .on_press_tx(|s: &mut App, tx: &mut Tx| {
@@ -198,17 +214,13 @@ pub(crate) fn inbox_tools(s: &App, k: &Kit) -> El {
         .gap(8.0)
         .child(filter_seg)
         .child(
-            row()
-                .center_y()
-                .gap(8.0)
-                .child(search)
-                .child(
-                    row()
-                        .center_y()
-                        .gap(2.0)
-                        .child(collapse)
-                        .child(sort_icons(s, k)),
-                ),
+            row().center_y().gap(8.0).child(search).child(
+                row()
+                    .center_y()
+                    .gap(2.0)
+                    .child(collapse)
+                    .child(sort_icons(s, k)),
+            ),
         )
 }
 
@@ -382,8 +394,7 @@ pub(crate) fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_rep
         let unblock = unblock_control(s, k, pr, att);
         // In Unblock the status says why it cannot merge; a Merge button that can do nothing
         // only says it again.
-        let merge_is_dead =
-            !pr.merge_readiness.is_ready() && s.auto_merge_target(&pr.id).is_none();
+        let merge_is_dead = !pr.merge_readiness.is_ready() && s.auto_merge_target(&pr.id).is_none();
         let shows_merge = !(merge_is_dead && att == PrAttention::MyOpenBlocked);
         if let Some((button, _)) = unblock {
             right_side = right_side.child(button);
@@ -418,7 +429,11 @@ pub(crate) fn minimal_pr_row(s: &App, item: &stacks::StackRow, k: &Kit, show_rep
         .child(el().size(1.0, 10.0).fill(c.border_base))
         .child({
             let label = text(status.clone()).font(k.ty.small_medium).color(tone);
-            if why.is_empty() { label } else { label.help(why) }
+            if why.is_empty() {
+                label
+            } else {
+                label.help(why)
+            }
         });
     // A brain marks what the model judged; a rule's verdict needs none. In the Inbox the section
     // already says what it means, so the questions that came out yes are named only elsewhere.
@@ -548,7 +563,11 @@ pub(crate) fn comments_to_answer(n: u32) -> String {
 /// What the row says after its status about the way to the merge: each thing in it, its colour
 /// and a tooltip. On someone else's pull request these are the author's to clear: they are said
 /// quietly, and the tooltip says whose move it is.
-pub(crate) fn blocker_chips(pr: &PullRequest, status: &str, k: &Kit) -> Vec<(String, Color, String)> {
+pub(crate) fn blocker_chips(
+    pr: &PullRequest,
+    status: &str,
+    k: &Kit,
+) -> Vec<(String, Color, String)> {
     let c = &k.c;
     let mine = pr.ownership == Ownership::Mine;
     let mut chips = Vec::new();
@@ -592,7 +611,12 @@ pub(crate) fn blocker_chips(pr: &PullRequest, status: &str, k: &Kit) -> Vec<(Str
 /// Conflicts and failed checks take code to clear, so their button copies a prompt for a coding
 /// agent; a branch that is only behind is updated from here. It shows at rest when it answers the
 /// row's status, and waits for the pointer anywhere else.
-pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttention) -> Option<(El, bool)> {
+pub(crate) fn unblock_control(
+    s: &App,
+    k: &Kit,
+    pr: &PullRequest,
+    att: PrAttention,
+) -> Option<(El, bool)> {
     let blockers = pr.blockers();
     let first = (att == PrAttention::MyOpenBlocked)
         .then(|| blockers.first().copied())
@@ -604,19 +628,35 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
     // While GitHub holds the merge for a branch that is behind, updating it comes first: the
     // checks run again on the result.
     let update_first = blockers.contains(&Blocker::Behind) && pr.can_update_branch;
-    let prompt = if update_first { None } else { pr.agent_prompt() };
+    let prompt = if update_first {
+        None
+    } else {
+        pr.agent_prompt()
+    };
     // The agent pushed a fix and nothing holds the pull request up now: say so where Fix was.
     if prompt.is_none()
         && s.agent_offered()
         && let Some((_, at)) = s.agent_fixed.iter().find(|(id, _)| *id == pr.id)
     {
         let (glyph, tone) = match s.agent.provider {
-            agent::Provider::Claude => (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0)),
+            agent::Provider::Claude => {
+                (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0))
+            }
             agent::Provider::Codex => (&CODEX, tone),
         };
-        let button = ink_button(k, tone, glyph, "Fixed", Ink::Done(at.elapsed().as_secs_f32()), key);
+        let button = ink_button(
+            k,
+            tone,
+            glyph,
+            "Fixed",
+            Ink::Done(at.elapsed().as_secs_f32()),
+            key,
+        );
         return Some((
-            row().center_y().help(format!("{} pushed a fix", s.agent.provider.label())).child(button),
+            row()
+                .center_y()
+                .help(format!("{} pushed a fix", s.agent.provider.label()))
+                .child(button),
             true,
         ));
     }
@@ -627,7 +667,9 @@ pub(crate) fn unblock_control(s: &App, k: &Kit, pr: &PullRequest, att: PrAttenti
     };
     let (button, why, at_rest) = if let Some(provider) = fix {
         let (glyph, tone) = match provider {
-            agent::Provider::Claude => (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0)),
+            agent::Provider::Claude => {
+                (&CLAUDE, oklch(if k.dark { 0.74 } else { 0.62 }, 0.13, 45.0))
+            }
             agent::Provider::Codex => (&CODEX, tone),
         };
         let running = s.agent_running.as_deref();
@@ -811,7 +853,10 @@ pub(crate) fn approve_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .child(button);
     // A review asked of you is what the row's status waits on, so it stays; a team's request
     // shows it while the row is hovered. Busy or done stays either way.
-    if busy || done.is_some() || pr.incoming_reason == model::IncomingReason::AssignedOrReviewRequested {
+    if busy
+        || done.is_some()
+        || pr.incoming_reason == model::IncomingReason::AssignedOrReviewRequested
+    {
         wrap
     } else {
         wrap.group_opacity(0.0, 1.0)
@@ -877,7 +922,14 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let key = format!("merge-{}", pr.id);
     if let Some((_, at)) = s.celebrations.iter().find(|(id, _)| *id == pr.id) {
         let age = at.elapsed().as_secs_f32();
-        return ink_button(k, tone, &rune_kit::glyphs::CHECK, "Merged", Ink::Done(age), key);
+        return ink_button(
+            k,
+            tone,
+            &rune_kit::glyphs::CHECK,
+            "Merged",
+            Ink::Done(age),
+            key,
+        );
     }
     let id = pr.id.clone();
     let ready = pr.merge_readiness.is_ready();
@@ -891,15 +943,27 @@ pub(crate) fn merge_control(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let auto_busy = s.is_auto_merging(&pr.id);
 
     // A stacked pull request merges into its base branch, not the default one: say which.
-    let merge_label = if pr.stack_base.is_some() { "Merge to base" } else { "Merge" };
+    let merge_label = if pr.stack_base.is_some() {
+        "Merge to base"
+    } else {
+        "Merge"
+    };
     let (glyph, label, ink) = if merging {
         (&MERGE, "Merging…", Ink::Busy)
     } else if let Some(left) = armed {
         (&MERGE, "Press again", Ink::Armed(left))
     } else if auto_on {
-        (&BOLT, "Auto-merge on", if auto_busy { Ink::Busy } else { Ink::On })
+        (
+            &BOLT,
+            "Auto-merge on",
+            if auto_busy { Ink::Busy } else { Ink::On },
+        )
     } else if auto_offer {
-        (&BOLT, "Auto-merge", if auto_busy { Ink::Busy } else { Ink::Rest })
+        (
+            &BOLT,
+            "Auto-merge",
+            if auto_busy { Ink::Busy } else { Ink::Rest },
+        )
     } else if !ready || busy {
         (&MERGE, merge_label, Ink::Disabled)
     } else {
@@ -1045,7 +1109,13 @@ pub(crate) fn document_inbox_view(s: &App, k: &Kit) -> El {
     let now = current_epoch_hour();
     let attention = s.prs.iter().filter(|p| s.needs_you(p, now)).count();
     doc = doc
-        .child(row().center_y().gap(12.0).child(brand(s, k)).children(update_button(s, k)))
+        .child(
+            row()
+                .center_y()
+                .gap(12.0)
+                .child(brand(s, k))
+                .children(update_button(s, k)),
+        )
         .child(
             row()
                 .w_full()

@@ -30,6 +30,8 @@ pub struct AppSnapshot {
     /// Hide outside contributors' pull requests from the Inbox tab.
     pub hide_external: bool,
     pub show_team_reviews: bool,
+    /// List your drafts that are still being worked on in the Inbox too.
+    pub show_my_drafts: bool,
     pub ai_enabled: bool,
     /// Autonomous: keep my branches moving; ping my reviewers. Both off until chosen.
     pub autonomy_branches: bool,
@@ -63,7 +65,9 @@ pub fn default_db_path() -> PathBuf {
     {
         if let Some(home) = std::env::var_os("HOME") {
             use std::os::unix::fs::PermissionsExt;
-            let dir = PathBuf::from(home).join(".config").join(crate::profile::dir_name());
+            let dir = PathBuf::from(home)
+                .join(".config")
+                .join(crate::profile::dir_name());
             if std::fs::create_dir_all(&dir).is_ok() {
                 let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
             }
@@ -118,9 +122,8 @@ impl Database {
         self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
         self.conn
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-        let version = |conn: &Connection| {
-            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-        };
+        let version =
+            |conn: &Connection| conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0));
         if version(&self.conn)? >= SCHEMA_VERSION {
             return Ok(());
         }
@@ -351,6 +354,9 @@ impl Database {
             show_team_reviews: self
                 .get_setting("show_team_reviews")?
                 .is_some_and(|v| v == "1"),
+            show_my_drafts: self
+                .get_setting("show_my_drafts")?
+                .is_some_and(|v| v == "1"),
             ai_enabled: self.get_setting("ai_enabled")?.is_some_and(|v| v == "1"),
             autonomy_branches: self
                 .get_setting("autonomy_branches")?
@@ -377,7 +383,9 @@ impl Database {
                 model: self.get_setting("agent_model")?.unwrap_or_default(),
             },
             pace_enabled: self.flag("pace_enabled")?,
-            pace_collapsed: self.get_setting("pace_collapsed")?.is_some_and(|v| v == "1"),
+            pace_collapsed: self
+                .get_setting("pace_collapsed")?
+                .is_some_and(|v| v == "1"),
             pace_events: self.load_pace_events()?,
             layout_key: self.get_setting("inbox_layout")?,
             ignored: self.load_ignored()?,
@@ -474,7 +482,14 @@ impl Database {
         self.conn.execute(
             "INSERT INTO pace_events (at, kind, pr_id, wait_minutes, lines, verdict)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![e.at, e.kind.as_str(), e.pr_id, e.wait_minutes, e.lines, e.verdict.as_str()],
+            params![
+                e.at,
+                e.kind.as_str(),
+                e.pr_id,
+                e.wait_minutes,
+                e.lines,
+                e.verdict.as_str()
+            ],
         )?;
         Ok(())
     }
@@ -877,13 +892,19 @@ mod tests {
         assert!(snap.onboarded);
         assert_eq!(snap.repos.len(), 1);
         assert!(!snap.repos[0].removed);
-        let version: i64 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         // Opening again finds it done and leaves what was saved since.
         db.set_setting("organization", "acme").unwrap();
         drop(db);
         let again = Database::open(&path).unwrap();
-        assert_eq!(again.get_setting("organization").unwrap().as_deref(), Some("acme"));
+        assert_eq!(
+            again.get_setting("organization").unwrap().as_deref(),
+            Some("acme")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -903,9 +924,11 @@ mod tests {
             unread: false,
         };
         // The oldest notification is about a pull request still open; 600 more are about gone ones.
-        db.insert_notification(&event("assign-open".into(), &open.url)).unwrap();
+        db.insert_notification(&event("assign-open".into(), &open.url))
+            .unwrap();
         for n in 0..600 {
-            db.insert_notification(&event(format!("gone-{n}"), "https://github.com/o/r/pull/9")).unwrap();
+            db.insert_notification(&event(format!("gone-{n}"), "https://github.com/o/r/pull/9"))
+                .unwrap();
         }
         let now = chrono::Utc::now().timestamp();
         for at in [now - 400 * 86_400, now - 10 * 86_400] {
@@ -921,16 +944,24 @@ mod tests {
         }
         db.prune().unwrap();
         let count = |sql: &str| db.conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
-        assert!(!db.insert_notification(&event("assign-open".into(), &open.url)).unwrap(), "still known");
+        assert!(
+            !db.insert_notification(&event("assign-open".into(), &open.url))
+                .unwrap(),
+            "still known"
+        );
         assert_eq!(count("SELECT COUNT(*) FROM notifications"), 501);
-        assert_eq!(count("SELECT COUNT(*) FROM notifications WHERE id = 'gone-0'"), 0);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM notifications WHERE id = 'gone-0'"),
+            0
+        );
         assert_eq!(count("SELECT COUNT(*) FROM pace_events"), 1);
     }
 
     #[test]
     fn a_new_database_is_the_owners_alone() {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("meat-proxy-perm-{}.sqlite3", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("meat-proxy-perm-{}.sqlite3", std::process::id()));
         let _ = std::fs::remove_file(&path);
         Database::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();

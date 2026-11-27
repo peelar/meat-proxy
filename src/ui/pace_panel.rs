@@ -42,7 +42,13 @@ pub(crate) fn pace_ink(k: &Kit, level: u8) -> Color {
 
 /// One day of the grid, with what was cleared in its tooltip. A day of only bold approvals is
 /// drawn hollow; today is ringed, dashed while it still waits for its first one.
-pub(crate) fn pace_cell(k: &Kit, stats: &pace::Stats, day: &pace::Day, size: f32, today: Option<chrono::NaiveDate>) -> El {
+pub(crate) fn pace_cell(
+    k: &Kit,
+    stats: &pace::Stats,
+    day: &pace::Day,
+    size: f32,
+    today: Option<chrono::NaiveDate>,
+) -> El {
     let c = &k.c;
     let Some(date) = day.date else {
         return el().size(size, size);
@@ -70,7 +76,8 @@ pub(crate) fn pace_cell(k: &Kit, stats: &pace::Stats, day: &pace::Day, size: f32
         .radius(size / 4.0)
         .help(format!("{} · {what}", date.format("%a %-d %b")));
     cell = if day.only_bold() {
-        cell.border(1.0, c.text_muted.alpha(0.6)).border_dash(2.0, 1.5)
+        cell.border(1.0, c.text_muted.alpha(0.6))
+            .border_dash(2.0, 1.5)
     } else {
         cell.fill(pace_ink(k, stats.level(day)))
     };
@@ -90,7 +97,10 @@ pub(crate) fn pace_cell(k: &Kit, stats: &pace::Stats, day: &pace::Day, size: f32
 }
 
 /// The count that is landing right now, how long ago it landed, and the score as it stood before.
-pub(crate) fn pace_landing(s: &App, now: chrono::DateTime<chrono::FixedOffset>) -> Option<(f32, &pace::Event, pace::Stats)> {
+pub(crate) fn pace_landing(
+    s: &App,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<(f32, &pace::Event, pace::Stats)> {
     let (event, at) = s.pace_flash.iter().max_by_key(|(_, at)| *at)?;
     let age = at.elapsed().as_secs_f32();
     if age > 1.0 {
@@ -106,7 +116,13 @@ pub(crate) fn pace_landing(s: &App, now: chrono::DateTime<chrono::FixedOffset>) 
 }
 
 /// A number that rolls up from what it was, like an odometer, while a count lands.
-pub(crate) fn rolling(before: Option<String>, after: String, style: TextStyle, tone: Color, age: f32) -> El {
+pub(crate) fn rolling(
+    before: Option<String>,
+    after: String,
+    style: TextStyle,
+    tone: Color,
+    age: f32,
+) -> El {
     let p = ease_out(phase(age, 0.2, 0.48));
     match before.filter(|b| *b != after && p < 1.0) {
         None => text(after).font(style).color(tone),
@@ -133,7 +149,11 @@ pub(crate) fn pace_column(k: &Kit, value: El, label: &str, sub: El) -> El {
     col()
         .gap(3.0)
         .child(value)
-        .child(text(label.to_owned()).font(PACE_LABEL).color(k.c.text_muted))
+        .child(
+            text(label.to_owned())
+                .font(PACE_LABEL)
+                .color(k.c.text_muted),
+        )
         .child(sub)
 }
 
@@ -143,7 +163,12 @@ pub(crate) fn pace_record(s: &App, kind: pace::Kind) -> Option<(f32, i64)> {
     s.pace_flash
         .iter()
         .filter(|(e, _)| e.kind == kind && pace::new_best(&s.pace_events, e))
-        .map(|(e, at)| (at.elapsed().as_secs_f32(), e.wait_minutes.unwrap_or_default()))
+        .map(|(e, at)| {
+            (
+                at.elapsed().as_secs_f32(),
+                e.wait_minutes.unwrap_or_default(),
+            )
+        })
         .min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
@@ -164,7 +189,12 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
     let age = landing.as_ref().map_or(f32::MAX, |(age, _, _)| *age);
     let before = |f: &dyn Fn(&pace::Stats) -> String| landing.as_ref().map(|(_, _, b)| f(b));
     let collapsed = s.pace_collapsed;
-    let days: Vec<&pace::Day> = stats.weeks.iter().flatten().filter(|d| d.date.is_some()).collect();
+    let days: Vec<&pace::Day> = stats
+        .weeks
+        .iter()
+        .flatten()
+        .filter(|d| d.date.is_some())
+        .collect();
     let cleared_today = days.last().is_some_and(|d| d.approvals + d.merges > 0);
 
     let caption = if collapsed {
@@ -179,21 +209,27 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
         if summary.is_empty() {
             None
         } else {
-            Some(text(summary.join("  ·  ")).font(k.ty.small).color(c.text_muted))
+            Some(
+                text(summary.join("  ·  "))
+                    .font(k.ty.small)
+                    .color(c.text_muted),
+            )
         }
     } else if stats.bold > 0 {
-        Some(row()
-            .center_y()
-            .gap(5.0)
-            .child(rune::icon(&EYE, 12.0).color(c.warning.fg).a11y_hidden())
-            .child(
-                text(format!(
-                    "{} this week. Faster than they read; no medal.",
-                    plural(stats.bold, "bold approval", "bold approvals")
-                ))
-                .font(k.ty.small)
-                .color(c.text_faint),
-            ))
+        Some(
+            row()
+                .center_y()
+                .gap(5.0)
+                .child(rune::icon(&EYE, 12.0).color(c.warning.fg).a11y_hidden())
+                .child(
+                    text(format!(
+                        "{} this week. Faster than they read; no medal.",
+                        plural(stats.bold, "bold approval", "bold approvals")
+                    ))
+                    .font(k.ty.small)
+                    .color(c.text_faint),
+                ),
+        )
     } else {
         Some(
             text("Quick: within the hour of being asked, or of the approval for a merge")
@@ -229,10 +265,17 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
         .justify_between()
         .hover_group()
         .role("button")
-        .label(if collapsed { "Show Scoreboard" } else { "Hide Scoreboard" })
+        .label(if collapsed {
+            "Show Scoreboard"
+        } else {
+            "Hide Scoreboard"
+        })
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(|s: &mut App, tx: &mut Tx| {
-            tx.motion_curve(rune::Curve::tween(0.16, rune::Easing::cubic(0.2, 0.0, 0.0, 1.0)));
+            tx.motion_curve(rune::Curve::tween(
+                0.16,
+                rune::Easing::cubic(0.2, 0.0, 0.0, 1.0),
+            ));
             s.toggle_pace_collapsed();
         })
         .child(
@@ -241,7 +284,11 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
                 .gap(8.0)
                 .child(rune::icon(&BOLT, 14.0).color(mint(k)).a11y_hidden())
                 .child(text("Scoreboard").font(k.ty.ui_medium).color(c.text_base))
-                .children(caption.is_some().then(|| el().size(1.0, 10.0).fill(c.border_base)))
+                .children(
+                    caption
+                        .is_some()
+                        .then(|| el().size(1.0, 10.0).fill(c.border_base)),
+                )
                 .children(caption),
         )
         .child(
@@ -252,7 +299,11 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
                 .child(
                     rune::icon(k.glyph.chevron_down, 14.0)
                         .color(c.text_muted)
-                        .rotate(if collapsed { -std::f32::consts::FRAC_PI_2 } else { 0.0 })
+                        .rotate(if collapsed {
+                            -std::f32::consts::FRAC_PI_2
+                        } else {
+                            0.0
+                        })
                         .group_opacity(0.5, 1.0)
                         .a11y_hidden(),
                 ),
@@ -310,25 +361,25 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
                 text(unit).font(PACE_UNIT).color(c.text_muted)
             })
     };
-    let tile = |value: El, label: &str, sub: El| {
-        pace_column(k, value, label, sub).grow(1.0).min_w(92.0)
-    };
+    let tile =
+        |value: El, label: &str, sub: El| pace_column(k, value, label, sub).grow(1.0).min_w(92.0);
     // Under each count, the week's fastest; while a new one is celebrated, it says so in its ink.
-    let fastest = |best: Option<i64>, kind: pace::Kind, tone: Color| match (pace_record(s, kind), best) {
-        (Some((_, wait)), _) => row()
-            .center_y()
-            .gap(4.0)
-            .child(rune::icon(&TROPHY, 11.0).color(tone).a11y_hidden())
-            .child(
-                text(format!("new best · {}", pace::span(wait)))
-                    .font(TextStyle::new(11.0, 600.0))
-                    .color(tone),
-            ),
-        (None, Some(wait)) => text(format!("fastest {} · 7 days", pace::span(wait)))
-            .font(PACE_SUB)
-            .color(c.text_faint),
-        (None, None) => text("last 7 days").font(PACE_SUB).color(c.text_faint),
-    };
+    let fastest =
+        |best: Option<i64>, kind: pace::Kind, tone: Color| match (pace_record(s, kind), best) {
+            (Some((_, wait)), _) => row()
+                .center_y()
+                .gap(4.0)
+                .child(rune::icon(&TROPHY, 11.0).color(tone).a11y_hidden())
+                .child(
+                    text(format!("new best · {}", pace::span(wait)))
+                        .font(TextStyle::new(11.0, 600.0))
+                        .color(tone),
+                ),
+            (None, Some(wait)) => text(format!("fastest {} · 7 days", pace::span(wait)))
+                .font(PACE_SUB)
+                .color(c.text_faint),
+            (None, None) => text("last 7 days").font(PACE_SUB).color(c.text_faint),
+        };
     let divider = || el().size(1.0, 40.0).fill(c.border_weak).self_center();
     let median = |st: &pace::Stats| st.median_merge_minutes.map_or("–".to_owned(), pace::span);
     let score = row()
@@ -344,7 +395,11 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
             number(
                 stats.quick_approvals.to_string(),
                 before(&|b| b.quick_approvals.to_string()),
-                if stats.quick_approvals > 0 { mint(k) } else { c.text_faint },
+                if stats.quick_approvals > 0 {
+                    mint(k)
+                } else {
+                    c.text_faint
+                },
             ),
             "quick approvals",
             fastest(stats.fastest_approval, pace::Kind::Approve, mint(k)),
@@ -354,7 +409,11 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
             number(
                 stats.quick_merges.to_string(),
                 before(&|b| b.quick_merges.to_string()),
-                if stats.quick_merges > 0 { merge_tone(k) } else { c.text_faint },
+                if stats.quick_merges > 0 {
+                    merge_tone(k)
+                } else {
+                    c.text_faint
+                },
             ),
             "quick merges",
             fastest(stats.fastest_merge, pace::Kind::Merge, merge_tone(k)),
@@ -407,7 +466,11 @@ pub(crate) fn pace_panel(s: &App, k: &Kit) -> El {
         .as_ref()
         .filter(|(age, event, _)| *age < 0.95 && event.verdict == pace::Verdict::Quick)
         .map(|(age, event, _)| {
-            let tone = if event.kind == pace::Kind::Merge { merge_tone(k) } else { mint(k) };
+            let tone = if event.kind == pace::Kind::Merge {
+                merge_tone(k)
+            } else {
+                mint(k)
+            };
             (*age, tone)
         });
     let mut cells = row().gap(PACE_GAP);
@@ -517,7 +580,11 @@ pub(crate) fn pace_pill(s: &App, k: &Kit, pr: &PullRequest) -> Option<El> {
         pace::Verdict::Quick | pace::Verdict::Steady
             if event.verdict == pace::Verdict::Quick || record =>
         {
-            let tone = if event.kind == pace::Kind::Merge { merge_tone(k) } else { mint(k) };
+            let tone = if event.kind == pace::Kind::Merge {
+                merge_tone(k)
+            } else {
+                mint(k)
+            };
             let mut pill = pill
                 .fill(tone.alpha(0.14))
                 .border_gradient(1.0, tone.alpha(0.35), tone.alpha(0.10))
@@ -528,7 +595,11 @@ pub(crate) fn pace_pill(s: &App, k: &Kit, pr: &PullRequest) -> Option<El> {
                 } else {
                     "Approved within the hour of being asked"
                 })
-                .child(rune::icon(if record { &TROPHY } else { &BOLT }, 12.0).color(tone).a11y_hidden())
+                .child(
+                    rune::icon(if record { &TROPHY } else { &BOLT }, 12.0)
+                        .color(tone)
+                        .a11y_hidden(),
+                )
                 .child(label(
                     format!("{} · {wait}", if record { "New best" } else { "Quick" }),
                     tone,
@@ -543,7 +614,11 @@ pub(crate) fn pace_pill(s: &App, k: &Kit, pr: &PullRequest) -> Option<El> {
                         .offset_motion(rune::Anim::INSTANT)
                         .linear_gradient(
                             std::f32::consts::FRAC_PI_2,
-                            [(0.0, shine.alpha(0.0)), (0.5, shine), (1.0, shine.alpha(0.0))],
+                            [
+                                (0.0, shine.alpha(0.0)),
+                                (0.5, shine),
+                                (1.0, shine.alpha(0.0)),
+                            ],
                         ),
                 );
             }

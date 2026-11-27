@@ -183,13 +183,12 @@ impl JudgeConfig {
     }
 
     fn path() -> Option<std::path::PathBuf> {
-        std::env::var_os("HOME")
-            .map(|home| {
-                std::path::PathBuf::from(home)
-                    .join(".config")
-                    .join(crate::profile::dir_name())
-                    .join("judge.json")
-            })
+        std::env::var_os("HOME").map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".config")
+                .join(crate::profile::dir_name())
+                .join("judge.json")
+        })
     }
 
     /// `judge.json` alone, without the environment.
@@ -198,7 +197,9 @@ impl JudgeConfig {
         match serde_json::from_str(&text) {
             Ok(cfg) => Some(cfg),
             Err(error) => {
-                eprintln!("meat-proxy: judge.json is not valid, so its settings are not used: {error}");
+                eprintln!(
+                    "meat-proxy: judge.json is not valid, so its settings are not used: {error}"
+                );
                 None
             }
         }
@@ -273,7 +274,9 @@ pub fn endpoint_is_local(url: &str) -> Option<bool> {
     }
     let local = host == "localhost"
         || host == "::1"
-        || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback());
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback());
     (https || local).then_some(local)
 }
 
@@ -642,7 +645,16 @@ fn post_json(
     );
     // The status code goes on a line of its own after the body.
     let spawned = Command::new("/usr/bin/curl")
-        .args(["-q", "-sS", "--proto", "=http,https", "--max-redirs", "0", "--max-time", "40"])
+        .args([
+            "-q",
+            "-sS",
+            "--proto",
+            "=http,https",
+            "--max-redirs",
+            "0",
+            "--max-time",
+            "40",
+        ])
         .args(["-w", "\n%{http_code}", "-X", "POST", "--config", "-"])
         .arg("--data-binary")
         .arg(format!("@{}", path.display()))
@@ -761,7 +773,10 @@ pub fn run_batch(
                 .zip(chunk)
                 .map(|(h, pr)| {
                     h.join().unwrap_or_else(|_| {
-                        (pr.id.clone(), Err("the call stopped unexpectedly".to_owned()))
+                        (
+                            pr.id.clone(),
+                            Err("the call stopped unexpectedly".to_owned()),
+                        )
                     })
                 })
                 .collect()
@@ -931,7 +946,10 @@ mod tests {
         ] {
             assert_eq!(endpoint_is_local(url), local, "{url}");
         }
-        let mut cfg = JudgeConfig { base_url: "http://localhost.evil.com/v1".into(), ..Default::default() };
+        let mut cfg = JudgeConfig {
+            base_url: "http://localhost.evil.com/v1".into(),
+            ..Default::default()
+        };
         assert!(!cfg.usable(), "looks local, is not");
         cfg.base_url = "http://localhost:11434/v1".into();
         assert!(cfg.usable(), "a local server needs no key");

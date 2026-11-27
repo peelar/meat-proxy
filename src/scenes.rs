@@ -285,7 +285,6 @@ pub(crate) fn demo_prs() -> Vec<PullRequest> {
     prs
 }
 
-
 /// Eighteen weeks of made-up approvals and merges for the preview scenes: busy on weekdays,
 /// quiet at weekends, and a streak running into today.
 pub(crate) fn demo_pace_events() -> Vec<pace::Event> {
@@ -308,10 +307,18 @@ pub(crate) fn demo_pace_events() -> Vec<pace::Event> {
             } else {
                 ((h + i).is_multiple_of(3), !(h + i).is_multiple_of(4))
             };
-            let wait = if quick { 4 + (h * 7 + i * 13) as i64 % 50 } else { 90 + h as i64 * 11 };
+            let wait = if quick {
+                4 + (h * 7 + i * 13) as i64 % 50
+            } else {
+                90 + h as i64 * 11
+            };
             out.push(pace::Event {
                 at: now - back * 86_400 - i as i64 * 1800,
-                kind: if merge { pace::Kind::Merge } else { pace::Kind::Approve },
+                kind: if merge {
+                    pace::Kind::Merge
+                } else {
+                    pace::Kind::Approve
+                },
                 pr_id: format!("acme/demo#{back}{i}"),
                 wait_minutes: Some(wait),
                 lines: 40 + (h * 3) as u32,
@@ -386,9 +393,8 @@ pub(crate) static SCENES: &[Scene] = &[
     // The intro as the finger lands, and once the name is up.
     ("intro-press", |s| {
         s.loading = false;
-        s.intro = Some(
-            std::time::Instant::now() - std::time::Duration::from_secs_f32(INTRO_HIT + 0.12),
-        );
+        s.intro =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(INTRO_HIT + 0.12));
     }),
     ("intro-dock", |s| {
         s.loading = false;
@@ -420,6 +426,14 @@ pub(crate) static SCENES: &[Scene] = &[
     ("update-ready", |s| {
         run_scene(s, "inbox");
         s.update.ready = Some("v0.3.18".into());
+    }),
+    // Your drafts listed too, one still being worked on.
+    ("inbox-drafts", |s| {
+        run_scene(s, "inbox");
+        s.show_my_drafts = true;
+        if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/engine#397") {
+            pr.idle_hours = 2;
+        }
     }),
     ("inbox-open", |s| {
         seed_preview(s);
@@ -605,9 +619,13 @@ pub(crate) static SCENES: &[Scene] = &[
                     pr.ci_status = CiStatus::Failing;
                     pr.merge_readiness = model::MergeReadiness::NeedsReview;
                     pr.failing_checks = vec![check("lint", 71), check("e2e (chromium)", 72)];
-                    pr.files = ["src/cli/args.rs", "src/cli/complete.rs", "tests/complete.rs"]
-                        .map(String::from)
-                        .to_vec();
+                    pr.files = [
+                        "src/cli/args.rs",
+                        "src/cli/complete.rs",
+                        "tests/complete.rs",
+                    ]
+                    .map(String::from)
+                    .to_vec();
                 }
                 "acme/engine#412" => pr.merge_readiness = model::MergeReadiness::Conflicts,
                 "acme/inbox#14" => pr.unanswered_threads = Some(2),
@@ -635,7 +653,10 @@ pub(crate) static SCENES: &[Scene] = &[
         if let Some(pr) = s.prs.iter_mut().find(|p| p.id == "acme/cli#889") {
             pr.ci_status = CiStatus::Passing;
             pr.merge_readiness = model::MergeReadiness::Unknown;
-            s.agent_fixed.push((pr.id.clone(), std::time::Instant::now() - std::time::Duration::from_secs(5)));
+            s.agent_fixed.push((
+                pr.id.clone(),
+                std::time::Instant::now() - std::time::Duration::from_secs(5),
+            ));
         }
     }),
     ("unblock-codex", |s| {
@@ -686,13 +707,43 @@ pub(crate) static SCENES: &[Scene] = &[
             lines,
             verdict,
         };
-        s.approved = vec![("acme/cli#904".into(), ago(1.6)), ("acme/engine#418".into(), ago(1.6))];
+        s.approved = vec![
+            ("acme/cli#904".into(), ago(1.6)),
+            ("acme/engine#418".into(), ago(1.6)),
+        ];
         s.pace_flash = vec![
-            (flash("acme/cli#904", pace::Kind::Approve, 2, 180, pace::Verdict::Quick), ago(1.2)),
-            (flash("acme/engine#418", pace::Kind::Approve, 3, 1240, pace::Verdict::Bold), ago(1.6)),
+            (
+                flash(
+                    "acme/cli#904",
+                    pace::Kind::Approve,
+                    2,
+                    180,
+                    pace::Verdict::Quick,
+                ),
+                ago(1.2),
+            ),
+            (
+                flash(
+                    "acme/engine#418",
+                    pace::Kind::Approve,
+                    3,
+                    1240,
+                    pace::Verdict::Bold,
+                ),
+                ago(1.6),
+            ),
         ];
         s.celebrations.push(("acme/cli#908".into(), ago(0.9)));
-        s.pace_flash.push((flash("acme/cli#908", pace::Kind::Merge, 1, 90, pace::Verdict::Quick), ago(0.9)));
+        s.pace_flash.push((
+            flash(
+                "acme/cli#908",
+                pace::Kind::Merge,
+                1,
+                90,
+                pace::Verdict::Quick,
+            ),
+            ago(0.9),
+        ));
     }),
     // A quick approval a moment after it landed: the number rolls, today's cell rings.
     ("pace-landing", |s| {

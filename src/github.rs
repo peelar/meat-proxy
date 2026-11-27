@@ -1,8 +1,9 @@
 use std::process::Command;
 
 use crate::model::{
-    Ask, AutoMerge, Check, CiStatus, IncomingReason, MergeMethod, MergeReadiness, NotificationEvent,
-    NotificationKind, Ownership, PullRequest, RepoConfig, ReviewState, WatchRule,
+    Ask, AutoMerge, Check, CiStatus, IncomingReason, MergeMethod, MergeReadiness,
+    NotificationEvent, NotificationKind, Ownership, PullRequest, RepoConfig, ReviewState,
+    WatchRule,
 };
 
 #[derive(Clone, Debug)]
@@ -80,13 +81,19 @@ impl RunGh for Command {
         let stderr = drain(child.stderr.take());
         let deadline = std::time::Instant::now() + GH_TIMEOUT;
         let status = loop {
-            if let Some(status) = child.try_wait().map_err(|e| format!("Could not run gh: {e}"))? {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("Could not run gh: {e}"))?
+            {
                 break status;
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("gh gave no answer in {} seconds", GH_TIMEOUT.as_secs()));
+                return Err(format!(
+                    "gh gave no answer in {} seconds",
+                    GH_TIMEOUT.as_secs()
+                ));
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
@@ -217,7 +224,8 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
 
-    let mut items: Vec<serde_json::Value> = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let mut items: Vec<serde_json::Value> =
+        serde_json::from_str(body).map_err(|e| e.to_string())?;
     // A full page may have more behind it. A few more pages cover a busy morning; the full sync
     // each minute finds anything older.
     let mut page = 1;
@@ -253,7 +261,8 @@ pub fn check_notifications(last_modified: Option<&str>) -> Result<NotificationPo
         let Some(repo) = item["repository"]["full_name"].as_str() else {
             continue;
         };
-        if crate::profile::hide_private() && item["repository"]["private"].as_bool() != Some(false) {
+        if crate::profile::hide_private() && item["repository"]["private"].as_bool() != Some(false)
+        {
             continue;
         }
         let Some(number) = subject["url"]
@@ -374,7 +383,9 @@ pub fn discover_repos() -> Result<Discovery, String> {
                 if item["repository"]["isArchived"].as_bool() == Some(true) {
                     continue;
                 }
-                if crate::profile::hide_private() && item["repository"]["isPrivate"].as_bool() != Some(false) {
+                if crate::profile::hide_private()
+                    && item["repository"]["isPrivate"].as_bool() != Some(false)
+                {
                     continue;
                 }
                 let Some(name) = item["repository"]["nameWithOwner"].as_str() else {
@@ -671,7 +682,10 @@ pub fn fetch_live(
         match result {
             Ok(ids) => found.push(ids),
             Err(error) if at >= first_rule => {
-                failed_rules.push(format!("{}: {error}", search.label.as_deref().unwrap_or("rule")));
+                failed_rules.push(format!(
+                    "{}: {error}",
+                    search.label.as_deref().unwrap_or("rule")
+                ));
                 found.push((String::new(), Vec::new()));
             }
             Err(error) => return Err(error),
@@ -981,9 +995,18 @@ fn search_ids(search: &Search, options: SyncOptions) -> Result<(String, Vec<Stri
 /// An error worth one more try: GitHub ran out of time, or the network dropped.
 fn is_transient(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
-    ["502", "503", "504", "timeout", "timed out", "no answer", "something went wrong", "connection"]
-        .iter()
-        .any(|sign| error.contains(sign))
+    [
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "timed out",
+        "no answer",
+        "something went wrong",
+        "connection",
+    ]
+    .iter()
+    .any(|sign| error.contains(sign))
 }
 
 /// GitHub gives a query about ten seconds and answers 502 past that, and the fields of each pull
@@ -1020,7 +1043,11 @@ fn fetch_nodes(
                         let query =
                             format!("query {{ nodes(ids: {ids}) {{ ...PrFields }} }}{fields}");
                         let mut data = fetch_graphql(&query).or_else(|error| {
-                            if is_transient(&error) { fetch_graphql(&query) } else { Err(error) }
+                            if is_transient(&error) {
+                                fetch_graphql(&query)
+                            } else {
+                                Err(error)
+                            }
                         })?;
                         let serde_json::Value::Array(batch) = data["nodes"].take() else {
                             return Err("GitHub did not return the pull requests".to_string());
@@ -1072,7 +1099,11 @@ fn fetch_graphql(query: &str) -> Result<serde_json::Value, String> {
         });
     };
     graphql_data(response).map_err(|error| {
-        if out.status.success() { error } else { gh_error(&out, &error) }
+        if out.status.success() {
+            error
+        } else {
+            gh_error(&out, &error)
+        }
     })
 }
 
@@ -1342,7 +1373,12 @@ fn require_head(head: &str) -> Result<(), String> {
 
 /// Turn auto-merge on (merging with `method`, and only while the head is `head`) or off. GitHub
 /// merges by itself once the checks and reviews the repository asks for are in.
-pub fn set_auto_merge(url: &str, method: MergeMethod, enable: bool, head: &str) -> Result<(), String> {
+pub fn set_auto_merge(
+    url: &str,
+    method: MergeMethod,
+    enable: bool,
+    head: &str,
+) -> Result<(), String> {
     let mut command = gh_command();
     command.args(["pr", "merge", url]);
     if enable {
@@ -1351,12 +1387,14 @@ pub fn set_auto_merge(url: &str, method: MergeMethod, enable: bool, head: &str) 
     } else {
         command.arg("--disable-auto");
     }
-    let out = command
-        .run_gh()?;
+    let out = command.run_gh()?;
     if out.status.success() {
         return Ok(());
     }
-    Err(gh_error(&out, "GitHub would not change auto-merge on this pull request"))
+    Err(gh_error(
+        &out,
+        "GitHub would not change auto-merge on this pull request",
+    ))
 }
 
 /// OPEN, MERGED or CLOSED, for a pull request that has left the lists.
@@ -1376,7 +1414,14 @@ pub fn approve_pr(repo: &str, number: u64, head: &str) -> Result<(), String> {
     require_head(head)?;
     let path = format!("repos/{repo}/pulls/{number}");
     let out = gh_command()
-        .args(["api", "--hostname", "github.com", &path, "--jq", ".head.sha"])
+        .args([
+            "api",
+            "--hostname",
+            "github.com",
+            &path,
+            "--jq",
+            ".head.sha",
+        ])
         .run_gh()?;
     if !out.status.success() {
         return Err(gh_error(&out, "GitHub would not say which commit this is"));
@@ -1398,7 +1443,14 @@ const MOVED_ON: &str = "New commits arrived since the list was loaded. Look agai
 pub fn merge_pr(url: &str, method: MergeMethod, head: &str) -> Result<(), String> {
     require_head(head)?;
     let out = gh_command()
-        .args(["pr", "merge", url, method.flag(), "--match-head-commit", head])
+        .args([
+            "pr",
+            "merge",
+            url,
+            method.flag(),
+            "--match-head-commit",
+            head,
+        ])
         .run_gh()?;
     if out.status.success() {
         return Ok(());
@@ -1426,14 +1478,22 @@ pub fn update_branch(repo: &str, number: u64, head: &str) -> Result<(), String> 
         &format!("repos/{repo}/pulls/{number}/update-branch"),
         &[format!("expected_head_sha={head}")],
     )
-        .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
+    .map_err(|e| e.unwrap_or_else(|| "GitHub would not update this branch".to_owned()))
 }
 
 /// A REST call that changes something and returns nothing worth reading. The error is the first
 /// line gh printed, when it printed one.
 fn gh_api_write(method: &str, path: &str, fields: &[String]) -> Result<(), Option<String>> {
     let mut command = gh_command();
-    command.args(["api", "--hostname", "github.com", "--silent", "-X", method, path]);
+    command.args([
+        "api",
+        "--hostname",
+        "github.com",
+        "--silent",
+        "-X",
+        method,
+        path,
+    ]);
     for field in fields {
         command.args(["-f", field]);
     }
@@ -1614,10 +1674,15 @@ mod tests {
             "data": { "s0": { "nodes": [{ "number": 1 }, null] } },
             "errors": [{ "type": "FORBIDDEN", "message": "Resource protected by SAML" }],
         });
-        assert_eq!(graphql_data(partial).unwrap()["s0"]["nodes"][0]["number"], 1);
+        assert_eq!(
+            graphql_data(partial).unwrap()["s0"]["nodes"][0]["number"],
+            1
+        );
         let failed = json!({ "data": null, "errors": [{ "message": "Bad query" }] });
         assert_eq!(graphql_data(failed).unwrap_err(), "Bad query");
-        assert!(is_transient("HTTP 502: Bad Gateway") && !is_transient("HTTP 401: Bad credentials"));
+        assert!(
+            is_transient("HTTP 502: Bad Gateway") && !is_transient("HTTP 401: Bad credentials")
+        );
     }
 
     #[test]
@@ -1636,9 +1701,7 @@ mod tests {
 
     #[test]
     fn a_pull_request_carries_what_stands_between_it_and_its_merge() {
-        let thread = |resolved: bool, kind: &str, login: &str| {
-            json!({ "isResolved": resolved, "comments": { "nodes": [{ "author": { "__typename": kind, "login": login } }] } })
-        };
+        let thread = |resolved: bool, kind: &str, login: &str| json!({ "isResolved": resolved, "comments": { "nodes": [{ "author": { "__typename": kind, "login": login } }] } });
         let node = json!({
             "number": 7, "title": "t", "url": "https://github.com/o/r/pull/7", "state": "OPEN",
             "repository": { "nameWithOwner": "o/r" },
@@ -1677,15 +1740,28 @@ mod tests {
                 { "__typename": "StatusContext", "context": "ci/other", "state": "SUCCESS", "targetUrl": "" },
             ] } } } }] },
         });
-        let mut pr =
-            parse_graphql_pr(&node, Ownership::Mine, IncomingReason::NotIncoming, None, true).unwrap();
+        let mut pr = parse_graphql_pr(
+            &node,
+            Ownership::Mine,
+            IncomingReason::NotIncoming,
+            None,
+            true,
+        )
+        .unwrap();
         assert!(pr.can_update_branch);
         assert_eq!(pr.unanswered_threads, Some(1));
         assert_eq!(pr.due_for_another_look(), ["kai"]);
         // More threads than were fetched, none of those waiting: an older one may be.
         let mut cut = node.clone();
         cut["reviewThreads"] = json!({ "pageInfo": { "hasPreviousPage": true }, "nodes": [thread(true, "User", "kai")] });
-        let cut = parse_graphql_pr(&cut, Ownership::Mine, IncomingReason::NotIncoming, None, true).unwrap();
+        let cut = parse_graphql_pr(
+            &cut,
+            Ownership::Mine,
+            IncomingReason::NotIncoming,
+            None,
+            true,
+        )
+        .unwrap();
         assert_eq!(cut.unanswered_threads, None);
         let failed: Vec<&str> = pr.failing_checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(failed, ["lint", "ci/vendor"]);
@@ -1701,7 +1777,13 @@ mod tests {
         let mut bare = node.clone();
         bare.as_object_mut().unwrap().remove("reviewThreads");
         bare["viewerLatestReview"] = json!(null);
-        let theirs = parse_graphql_pr(&bare, Ownership::Theirs, IncomingReason::NotIncoming, None, true);
+        let theirs = parse_graphql_pr(
+            &bare,
+            Ownership::Theirs,
+            IncomingReason::NotIncoming,
+            None,
+            true,
+        );
         assert_eq!(theirs.unwrap().unanswered_threads, None);
         assert!(!asked(&bare, "me").unwrap().again);
         assert!(asked(&bare, "nobody").is_none());

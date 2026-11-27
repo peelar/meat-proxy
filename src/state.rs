@@ -61,11 +61,19 @@ pub struct Notice {
 
 impl Notice {
     pub fn error(headline: impl Into<String>, detail: impl Into<String>) -> Notice {
-        Notice { headline: headline.into(), detail: detail.into().trim().to_owned(), error: true }
+        Notice {
+            headline: headline.into(),
+            detail: detail.into().trim().to_owned(),
+            error: true,
+        }
     }
 
     pub fn info(headline: impl Into<String>, detail: impl Into<String>) -> Notice {
-        Notice { headline: headline.into(), detail: detail.into().trim().to_owned(), error: false }
+        Notice {
+            headline: headline.into(),
+            detail: detail.into().trim().to_owned(),
+            error: false,
+        }
     }
 }
 
@@ -157,6 +165,8 @@ pub struct App {
     pub hide_external: bool,
     /// List requests made of a team you are in, not of you by name, in the Inbox too.
     pub show_team_reviews: bool,
+    /// List your drafts that are still being worked on in the Inbox too.
+    pub show_my_drafts: bool,
     /// The experimental AI sorting, its settings and what the model said.
     pub ai: Ai,
     /// What the typed settings (the age limit and the AI fields) held when last seen, and since
@@ -262,7 +272,11 @@ impl<M, T: Send + 'static> RowJobs<M, T> {
             None => Latest::default(),
         };
         worker.request((), move |()| work());
-        self.jobs.push(RowJob { pr_id: pr_id.to_owned(), meta, worker });
+        self.jobs.push(RowJob {
+            pr_id: pr_id.to_owned(),
+            meta,
+            worker,
+        });
     }
 
     /// Whether a job for this pull request is running.
@@ -272,7 +286,11 @@ impl<M, T: Send + 'static> RowJobs<M, T> {
 
     /// List a job as running without running it, for a preview scene, which never polls.
     pub fn show(&mut self, pr_id: &str, meta: M) {
-        self.jobs.push(RowJob { pr_id: pr_id.to_owned(), meta, worker: Latest::default() });
+        self.jobs.push(RowJob {
+            pr_id: pr_id.to_owned(),
+            meta,
+            worker: Latest::default(),
+        });
     }
 
     #[cfg(test)]
@@ -418,6 +436,7 @@ pub(crate) fn init() -> App {
         layout: sections::Layout::default(),
         hide_external: false,
         show_team_reviews: false,
+        show_my_drafts: false,
         ai: Ai::new(),
         typed: None,
         pace_stats: std::cell::RefCell::new(None),
@@ -560,9 +579,7 @@ impl App {
         } else {
             Vec::new()
         };
-        if !same_layout
-            && let Some(db) = self.db()
-        {
+        if !same_layout && let Some(db) = self.db() {
             let _ = db.set_setting("inbox_layout", &self.layout.fingerprint);
         }
         self.normalize_group_order();
@@ -573,6 +590,7 @@ impl App {
         self.ai.smart_sort = snap.smart_sort;
         self.hide_external = snap.hide_external;
         self.show_team_reviews = snap.show_team_reviews;
+        self.show_my_drafts = snap.show_my_drafts;
         self.ai.enabled = snap.ai_enabled;
         self.agent = snap.agent;
         self.autonomy_branches = snap.autonomy_branches;
@@ -693,6 +711,11 @@ impl App {
         self.save_flag("show_team_reviews", self.show_team_reviews);
     }
 
+    pub fn toggle_show_my_drafts(&mut self) {
+        self.show_my_drafts = !self.show_my_drafts;
+        self.save_flag("show_my_drafts", self.show_my_drafts);
+    }
+
     pub(crate) fn set_ai_fields(&mut self, url: &str, model: &str, key: &str) {
         self.ai.url = TextEdit::new(url);
         self.ai.model = TextEdit::new(model);
@@ -726,7 +749,9 @@ impl App {
         self.ai.enabled = !self.ai.enabled;
         self.save_flag("ai_enabled", self.ai.enabled);
         if !self.ai.enabled {
-            self.ai.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.ai
+                .stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         // Review requests become (or stop being) candidates: ask again on the next sync.
         self.queue_judgments();
@@ -864,7 +889,11 @@ impl App {
 
     /// The section a pull request belongs to: the first whose conditions all hold. None when it
     /// belongs to none, which keeps it out of the Inbox.
-    pub(crate) fn action_group_of(&self, pr: &PullRequest, attention: PrAttention) -> Option<(u8, &str)> {
+    pub(crate) fn action_group_of(
+        &self,
+        pr: &PullRequest,
+        attention: PrAttention,
+    ) -> Option<(u8, &str)> {
         if self.ignored.contains(&pr.id) {
             return Some((IGNORED_GROUP, "Ignored"));
         }
@@ -897,12 +926,14 @@ impl App {
     pub(crate) fn in_inbox(&self, pr: &PullRequest, now: u64) -> bool {
         // An ignored pull request is listed, in its own section, while it would still be there.
         // Your own pull request waiting on its reviewers asks nothing of you, but belongs here: it
-        // is where you look for what is open. It does not count as needing you.
-        let waiting = !self.ignored.contains(&pr.id)
-            && pr.attention(self.draft_stale_hours, self.open_stale_hours, now)
-                == PrAttention::MyOpenWaiting;
+        // is where you look for what is open. So does a draft you are still working on, when the
+        // switch in Settings says so. Neither counts as needing you.
+        let attention = pr.attention(self.draft_stale_hours, self.open_stale_hours, now);
+        let in_progress = !self.ignored.contains(&pr.id)
+            && (attention == PrAttention::MyOpenWaiting
+                || (self.show_my_drafts && attention == PrAttention::MyDraftActive));
         let listed = self.needs_you(pr, now)
-            || waiting
+            || in_progress
             || (self.ignored.contains(&pr.id)
                 && InboxFilter::Inbox.matches(
                     pr,
@@ -1071,8 +1102,12 @@ impl App {
         }
         self.merge_armed = None;
         self.merging.push(pr_id.to_owned());
-        let (id, url, method, head) =
-            (pr.id.clone(), pr.url.clone(), pr.merge_method, pr.head_oid.clone());
+        let (id, url, method, head) = (
+            pr.id.clone(),
+            pr.url.clone(),
+            pr.merge_method,
+            pr.head_oid.clone(),
+        );
         self.merge_worker
             .request((), move |()| (id, github::merge_pr(&url, method, &head)));
     }
@@ -1105,7 +1140,9 @@ impl App {
         }
         let (repo, number, head) = (pr.repo.clone(), pr.number, pr.head_oid.clone());
         self.approve_jobs
-            .start(pr_id, (), self.waker.as_ref(), move || approve(&repo, number, &head));
+            .start(pr_id, (), self.waker.as_ref(), move || {
+                approve(&repo, number, &head)
+            });
     }
 
     /// Clear what blocks a pull request. One press is enough, unlike Merge and Approve: both
@@ -1209,9 +1246,10 @@ impl App {
             return;
         };
         let (url, method, head) = (pr.url.clone(), pr.merge_method, pr.head_oid.clone());
-        self.auto_merge_jobs.start(pr_id, enable, self.waker.as_ref(), move || {
-            github::set_auto_merge(&url, method, enable, &head)
-        });
+        self.auto_merge_jobs
+            .start(pr_id, enable, self.waker.as_ref(), move || {
+                github::set_auto_merge(&url, method, enable, &head)
+            });
     }
 
     /// Whether its approval is on its way to GitHub.
@@ -1541,23 +1579,26 @@ impl App {
             return;
         }
         if !self.preview {
-            let saved = self.db().ok_or("the saved data could not be opened".to_owned()).and_then(|db| {
-                db.save_onboarding(
-                    &self.repos,
-                    &self.prs,
-                    &[
-                        ("organization", self.organization.text.trim()),
-                        ("default_tab", self.default_filter.name()),
-                        ("draft_stale_hours", &self.draft_stale_hours.to_string()),
-                        ("open_stale_hours", &self.open_stale_hours.to_string()),
-                        (
-                            "native_notifications",
-                            if self.native_notifications { "1" } else { "0" },
-                        ),
-                    ],
-                )
-                .map_err(|e| e.to_string())
-            });
+            let saved = self
+                .db()
+                .ok_or("the saved data could not be opened".to_owned())
+                .and_then(|db| {
+                    db.save_onboarding(
+                        &self.repos,
+                        &self.prs,
+                        &[
+                            ("organization", self.organization.text.trim()),
+                            ("default_tab", self.default_filter.name()),
+                            ("draft_stale_hours", &self.draft_stale_hours.to_string()),
+                            ("open_stale_hours", &self.open_stale_hours.to_string()),
+                            (
+                                "native_notifications",
+                                if self.native_notifications { "1" } else { "0" },
+                            ),
+                        ],
+                    )
+                    .map_err(|e| e.to_string())
+                });
             if let Err(error) = saved {
                 self.status_banner = Some(Notice::error("Could not save setup.", error));
                 return;

@@ -224,7 +224,10 @@ pub(crate) fn ink_button(
         Ink::Armed(_) | Ink::On | Ink::Done(_) => (tone, tone),
     };
     let icon = if ink == Ink::Busy {
-        rune_kit::Spinner::new().size(14.0).color(c.text_muted).build(k)
+        rune_kit::Spinner::new()
+            .size(14.0)
+            .color(c.text_muted)
+            .build(k)
     } else {
         rune::icon(glyph, 14.0).color(icon_ink)
     };
@@ -246,7 +249,11 @@ pub(crate) fn ink_button(
             rune::Cursor::Default
         })
         .child(icon.a11y_hidden())
-        .child(text(label.to_owned()).font(TextStyle::new(12.5, 600.0)).color(text_ink));
+        .child(
+            text(label.to_owned())
+                .font(TextStyle::new(12.5, 600.0))
+                .color(text_ink),
+        );
     if live {
         button = button
             .hover(tone.alpha(0.12))
@@ -261,7 +268,12 @@ pub(crate) fn ink_button(
                     .pin(Some(6.0), None, Some(6.0), Some(2.0))
                     .h(2.0)
                     .instant_changes()
-                    .child(el().h_full().w_frac(left.clamp(0.0, 1.0)).radius(1.0).fill(tone)),
+                    .child(
+                        el().h_full()
+                            .w_frac(left.clamp(0.0, 1.0))
+                            .radius(1.0)
+                            .fill(tone),
+                    ),
             );
         }
         Ink::On => button = button.fill(tone.alpha(0.14)),
@@ -280,7 +292,11 @@ pub(crate) fn ink_button(
 
 /// Merge's violet, lighter on dark so it reads as text.
 pub(crate) fn merge_tone(k: &Kit) -> Color {
-    oklch(if k.dark { 0.72 } else { 0.56 }, if k.dark { 0.17 } else { 0.2 }, 295.0)
+    oklch(
+        if k.dark { 0.72 } else { 0.56 },
+        if k.dark { 0.17 } else { 0.2 },
+        295.0,
+    )
 }
 
 pub(crate) fn armed_left(armed: &Option<(String, std::time::Instant)>, id: &str) -> Option<f32> {
@@ -297,8 +313,11 @@ pub(crate) fn plural(n: u32, one: &str, many: &str) -> String {
 /// The status banner: the headline, then what the tool said, both wrapping. An error reads red.
 pub(crate) fn notice_view(k: &Kit, notice: &Notice) -> El {
     let c = &k.c;
-    let (headline_ink, detail_ink) =
-        if notice.error { (c.danger.fg, c.text_base) } else { (c.text_base, c.text_muted) };
+    let (headline_ink, detail_ink) = if notice.error {
+        (c.danger.fg, c.text_base)
+    } else {
+        (c.text_base, c.text_muted)
+    };
     let mut body = col().grow(1.0).min_w(0.0).gap(4.0).child(
         text(notice.headline.clone())
             .wrap()
@@ -306,7 +325,12 @@ pub(crate) fn notice_view(k: &Kit, notice: &Notice) -> El {
             .color(headline_ink),
     );
     if !notice.detail.is_empty() {
-        body = body.child(text(notice.detail.clone()).wrap().font(k.ty.small).color(detail_ink));
+        body = body.child(
+            text(notice.detail.clone())
+                .wrap()
+                .font(k.ty.small)
+                .color(detail_ink),
+        );
     }
     body
 }
@@ -314,7 +338,17 @@ pub(crate) fn notice_view(k: &Kit, notice: &Notice) -> El {
 /// The frame around [`notice_view`]: the danger tint for an error, the plain layer otherwise.
 pub(crate) fn notice_frame(k: &Kit, notice: &Notice) -> El {
     let c = &k.c;
-    let (fill, edge) =
-        if notice.error { (c.danger.bg, c.danger.border) } else { (c.layer_01, c.border_weak) };
-    row().w_full().px(12.0).py(8.0).gap(12.0).radius(6.0).fill(fill).border(1.0, edge)
+    let (fill, edge) = if notice.error {
+        (c.danger.bg, c.danger.border)
+    } else {
+        (c.layer_01, c.border_weak)
+    };
+    row()
+        .w_full()
+        .px(12.0)
+        .py(8.0)
+        .gap(12.0)
+        .radius(6.0)
+        .fill(fill)
+        .border(1.0, edge)
 }

@@ -122,7 +122,13 @@ pub fn model_value(provider: Provider, name: &str) -> String {
         .into_iter()
         .find(|(_, n)| n == name)
         .map_or_else(
-            || if name == DEFAULT_MODEL { String::new() } else { name.to_owned() },
+            || {
+                if name == DEFAULT_MODEL {
+                    String::new()
+                } else {
+                    name.to_owned()
+                }
+            },
             |(value, _)| value,
         )
 }
@@ -299,12 +305,19 @@ pub fn run(pr: &PullRequest, prompt: &str, cfg: &Config) -> Result<Outcome, Stri
             None => std::thread::sleep(Duration::from_millis(500)),
         }
     };
-    let (said, errors) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    let (said, errors) = (
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    );
     if !status.success() {
         return Err(format!(
             "{} failed: {}",
             cfg.provider.label(),
-            tail(if errors.trim().is_empty() { &said } else { &errors })
+            tail(if errors.trim().is_empty() {
+                &said
+            } else {
+                &errors
+            })
         ));
     }
 

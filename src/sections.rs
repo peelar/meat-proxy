@@ -7,7 +7,7 @@
 //!
 //! The sections are built in. The condition language is small: `any`, `asked:me`, `asked:team`,
 //! `asked:any`, `is:approved`, `is:blocked`, `is:changes-requested`, `is:unreviewed`,
-//! `is:waiting`, `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`,
+//! `is:waiting`, `is:active-draft`, `is:stale-draft`, `mine`, `theirs`, `external`, `bot`, `draft`, `lines>=N`, `repo:`, `author:`,
 //! `label:`, `title:`, or a question id; `!` in front negates.
 
 use crate::model::{PrAttention, PullRequest};
@@ -38,6 +38,7 @@ const DEFAULT_JSON: &str = r#"{
     { "name": "Address feedback", "when": ["is:changes-requested"] },
     { "name": "Team reviews", "when": ["asked:team"] },
     { "name": "Get a reviewer", "when": ["is:unreviewed"] },
+    { "name": "Get these ready", "when": ["is:active-draft"] },
     { "name": "Finish or close", "when": ["is:stale-draft"] },
     { "name": "Waiting on review", "when": ["is:waiting"] }
   ]
@@ -76,6 +77,7 @@ enum Is {
     ChangesRequested,
     Unreviewed,
     Waiting,
+    ActiveDraft,
     StaleDraft,
 }
 
@@ -271,6 +273,7 @@ impl Layout {
             }
             Term::Is(Is::Unreviewed) => subject.attention == PrAttention::MyOpenNeedsNudge,
             Term::Is(Is::Waiting) => subject.attention == PrAttention::MyOpenWaiting,
+            Term::Is(Is::ActiveDraft) => subject.attention == PrAttention::MyDraftActive,
             Term::Is(Is::StaleDraft) => subject.attention == PrAttention::MyDraftNeedsNudge,
             Term::External => pr.external,
             Term::Bot => is_bot(&pr.author),
@@ -311,7 +314,10 @@ pub fn is_bot(author: &str) -> bool {
     let author = author.to_ascii_lowercase();
     // Exact names: anyone can sign up as renovate-dev.
     author.ends_with("[bot]")
-        || matches!(author.as_str(), "dependabot" | "renovate" | "github-actions")
+        || matches!(
+            author.as_str(),
+            "dependabot" | "renovate" | "github-actions"
+        )
 }
 
 fn is_reserved(id: &str) -> bool {
@@ -344,6 +350,7 @@ fn parse_cond(word: &str, question_ids: &[&str]) -> Result<Cond, String> {
         "is:changes-requested" => Term::Is(Is::ChangesRequested),
         "is:unreviewed" => Term::Is(Is::Unreviewed),
         "is:waiting" => Term::Is(Is::Waiting),
+        "is:active-draft" => Term::Is(Is::ActiveDraft),
         "is:stale-draft" => Term::Is(Is::StaleDraft),
         _ => {
             if let Some(size) = lower.strip_prefix("lines") {

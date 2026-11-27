@@ -144,7 +144,6 @@ impl PrAttention {
                 | PrAttention::IncomingViaTeam
         )
     }
-
 }
 
 /// Something that keeps a pull request from merging and that its author can clear without anyone
@@ -614,7 +613,6 @@ impl PullRequest {
             span(self.idle_hours)
         )
     }
-
 }
 
 /// Per-repository configuration & smart importance telemetry.
@@ -976,7 +974,11 @@ mod tests {
         for readiness in [MergeReadiness::Behind, MergeReadiness::Conflicts] {
             let mut held = approved.clone();
             held.merge_readiness = readiness;
-            assert_eq!(attention(&held), PrAttention::MyOpenBlocked, "{readiness:?}");
+            assert_eq!(
+                attention(&held),
+                PrAttention::MyOpenBlocked,
+                "{readiness:?}"
+            );
             assert!(attention(&held).requires_action());
         }
         let mut red = approved.clone();
@@ -1021,8 +1023,14 @@ mod tests {
             name: name.into(),
             url: String::new(),
         };
-        red.failing_checks = vec![check("Lint, types, unit and E2E tests on every push"), check("b")];
-        assert_eq!(red.failing_label(), "CI failing: Lint, types, unit and E2E te… +1");
+        red.failing_checks = vec![
+            check("Lint, types, unit and E2E tests on every push"),
+            check("b"),
+        ];
+        assert_eq!(
+            red.failing_label(),
+            "CI failing: Lint, types, unit and E2E te… +1"
+        );
     }
 
     #[test]
@@ -1057,7 +1065,10 @@ mod tests {
 
         pr.merge_readiness = MergeReadiness::Conflicts;
         let both = pr.agent_prompt().unwrap();
-        let (merge, fix) = (both.find("resolve the conflicts"), both.find("fix what they report"));
+        let (merge, fix) = (
+            both.find("resolve the conflicts"),
+            both.find("fix what they report"),
+        );
         assert!(merge.is_some() && merge < fix, "conflicts first: {both}");
     }
 

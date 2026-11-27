@@ -15,8 +15,8 @@ mod github;
 mod judge;
 mod model;
 mod notify;
-mod profile;
 mod pace;
+mod profile;
 mod reorder;
 mod sections;
 mod stacks;
@@ -114,7 +114,13 @@ mod tests {
     fn a_sync_landing_keeps_snoozes_drops_removed_repos_and_names_failed_rules() {
         let mut s = live_app();
         let demo = scenes::demo_prs();
-        let (kept, gone) = (demo[0].clone(), demo.iter().find(|p| p.repo != demo[0].repo).unwrap().clone());
+        let (kept, gone) = (
+            demo[0].clone(),
+            demo.iter()
+                .find(|p| p.repo != demo[0].repo)
+                .unwrap()
+                .clone(),
+        );
         let mut snoozed = kept.clone();
         snoozed.snoozed_until_hour = u64::MAX;
         s.prs = vec![snoozed];
@@ -129,15 +135,28 @@ mod tests {
             activity: 0,
         }];
         let out = SyncOutput {
-            status: SyncStatus::Connected { username: "me".into() },
+            status: SyncStatus::Connected {
+                username: "me".into(),
+            },
             prs: vec![kept.clone(), gone],
             failed_rules: vec!["Release blockers: Bad query".into()],
         };
         s.sync_worker.request((), move |()| Ok(out));
         land(&mut s, |s| s.sync_worker.is_pending());
-        assert_eq!(s.prs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [kept.id.as_str()]);
-        assert_eq!(s.prs[0].snoozed_until_hour, u64::MAX, "the snooze outlives the sync");
-        assert!(s.status_banner.as_ref().is_some_and(|b| b.error && b.detail.contains("Release blockers")));
+        assert_eq!(
+            s.prs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            [kept.id.as_str()]
+        );
+        assert_eq!(
+            s.prs[0].snoozed_until_hour,
+            u64::MAX,
+            "the snooze outlives the sync"
+        );
+        assert!(
+            s.status_banner
+                .as_ref()
+                .is_some_and(|b| b.error && b.detail.contains("Release blockers"))
+        );
     }
 
     #[test]
@@ -148,7 +167,9 @@ mod tests {
         s.sync_worker.request((), move |()| {
             std::thread::sleep(std::time::Duration::from_millis(100));
             Ok(SyncOutput {
-                status: SyncStatus::Connected { username: "me".into() },
+                status: SyncStatus::Connected {
+                    username: "me".into(),
+                },
                 prs: first,
                 failed_rules: Vec::new(),
             })
@@ -158,7 +179,10 @@ mod tests {
         while s.sync_worker.is_pending() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let landed = s.sync_worker.take().expect("the running sync's answer is kept");
+        let landed = s
+            .sync_worker
+            .take()
+            .expect("the running sync's answer is kept");
         assert_eq!(landed.unwrap().prs.len(), expected);
     }
 
@@ -166,13 +190,19 @@ mod tests {
     fn unreadable_saved_data_blocks_setup_and_fetches_nothing() {
         let mut s = live_app();
         s.onboarded = false;
-        s.sync_status = SyncStatus::Connected { username: "me".into() };
-        s.boot_worker.request((), |()| Err(rusqlite::Error::InvalidQuery));
+        s.sync_status = SyncStatus::Connected {
+            username: "me".into(),
+        };
+        s.boot_worker
+            .request((), |()| Err(rusqlite::Error::InvalidQuery));
         land(&mut s, |s| s.boot_worker.is_pending());
         assert!(s.boot_failed);
         assert!(!s.sync_worker.is_pending() && !s.discovery_worker.is_pending());
         s.complete_onboarding();
-        assert!(!s.onboarded, "finishing setup would replace the saved pull requests");
+        assert!(
+            !s.onboarded,
+            "finishing setup would replace the saved pull requests"
+        );
     }
 
     #[test]
@@ -529,6 +559,34 @@ mod tests {
     }
 
     #[test]
+    fn my_drafts_in_progress_show_only_when_switched_on_and_never_count() {
+        let mut state = init();
+        state.preview = true;
+        state.prs = scenes::demo_prs();
+        let now = current_epoch_hour();
+        let draft = state.prs.iter_mut().find(|p| p.number == 397).unwrap();
+        draft.idle_hours = 2;
+        let draft = draft.clone();
+        assert!(!state.in_inbox(&draft, now), "off by default");
+        state.toggle_show_my_drafts();
+        assert!(state.in_inbox(&draft, now) && !state.needs_you(&draft, now));
+        assert_eq!(
+            section_name(&state, &draft).as_deref(),
+            Some("Get these ready")
+        );
+        // A forgotten draft keeps its own section, switch or not.
+        let mut stale = draft.clone();
+        stale.idle_hours = 120;
+        assert_eq!(
+            section_name(&state, &stale).as_deref(),
+            Some("Finish or close")
+        );
+        let db = Database::open_in_memory().unwrap();
+        db.set_setting("show_my_drafts", "1").unwrap();
+        assert!(db.load_snapshot().unwrap().show_my_drafts);
+    }
+
+    #[test]
     fn an_ignored_pull_request_moves_to_its_own_section_and_stops_counting() {
         let mut state = init();
         state.preview = true;
@@ -738,7 +796,10 @@ mod tests {
         assert!(!state.expanded.contains(&id));
 
         state.press_approve(&id);
-        assert!(state.approve_jobs.is_empty(), "a preview never calls GitHub");
+        assert!(
+            state.approve_jobs.is_empty(),
+            "a preview never calls GitHub"
+        );
     }
 
     /// A button stays visible when it is what the row asks of you; one that can do nothing yet
@@ -781,9 +842,8 @@ mod tests {
             pr.merge_readiness = readiness;
             pr.can_update_branch = can_update;
         };
-        let section = |state: &App| {
-            section_name(state, state.prs.iter().find(|p| p.id == approved).unwrap())
-        };
+        let section =
+            |state: &App| section_name(state, state.prs.iter().find(|p| p.id == approved).unwrap());
         let opacity = |rt: &Runtime<App>, key: &str| {
             rt.elements()
                 .into_iter()
@@ -839,10 +899,17 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(0.1);
         let copied = clipboard.text().expect("a prompt on the clipboard");
-        assert!(copied.contains(&format!("gh pr checkout {url}")), "{}", *copied);
+        assert!(
+            copied.contains(&format!("gh pr checkout {url}")),
+            "{}",
+            *copied
+        );
         assert!(copied.contains("resolve the conflicts"));
         // The button says so, and the press did not open the row.
-        assert_eq!(rt.state.copied.as_ref().map(|(id, _)| id.as_str()), Some(conflicted));
+        assert_eq!(
+            rt.state.copied.as_ref().map(|(id, _)| id.as_str()),
+            Some(conflicted)
+        );
         assert!(!rt.state.expanded.contains(conflicted));
     }
 
@@ -939,8 +1006,11 @@ mod tests {
         assert!(!snapshot.autonomy_branches && !snapshot.autonomy_reviewers);
 
         db.set_setting("autonomy_reviewers", "1").unwrap();
-        db.set_setting("autonomy_done", "PR_1:update-branch:abc\nPR_2:rerequest:def")
-            .unwrap();
+        db.set_setting(
+            "autonomy_done",
+            "PR_1:update-branch:abc\nPR_2:rerequest:def",
+        )
+        .unwrap();
         let snapshot = db.load_snapshot().unwrap();
         assert!(!snapshot.autonomy_branches && snapshot.autonomy_reviewers);
         assert!(snapshot.autonomy_done.contains_key("PR_2:rerequest:def"));
@@ -989,7 +1059,10 @@ mod tests {
         let mut rt = Runtime::new(state, view, (920.0, 1500.0), Env::new(true, 2.0));
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
-        assert!(rt.find(&format!("pace-pill-{id}")).is_some(), "the row says it was quick");
+        assert!(
+            rt.find(&format!("pace-pill-{id}")).is_some(),
+            "the row says it was quick"
+        );
         assert!(rt.find("pace-body").is_some());
         // Folding keeps the header and hides the rest.
         let (x, y) = rt.find("pace-header").unwrap();
@@ -1020,9 +1093,14 @@ mod tests {
         let mut rt = Runtime::new(state, view, (1000.0, 1500.0), Env::new(true, 1.0));
         rt.frame(0.0);
         let rect = |rt: &Runtime<App>, key: &str| {
-            rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect)
+            rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .map(|e| e.rect)
         };
-        let (x, y) = rt.find("option-agent-model-trigger").expect("the field is in Settings");
+        let (x, y) = rt
+            .find("option-agent-model-trigger")
+            .expect("the field is in Settings");
         rt.pointer_move(x, y);
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -1031,8 +1109,14 @@ mod tests {
         assert!(rt.state.agent_model_open);
         let field = rect(&rt, "option-agent-model-trigger").unwrap();
         let list = rect(&rt, "option-agent-model-content").expect("the listbox opens");
-        assert!(list[1] >= field[1] + field[3] - 1.0, "below its field: {list:?} vs {field:?}");
-        assert!(list[0] < field[0] + field[2] && list[0] + list[2] > field[0], "over its field");
+        assert!(
+            list[1] >= field[1] + field[3] - 1.0,
+            "below its field: {list:?} vs {field:?}"
+        );
+        assert!(
+            list[0] < field[0] + field[2] && list[0] + list[2] > field[0],
+            "over its field"
+        );
         let (x, y) = rt.find("option2").expect("an option to choose");
         rt.pointer_move(x, y);
         rt.pointer_down(x, y);
