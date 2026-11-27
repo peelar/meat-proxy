@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.26
 
 - A new switch in Settings, Show my drafts in the Inbox, lists the drafts you're still working on under Get these ready. They don't count as needing your thumb. Drafts left alone for days still show under Finish or close.
 - Messages at the top of the Inbox wrap instead of running off the edge, and errors show in red with what went wrong on its own lines.
